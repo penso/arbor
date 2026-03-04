@@ -1,0 +1,23 @@
+[workspace]
+default-members = ["crates/arbor-core", "crates/arbor-gui"]
+members = ["crates/arbor-core", "crates/arbor-gui"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.93"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "deny"
+
+[workspace.lints.clippy]
+expect_used = "deny"
+unwrap_used = "deny"
+
+[workspace.dependencies]
+anyhow = "1"
+gpui = "0.2.2"
+thiserror = "2"

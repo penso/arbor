@@ -1,0 +1,17 @@
+[package]
+name = "arbor-gui"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "arbor"
+path = "src/main.rs"
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+gpui = { workspace = true }
+
+[lints]
+workspace = true
