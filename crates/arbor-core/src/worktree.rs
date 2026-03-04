@@ -1,9 +1,10 @@
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Output},
+use {
+    std::{
+        path::{Path, PathBuf},
+        process::{Command, Output},
+    },
+    thiserror::Error,
 };
-
-use thiserror::Error;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Worktree {

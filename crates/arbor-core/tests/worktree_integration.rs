@@ -1,8 +1,9 @@
 #![allow(clippy::expect_used)]
 
-use std::{fs, path::Path, process::Command};
-
-use arbor_core::worktree;
+use {
+    arbor_core::worktree,
+    std::{fs, path::Path, process::Command},
+};
 
 #[test]
 fn lists_real_git_worktrees() {

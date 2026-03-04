@@ -1,11 +1,10 @@
-use std::env;
-
 use {
     arbor_core::worktree,
     gpui::{
-        App, Application, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*,
-        px, rgb, size,
+        App, Application, Bounds, Context, FontWeight, Window, WindowBounds, WindowOptions, div,
+        prelude::*, px, rgb, size,
     },
+    std::env,
 };
 
 #[derive(Debug, Clone)]
@@ -121,7 +120,12 @@ impl Render for ArborWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_2xl().font_semibold().child("Arbor"))
+            .child(
+                div()
+                    .text_2xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Arbor"),
+            )
             .child(
                 div()
                     .text_sm()
@@ -162,7 +166,12 @@ fn render_worktree_row(row: WorktreeRow) -> impl IntoElement {
         .border_color(rgb(0x2b3544))
         .bg(rgb(0x161d26))
         .p_3()
-        .child(div().text_sm().font_semibold().child(row.path))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(row.path),
+        )
         .child(div().text_xs().text_color(rgb(0xa2adbb)).child(format!(
             "branch: {}    head: {}    status: {}",
             row.branch, row.head, row.status,

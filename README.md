@@ -17,6 +17,16 @@ Use `just` as the task runner:
 - `just test`
 - `just run`
 
+## Changelog
+
+This repo uses [`git-cliff`](https://git-cliff.org/) for changelog generation.
+
+- `just changelog`: generate/update `CHANGELOG.md`
+- `just changelog-unreleased`: preview unreleased entries in stdout
+- `just changelog-release <version>`: preview a release section tagged as `v<version>`
+
+Config lives in `cliff.toml`.
+
 ## Notes
 
 The GUI currently focuses on repository discovery and worktree listing. Add/remove flows are implemented in `arbor-core` and can be wired into UI actions next.
