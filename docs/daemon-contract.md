@@ -15,6 +15,7 @@ Defined in `arbor-core::daemon`:
   - `signal`
   - `detach`
   - `kill`
+  - `snapshot`
   - `list_sessions`
 - `DaemonSessionStore`
   - `load`
@@ -32,6 +33,19 @@ Defined in `arbor-core::daemon`:
 - `shell`
 - `cols`
 - `rows`
+- `title` (optional)
+- `last_command` (optional)
+- `output_tail` (optional)
+- `exit_code` (optional)
+- `state` (optional: `running`, `completed`, `failed`)
+- `updated_at_unix_ms` (optional)
+
+`TerminalSnapshot` stores:
+- `session_id`
+- `output_tail`
+- `exit_code`
+- `state`
+- `updated_at_unix_ms`
 
 ## Restart Persistence Model
 1. On daemon create/attach, `upsert` the session record.
@@ -41,7 +55,7 @@ Defined in `arbor-core::daemon`:
 5. If daemon is unavailable, UI can still show restorable session metadata from the store.
 
 ## Next Steps
-1. Add daemon host crate implementing `TerminalDaemon`.
-2. Add event stream contract (`data`, `exit`, `disconnect`, `error`).
-3. Persist scrollback snapshots for cold restore.
+1. Extend `arbor-gui` from snapshot polling to streaming updates over daemon WebSocket.
+2. Add richer event stream payloads (`data`, `exit`, `disconnect`, `error` + dimensions + title updates).
+3. Persist full scrollback snapshots for cold restore.
 4. Promote JSON store behind same trait to SQLite implementation.

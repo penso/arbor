@@ -1,0 +1,13 @@
+[package]
+name = "arbor-web-ui"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "arbor_web_ui"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
