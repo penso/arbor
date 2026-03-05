@@ -82,6 +82,8 @@ const DIFF_ZONEMAP_WIDTH_PX: f32 = 14.;
 const DIFF_ZONEMAP_MARGIN_PX: f32 = 4.;
 const DIFF_ZONEMAP_MARKER_HEIGHT_PX: f32 = 2.;
 const DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX: f32 = 12.;
+const DIFF_FONT_SIZE_PX: f32 = 12.0;
+const DIFF_HUNK_CONTEXT_LINES: usize = 3;
 const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
 
@@ -2391,7 +2393,13 @@ impl ArborWindow {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
-                let wrap_columns = this.estimated_diff_wrap_columns(terminal_cell_width_px(cx));
+                let cell_width = diff_cell_width_px(cx);
+                let wrap_columns = this
+                    .live_diff_list_width_px()
+                    .map(|list_width| {
+                        this.estimated_diff_wrap_columns_for_list_width(list_width, cell_width)
+                    })
+                    .unwrap_or_else(|| this.estimated_diff_wrap_columns(cell_width));
                 let Some(session) = this
                     .diff_sessions
                     .iter_mut()
@@ -2872,6 +2880,14 @@ impl ArborWindow {
             .map(|window| window.width as f32)
             .unwrap_or(fallback_window_width)
             .max(600.);
+        self.estimated_diff_wrap_columns_for_window_width(window_width, cell_width_px)
+    }
+
+    fn estimated_diff_wrap_columns_for_window_width(
+        &self,
+        window_width: f32,
+        cell_width_px: f32,
+    ) -> usize {
         let center_width = (window_width
             - self.left_pane_width
             - self.right_pane_width
@@ -2879,6 +2895,14 @@ impl ArborWindow {
             .max(PANE_CENTER_MIN_WIDTH);
         let list_width =
             (center_width - DIFF_ZONEMAP_WIDTH_PX - (DIFF_ZONEMAP_MARGIN_PX * 2.)).max(80.);
+        self.estimated_diff_wrap_columns_for_list_width(list_width, cell_width_px)
+    }
+
+    fn estimated_diff_wrap_columns_for_list_width(
+        &self,
+        list_width: f32,
+        cell_width_px: f32,
+    ) -> usize {
         let column_width = (list_width / 2.).max(40.);
         let safe_cell_width = cell_width_px.max(1.);
         let line_number_width = (DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * safe_cell_width) + 12.;
@@ -2892,7 +2916,20 @@ impl ArborWindow {
             - horizontal_gaps)
             .max(safe_cell_width);
         let estimated_columns = (text_width / safe_cell_width).floor() as usize;
-        estimated_columns.clamp(12, 240)
+        estimated_columns.saturating_add(2).clamp(12, 320)
+    }
+
+    fn live_diff_list_width_px(&self) -> Option<f32> {
+        let width = self
+            .diff_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .bounds()
+            .size
+            .width
+            .to_f64() as f32;
+        (width.is_finite() && width >= 80.).then_some(width)
     }
 
     fn rewrap_diff_sessions_if_needed(&mut self, wrap_columns: usize) {
@@ -3450,8 +3487,18 @@ impl ArborWindow {
             )
     }
 
-    fn render_terminal_panel(&mut self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let wrap_columns = self.estimated_diff_wrap_columns(terminal_cell_width_px(cx));
+    fn render_terminal_panel(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let cell_width = diff_cell_width_px(cx);
+        let wrap_columns = if let Some(list_width) = self.live_diff_list_width_px() {
+            self.estimated_diff_wrap_columns_for_list_width(list_width, cell_width)
+        } else {
+            let window_width = f32::from(window.window_bounds().get_bounds().size.width).max(600.);
+            self.estimated_diff_wrap_columns_for_window_width(window_width, cell_width)
+        };
         self.rewrap_diff_sessions_if_needed(wrap_columns);
 
         let theme = self.theme();
@@ -3540,7 +3587,7 @@ impl ArborWindow {
                                 let tab_count = tabs.len();
                                 let relation =
                                     active_tab_index.map(|active_index| index.cmp(&active_index));
-                                let (tab_icon, tab_label) = match tab {
+                                let (tab_icon, tab_label, terminal_icon) = match tab {
                                     CenterTab::Terminal(session_id) => (
                                         TAB_ICON_TERMINAL,
                                         self.terminals
@@ -3548,6 +3595,7 @@ impl ArborWindow {
                                             .find(|session| session.id == session_id)
                                             .map(terminal_tab_title)
                                             .unwrap_or_else(|| "terminal".to_owned()),
+                                        true,
                                     ),
                                     CenterTab::Diff(diff_id) => (
                                         TAB_ICON_DIFF,
@@ -3556,6 +3604,7 @@ impl ArborWindow {
                                             .find(|session| session.id == diff_id)
                                             .map(diff_tab_title)
                                             .unwrap_or_else(|| "diff".to_owned()),
+                                        false,
                                     ),
                                 };
                                 let tab_id = match tab {
@@ -3581,7 +3630,8 @@ impl ArborWindow {
                                     .child(
                                         div()
                                             .font_family(FONT_MONO)
-                                            .text_xs()
+                                            .when(terminal_icon, |this| this.text_size(px(24.)))
+                                            .when(!terminal_icon, |this| this.text_xs())
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
                                             } else {
@@ -3770,11 +3820,13 @@ impl ArborWindow {
                     })
                     .when_some(active_diff_session, |this, session| {
                         let mono_font = terminal_mono_font(cx);
+                        let diff_cell_width = diff_cell_width_px(cx);
                         this.child(render_diff_session(
                             session,
                             theme,
                             &self.diff_scroll_handle,
                             mono_font,
+                            diff_cell_width,
                         ))
                     }),
             )
@@ -4538,18 +4590,29 @@ fn build_side_by_side_diff_lines(before_text: &str, after_text: &str) -> Vec<Dif
     let input = BlobInternedInput::new(before_text.as_bytes(), after_text.as_bytes());
     let mut diff = BlobDiff::compute(DiffAlgorithm::Histogram, &input);
     diff.postprocess_lines(&input);
+    let hunks = diff.hunks().collect::<Vec<_>>();
+
+    if hunks.is_empty() {
+        return Vec::new();
+    }
 
     let mut lines = Vec::new();
     let mut before_cursor = 0_usize;
     let mut after_cursor = 0_usize;
+    let hunk_count = hunks.len();
 
-    for hunk in diff.hunks() {
+    for (hunk_index, hunk) in hunks.iter().enumerate() {
         let before_start = hunk.before.start as usize;
         let before_end = hunk.before.end as usize;
         let after_start = hunk.after.start as usize;
         let after_end = hunk.after.end as usize;
 
-        push_context_diff_lines(
+        let (leading_context, trailing_context) = if hunk_index == 0 {
+            (0, DIFF_HUNK_CONTEXT_LINES)
+        } else {
+            (DIFF_HUNK_CONTEXT_LINES, DIFF_HUNK_CONTEXT_LINES)
+        };
+        push_hunk_context_lines(
             &mut lines,
             &before_rope,
             &after_rope,
@@ -4557,6 +4620,8 @@ fn build_side_by_side_diff_lines(before_text: &str, after_text: &str) -> Vec<Dif
             before_start,
             after_cursor,
             after_start,
+            leading_context,
+            trailing_context,
         );
 
         let removed_count = before_end.saturating_sub(before_start);
@@ -4584,19 +4649,97 @@ fn build_side_by_side_diff_lines(before_text: &str, after_text: &str) -> Vec<Dif
 
         before_cursor = before_end;
         after_cursor = after_end;
+
+        if hunk_index + 1 == hunk_count {
+            push_hunk_context_lines(
+                &mut lines,
+                &before_rope,
+                &after_rope,
+                before_cursor,
+                input.before.len(),
+                after_cursor,
+                input.after.len(),
+                DIFF_HUNK_CONTEXT_LINES,
+                0,
+            );
+        }
     }
 
-    push_context_diff_lines(
-        &mut lines,
-        &before_rope,
-        &after_rope,
-        before_cursor,
-        input.before.len(),
-        after_cursor,
-        input.after.len(),
-    );
-
     lines
+}
+
+fn push_hunk_context_lines(
+    output: &mut Vec<DiffLine>,
+    before_rope: &Rope,
+    after_rope: &Rope,
+    before_start: usize,
+    before_end: usize,
+    after_start: usize,
+    after_end: usize,
+    leading_context: usize,
+    trailing_context: usize,
+) {
+    let before_count = before_end.saturating_sub(before_start);
+    let after_count = after_end.saturating_sub(after_start);
+    if before_count == 0 && after_count == 0 {
+        return;
+    }
+
+    let leading_before_count = leading_context.min(before_count);
+    let leading_after_count = leading_context.min(after_count);
+    let leading_before_end = before_start.saturating_add(leading_before_count);
+    let leading_after_end = after_start.saturating_add(leading_after_count);
+
+    let trailing_before_available = before_end.saturating_sub(leading_before_end);
+    let trailing_after_available = after_end.saturating_sub(leading_after_end);
+    let trailing_before_count = trailing_context.min(trailing_before_available);
+    let trailing_after_count = trailing_context.min(trailing_after_available);
+    let trailing_before_start = before_end.saturating_sub(trailing_before_count);
+    let trailing_after_start = after_end.saturating_sub(trailing_after_count);
+
+    if leading_before_end > before_start || leading_after_end > after_start {
+        push_context_diff_lines(
+            output,
+            before_rope,
+            after_rope,
+            before_start,
+            leading_before_end,
+            after_start,
+            leading_after_end,
+        );
+    }
+
+    let hidden_before_count = trailing_before_start.saturating_sub(leading_before_end);
+    let hidden_after_count = trailing_after_start.saturating_sub(leading_after_end);
+    if hidden_before_count > 0 || hidden_after_count > 0 {
+        push_collapsed_gap_line(output, hidden_before_count, hidden_after_count);
+    }
+
+    if trailing_before_start < before_end || trailing_after_start < after_end {
+        push_context_diff_lines(
+            output,
+            before_rope,
+            after_rope,
+            trailing_before_start,
+            before_end,
+            trailing_after_start,
+            after_end,
+        );
+    }
+}
+
+fn push_collapsed_gap_line(
+    output: &mut Vec<DiffLine>,
+    hidden_before_count: usize,
+    hidden_after_count: usize,
+) {
+    output.push(DiffLine {
+        left_line_number: None,
+        right_line_number: None,
+        left_text: format!("… {hidden_before_count} unchanged lines hidden"),
+        right_text: format!("… {hidden_after_count} unchanged lines hidden"),
+        kind: DiffLineKind::Context,
+    });
 }
 
 fn push_context_diff_lines(
@@ -4684,6 +4827,7 @@ fn render_diff_session(
     theme: ThemePalette,
     scroll_handle: &UniformListScrollHandle,
     mono_font: gpui::Font,
+    diff_cell_width: f32,
 ) -> Div {
     let path_label = truncate_middle_text(&session.title, 84);
     let line_count = session.lines.len();
@@ -4710,7 +4854,7 @@ fn render_diff_session(
                 .child(
                     div()
                         .font(mono_font.clone())
-                        .text_xs()
+                        .text_size(px(DIFF_FONT_SIZE_PX))
                         .text_color(rgb(theme.text_muted))
                         .child(path_label),
                 )
@@ -4767,6 +4911,7 @@ fn render_diff_session(
                                                     lines[index].clone(),
                                                     theme,
                                                     mono_font.clone(),
+                                                    diff_cell_width,
                                                 )
                                             })
                                             .collect::<Vec<_>>()
@@ -4789,6 +4934,7 @@ fn render_diff_row(
     line: DiffLine,
     theme: ThemePalette,
     mono_font: gpui::Font,
+    diff_cell_width: f32,
 ) -> impl IntoElement {
     if line.kind == DiffLineKind::FileHeader {
         return div()
@@ -4808,7 +4954,7 @@ fn render_diff_row(
                 div()
                     .min_w_0()
                     .font(mono_font)
-                    .text_xs()
+                    .text_size(px(DIFF_FONT_SIZE_PX))
                     .font_weight(FontWeight::SEMIBOLD)
                     .whitespace_nowrap()
                     .text_color(rgb(theme.text_primary))
@@ -4837,6 +4983,7 @@ fn render_diff_row(
             left_text_color,
             theme,
             mono_font.clone(),
+            diff_cell_width,
         ))
         .child(render_diff_column(
             session_id,
@@ -4849,6 +4996,7 @@ fn render_diff_row(
             right_text_color,
             theme,
             mono_font,
+            diff_cell_width,
         ))
 }
 
@@ -4863,8 +5011,9 @@ fn render_diff_column(
     text_color: u32,
     theme: ThemePalette,
     mono_font: gpui::Font,
+    diff_cell_width: f32,
 ) -> impl IntoElement {
-    let number_width = px((DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * TERMINAL_CELL_WIDTH_PX) + 12.);
+    let number_width = px((DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * diff_cell_width) + 12.);
 
     let column_id = diff_row_side_element_id("diff-column", session_id, row_index, side);
     let marker_id = diff_row_side_element_id("diff-marker", session_id, row_index, side);
@@ -4889,7 +5038,7 @@ fn render_diff_column(
                         .w(number_width)
                         .flex_none()
                         .text_right()
-                        .text_xs()
+                        .text_size(px(DIFF_FONT_SIZE_PX))
                         .text_color(rgb(theme.text_disabled))
                         .child(line_number.map_or(String::new(), |line| line.to_string())),
                 )
@@ -4898,7 +5047,7 @@ fn render_diff_column(
                         .id(marker_id)
                         .w(px(10.))
                         .flex_none()
-                        .text_xs()
+                        .text_size(px(DIFF_FONT_SIZE_PX))
                         .text_color(rgb(diff_marker_color(marker)))
                         .child(marker.to_string()),
                 )
@@ -4908,7 +5057,7 @@ fn render_diff_column(
                         .min_w_0()
                         .flex_1()
                         .font(mono_font)
-                        .text_xs()
+                        .text_size(px(DIFF_FONT_SIZE_PX))
                         .whitespace_nowrap()
                         .text_color(rgb(text_color))
                         .child(if text.is_empty() {
@@ -6421,6 +6570,20 @@ fn terminal_cell_width_px(cx: &App) -> f32 {
         .unwrap_or(TERMINAL_CELL_WIDTH_PX)
 }
 
+fn diff_cell_width_px(cx: &App) -> f32 {
+    let text_system = cx.text_system();
+    let mono_font = terminal_mono_font(cx);
+    let font_id = text_system.resolve_font(&mono_font);
+    let fallback = (TERMINAL_CELL_WIDTH_PX * (DIFF_FONT_SIZE_PX / TERMINAL_FONT_SIZE_PX)).max(1.);
+
+    text_system
+        .advance(font_id, px(DIFF_FONT_SIZE_PX), 'm')
+        .map(|size| size.width.to_f64() as f32)
+        .ok()
+        .filter(|width| width.is_finite() && *width > 0.)
+        .unwrap_or(fallback)
+}
+
 fn terminal_line_height_px(cx: &App) -> f32 {
     let text_system = cx.text_system();
     let mono_font = terminal_mono_font(cx);
@@ -7002,5 +7165,24 @@ mod tests {
         assert_eq!(removal[1].kind, DiffLineKind::Removed);
         assert_eq!(removal[1].left_text, "two");
         assert_eq!(removal[1].right_text, "");
+    }
+
+    #[test]
+    fn side_by_side_diff_hides_large_unchanged_gaps() {
+        let before = "a1\na2\na3\na4\na5\na6\na7\na8\na9\na10\n";
+        let after = "a1\na2\na3\na4\na5\nchanged\na7\na8\na9\na10\n";
+        let lines = build_side_by_side_diff_lines(before, after);
+
+        assert!(!lines.is_empty());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.left_text.contains("unchanged lines hidden"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.left_text == "a3" && line.right_text == "a3")
+        );
     }
 }
