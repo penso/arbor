@@ -26,10 +26,15 @@ fn reports_modified_and_untracked_files() {
     let changes = changes::changed_files(&repo_path).expect("gix status should succeed");
 
     assert!(changes.iter().any(|change| {
-        change.path.as_path() == Path::new("tracked.txt") && change.kind == ChangeKind::Modified
+        change.path.as_path() == Path::new("tracked.txt")
+            && change.kind == ChangeKind::Modified
+            && (change.additions > 0 || change.deletions > 0)
     }));
     assert!(changes.iter().any(|change| {
-        change.path.as_path() == Path::new("untracked.txt") && change.kind == ChangeKind::Added
+        change.path.as_path() == Path::new("untracked.txt")
+            && change.kind == ChangeKind::Added
+            && change.additions > 0
+            && change.deletions == 0
     }));
 }
 

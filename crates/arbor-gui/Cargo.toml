@@ -6,14 +6,17 @@ rust-version.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "arbor"
+name = "Arbor"
 path = "src/main.rs"
 
 [dependencies]
 arbor-core = { path = "../arbor-core" }
 alacritty_terminal = { workspace = true }
+config = { workspace = true }
 gpui = { workspace = true }
 portable-pty = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
