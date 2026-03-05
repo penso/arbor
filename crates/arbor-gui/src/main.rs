@@ -11,20 +11,25 @@ use {
         daemon::{self, DaemonSessionRecord},
         worktree,
     },
+    gix_diff::blob::v2::{
+        Algorithm as DiffAlgorithm, Diff as BlobDiff, InternedInput as BlobInternedInput,
+    },
     gpui::{
         App, Application, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
         FocusHandle, FontFallbacks, FontFeatures, FontWeight, KeyBinding, KeyDownEvent, Keystroke,
         Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PathPromptOptions, ScrollHandle, Stateful, SystemMenuType, TextRun, TitlebarOptions,
-        Window, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions, actions, canvas,
-        div, fill, font, img, point, prelude::*, px, rgb, size,
+        PathPromptOptions, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
+        TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+        WindowDecorations, WindowOptions, actions, canvas, div, fill, font, img, point, prelude::*,
+        px, rgb, size, uniform_list,
     },
+    ropey::Rope,
     std::{
         collections::HashMap,
         env, fs,
         path::{Path, PathBuf},
         process::Command,
-        sync::Mutex,
+        sync::{Arc, Mutex},
         time::{Duration, Instant, SystemTime},
     },
     terminal_backend::{
@@ -64,6 +69,12 @@ const RIGHT_PANE_MIN_WIDTH: f32 = 240.;
 const RIGHT_PANE_MAX_WIDTH: f32 = 560.;
 const PANE_RESIZE_HANDLE_WIDTH: f32 = 8.;
 const PANE_CENTER_MIN_WIDTH: f32 = 360.;
+const DIFF_ROW_HEIGHT_PX: f32 = 19.;
+const DIFF_LINE_NUMBER_WIDTH_CHARS: usize = 5;
+const DIFF_ZONEMAP_WIDTH_PX: f32 = 14.;
+const DIFF_ZONEMAP_MARGIN_PX: f32 = 4.;
+const DIFF_ZONEMAP_MARKER_HEIGHT_PX: f32 = 2.;
+const DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX: f32 = 12.;
 
 static QUIT_ARMED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -156,6 +167,40 @@ enum TerminalState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CenterTab {
+    Terminal(u64),
+    Diff(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLineKind {
+    FileHeader,
+    Context,
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone)]
+struct DiffLine {
+    left_line_number: Option<usize>,
+    right_line_number: Option<usize>,
+    left_text: String,
+    right_text: String,
+    kind: DiffLineKind,
+}
+
+#[derive(Debug, Clone)]
+struct DiffSession {
+    id: u64,
+    worktree_path: PathBuf,
+    title: String,
+    lines: Arc<[DiffLine]>,
+    file_row_indices: HashMap<PathBuf, usize>,
+    is_loading: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DraggedPaneDivider {
     Left,
     Right,
@@ -224,18 +269,24 @@ struct ArborWindow {
     worktree_prs_loading: bool,
     active_worktree_index: Option<usize>,
     changed_files: Vec<ChangedFile>,
+    selected_changed_file: Option<PathBuf>,
     terminals: Vec<TerminalSession>,
+    diff_sessions: Vec<DiffSession>,
+    active_diff_session_id: Option<u64>,
     active_terminal_by_worktree: HashMap<PathBuf, u64>,
     next_terminal_id: u64,
+    next_diff_session_id: u64,
     active_backend_kind: TerminalBackendKind,
     theme_kind: ThemeKind,
     left_pane_width: f32,
     right_pane_width: f32,
     terminal_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
+    diff_scroll_handle: UniformListScrollHandle,
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
     create_worktree_modal: Option<CreateWorktreeModal>,
+    pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
@@ -279,9 +330,13 @@ impl ArborWindow {
                     worktree_prs_loading: false,
                     active_worktree_index: None,
                     changed_files: Vec::new(),
+                    selected_changed_file: None,
                     terminals: Vec::new(),
+                    diff_sessions: Vec::new(),
+                    active_diff_session_id: None,
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
+                    next_diff_session_id: 1,
                     active_backend_kind: TerminalBackendKind::Embedded,
                     theme_kind: ThemeKind::One,
                     left_pane_width: startup_ui_state
@@ -292,9 +347,11 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_worktree_modal: None,
+                    pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
@@ -322,9 +379,13 @@ impl ArborWindow {
                     worktree_prs_loading: false,
                     active_worktree_index: None,
                     changed_files: Vec::new(),
+                    selected_changed_file: None,
                     terminals: Vec::new(),
+                    diff_sessions: Vec::new(),
+                    active_diff_session_id: None,
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
+                    next_diff_session_id: 1,
                     active_backend_kind: TerminalBackendKind::Embedded,
                     theme_kind: ThemeKind::One,
                     left_pane_width: startup_ui_state
@@ -335,9 +396,11 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_worktree_modal: None,
+                    pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
@@ -421,9 +484,13 @@ impl ArborWindow {
             worktree_prs_loading: false,
             active_worktree_index: None,
             changed_files: Vec::new(),
+            selected_changed_file: None,
             terminals: Vec::new(),
+            diff_sessions: Vec::new(),
+            active_diff_session_id: None,
             active_terminal_by_worktree: HashMap::new(),
             next_terminal_id: 1,
+            next_diff_session_id: 1,
             active_backend_kind,
             theme_kind,
             left_pane_width: startup_ui_state
@@ -434,9 +501,11 @@ impl ArborWindow {
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
+            diff_scroll_handle: UniformListScrollHandle::new(),
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
             create_worktree_modal: None,
+            pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             last_persisted_ui_state: startup_ui_state,
             last_ui_state_error: None,
@@ -752,6 +821,19 @@ impl ArborWindow {
                 .iter()
                 .any(|worktree| worktree.path.as_path() == path.as_path())
         });
+        self.diff_sessions.retain(|session| {
+            self.worktrees
+                .iter()
+                .any(|worktree| worktree.path == session.worktree_path)
+        });
+        if self.active_diff_session_id.is_some_and(|diff_id| {
+            !self
+                .diff_sessions
+                .iter()
+                .any(|session| session.id == diff_id)
+        }) {
+            self.active_diff_session_id = None;
+        }
 
         self.sync_active_repository_from_selected_worktree();
 
@@ -967,6 +1049,31 @@ impl ArborWindow {
             .collect()
     }
 
+    fn selected_worktree_diff_sessions(&self) -> Vec<&DiffSession> {
+        let Some(worktree_path) = self.selected_worktree_path() else {
+            return Vec::new();
+        };
+
+        self.diff_sessions
+            .iter()
+            .filter(|session| session.worktree_path.as_path() == worktree_path)
+            .collect()
+    }
+
+    fn active_center_tab_for_selected_worktree(&self) -> Option<CenterTab> {
+        if let Some(diff_id) = self.active_diff_session_id {
+            let worktree_path = self.selected_worktree_path()?;
+            if self.diff_sessions.iter().any(|session| {
+                session.id == diff_id && session.worktree_path.as_path() == worktree_path
+            }) {
+                return Some(CenterTab::Diff(diff_id));
+            }
+        }
+
+        self.active_terminal_id_for_selected_worktree()
+            .map(CenterTab::Terminal)
+    }
+
     fn ensure_selected_worktree_terminal(&mut self) -> bool {
         let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
             return false;
@@ -1031,18 +1138,44 @@ impl ArborWindow {
         true
     }
 
-    fn close_active_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.active_terminal_id_for_selected_worktree() else {
-            return;
+    fn close_diff_session_by_id(&mut self, session_id: u64) -> bool {
+        let Some(index) = self
+            .diff_sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return false;
         };
 
-        if self.close_terminal_session_by_id(session_id) {
-            self.sync_daemon_session_store(cx);
-            self.terminal_scroll_handle.scroll_to_bottom();
-            window.focus(&self.terminal_focus);
-            self.focus_terminal_on_next_render = false;
-            cx.notify();
+        self.diff_sessions.remove(index);
+        if self.active_diff_session_id == Some(session_id) {
+            self.active_diff_session_id = None;
         }
+        true
+    }
+
+    fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.active_center_tab_for_selected_worktree() {
+            Some(CenterTab::Terminal(session_id)) => {
+                if self.close_terminal_session_by_id(session_id) {
+                    self.sync_daemon_session_store(cx);
+                    self.terminal_scroll_handle.scroll_to_bottom();
+                    window.focus(&self.terminal_focus);
+                    self.focus_terminal_on_next_render = false;
+                    cx.notify();
+                }
+            },
+            Some(CenterTab::Diff(diff_session_id)) => {
+                if self.close_diff_session_by_id(diff_session_id) {
+                    cx.notify();
+                }
+            },
+            None => {},
+        }
+    }
+
+    fn close_active_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_active_tab(window, cx);
     }
 
     fn theme(&self) -> ThemePalette {
@@ -1105,6 +1238,7 @@ impl ArborWindow {
         self.github_repo_slug = repository.github_repo_slug.clone();
         self.worktree_stats_loading = false;
         self.worktree_prs_loading = false;
+        self.active_diff_session_id = None;
         self.active_worktree_index = self
             .worktrees
             .iter()
@@ -1198,6 +1332,7 @@ impl ArborWindow {
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active_worktree_index = Some(index);
+        self.active_diff_session_id = None;
         self.sync_active_repository_from_selected_worktree();
         let _ = self.reload_changed_files();
         if self.ensure_selected_worktree_terminal() {
@@ -1214,6 +1349,7 @@ impl ArborWindow {
         let previous_notice = self.notice.clone();
         let Some(path) = self.selected_worktree_path() else {
             self.changed_files.clear();
+            self.selected_changed_file = None;
             return self.changed_files != previous_files || self.notice != previous_notice;
         };
 
@@ -1228,7 +1364,52 @@ impl ArborWindow {
             },
         }
 
+        self.sync_selected_changed_file();
         self.changed_files != previous_files || self.notice != previous_notice
+    }
+
+    fn sync_selected_changed_file(&mut self) {
+        let Some(selected) = self.selected_changed_file.as_ref() else {
+            self.selected_changed_file =
+                self.changed_files.first().map(|change| change.path.clone());
+            return;
+        };
+
+        if !self
+            .changed_files
+            .iter()
+            .any(|change| change.path.as_path() == selected.as_path())
+        {
+            self.selected_changed_file =
+                self.changed_files.first().map(|change| change.path.clone());
+        }
+    }
+
+    fn select_changed_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self
+            .selected_changed_file
+            .as_ref()
+            .is_some_and(|selected| selected == &path)
+        {
+            return;
+        }
+        self.selected_changed_file = Some(path);
+        if let Some(selected_path) = self.selected_changed_file.as_ref()
+            && !self.scroll_diff_to_file(selected_path.as_path())
+            && self
+                .active_center_tab_for_selected_worktree()
+                .is_some_and(|tab| matches!(tab, CenterTab::Diff(_)))
+        {
+            self.pending_diff_scroll_to_file = Some(selected_path.clone());
+        }
+        cx.notify();
+    }
+
+    fn selected_changed_file(&self) -> Option<&ChangedFile> {
+        let selected_path = self.selected_changed_file.as_ref()?;
+        self.changed_files
+            .iter()
+            .find(|change| change.path == *selected_path)
     }
 
     fn switch_terminal_backend(
@@ -1651,6 +1832,7 @@ impl ArborWindow {
         }
 
         self.sync_daemon_session_store(cx);
+        self.active_diff_session_id = None;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
@@ -1670,9 +1852,154 @@ impl ArborWindow {
 
         self.active_terminal_by_worktree
             .insert(worktree_path, session_id);
+        self.active_diff_session_id = None;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
+        cx.notify();
+    }
+
+    fn scroll_diff_to_file(&self, file_path: &Path) -> bool {
+        let Some(worktree_path) = self.selected_worktree_path() else {
+            return false;
+        };
+        let Some(active_diff_id) = self.active_diff_session_id else {
+            return false;
+        };
+        let Some(session) = self.diff_sessions.iter().find(|session| {
+            session.id == active_diff_id && session.worktree_path.as_path() == worktree_path
+        }) else {
+            return false;
+        };
+        let Some(row_index) = session.file_row_indices.get(file_path) else {
+            return false;
+        };
+
+        self.diff_scroll_handle
+            .scroll_to_item(*row_index, ScrollStrategy::Top);
+        true
+    }
+
+    fn open_diff_tab_for_selected_file(&mut self, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before opening a diff".to_owned());
+            return;
+        };
+        let Some(selected_file_path) = self
+            .selected_changed_file()
+            .map(|change| change.path.clone())
+            .or_else(|| self.changed_files.first().map(|change| change.path.clone()))
+        else {
+            self.notice = Some("select a changed file before opening a diff".to_owned());
+            return;
+        };
+
+        let changed_files = self.changed_files.clone();
+        let (session_id, should_rebuild) = match self
+            .diff_sessions
+            .iter_mut()
+            .find(|session| session.worktree_path == worktree_path)
+        {
+            Some(existing) => {
+                self.active_diff_session_id = Some(existing.id);
+                (
+                    existing.id,
+                    !existing.is_loading
+                        && (existing.lines.is_empty()
+                            || !existing.file_row_indices.contains_key(&selected_file_path)),
+                )
+            },
+            None => {
+                let session_id = self.next_diff_session_id;
+                self.next_diff_session_id = self.next_diff_session_id.saturating_add(1);
+                self.diff_sessions.push(DiffSession {
+                    id: session_id,
+                    worktree_path: worktree_path.clone(),
+                    title: "Diff".to_owned(),
+                    lines: Arc::<[DiffLine]>::from(Vec::<DiffLine>::new()),
+                    file_row_indices: HashMap::new(),
+                    is_loading: true,
+                });
+                self.active_diff_session_id = Some(session_id);
+                (session_id, true)
+            },
+        };
+
+        self.pending_diff_scroll_to_file = Some(selected_file_path.clone());
+        if !should_rebuild {
+            let _ = self.scroll_diff_to_file(selected_file_path.as_path());
+            cx.notify();
+            return;
+        }
+
+        if let Some(session) = self
+            .diff_sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.is_loading = true;
+            session.lines = Arc::<[DiffLine]>::from(Vec::<DiffLine>::new());
+            session.file_row_indices.clear();
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let diff_document = cx
+                .background_spawn(async move {
+                    build_worktree_diff_document(&worktree_path, &changed_files)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let Some(session) = this
+                    .diff_sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    return;
+                };
+
+                match diff_document {
+                    Ok((lines, file_row_indices)) => {
+                        session.lines = Arc::<[DiffLine]>::from(lines);
+                        session.file_row_indices = file_row_indices;
+                        session.is_loading = false;
+
+                        if let Some(target_path) = this.pending_diff_scroll_to_file.clone()
+                            && this.scroll_diff_to_file(target_path.as_path())
+                        {
+                            this.pending_diff_scroll_to_file = None;
+                        }
+                    },
+                    Err(error) => {
+                        session.lines = Arc::<[DiffLine]>::from(vec![DiffLine {
+                            left_line_number: None,
+                            right_line_number: None,
+                            left_text: format!("failed to build diff: {error}"),
+                            right_text: String::new(),
+                            kind: DiffLineKind::FileHeader,
+                        }]);
+                        session.file_row_indices.clear();
+                        session.is_loading = false;
+                        this.notice = Some(format!("failed to build diff: {error}"));
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn select_diff_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if self.active_diff_session_id == Some(session_id) {
+            return;
+        }
+        self.active_diff_session_id = Some(session_id);
+        if let Some(selected_path) = self.selected_changed_file.clone()
+            && !self.scroll_diff_to_file(selected_path.as_path())
+        {
+            self.pending_diff_scroll_to_file = Some(selected_path);
+        }
         cx.notify();
     }
 
@@ -1965,7 +2292,9 @@ impl ArborWindow {
             return;
         }
 
-        let Some(active_terminal_id) = self.active_terminal_id_for_selected_worktree() else {
+        let Some(CenterTab::Terminal(active_terminal_id)) =
+            self.active_center_tab_for_selected_worktree()
+        else {
             return;
         };
 
@@ -2581,12 +2910,47 @@ impl ArborWindow {
     fn render_terminal_panel(&mut self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
         let terminals = self.selected_worktree_terminals();
-        let active_terminal_id = self.active_terminal_id_for_selected_worktree();
-        let active_terminal = active_terminal_id
-            .and_then(|session_id| terminals.iter().find(|term| term.id == session_id).copied())
-            .cloned();
-        let active_terminal_index = active_terminal_id
-            .and_then(|session_id| terminals.iter().position(|term| term.id == session_id));
+        let diff_sessions = self.selected_worktree_diff_sessions();
+        let mut tabs: Vec<CenterTab> = terminals
+            .iter()
+            .map(|session| CenterTab::Terminal(session.id))
+            .collect();
+        tabs.extend(
+            diff_sessions
+                .iter()
+                .map(|session| CenterTab::Diff(session.id)),
+        );
+
+        let mut active_tab = self.active_center_tab_for_selected_worktree();
+        if active_tab.is_some_and(|tab| !tabs.contains(&tab)) {
+            active_tab = None;
+        }
+        if active_tab.is_none() {
+            active_tab = tabs.first().copied();
+            self.active_diff_session_id = match active_tab {
+                Some(CenterTab::Diff(diff_id)) => Some(diff_id),
+                _ => None,
+            };
+        }
+
+        let active_tab_index =
+            active_tab.and_then(|tab| tabs.iter().position(|entry| *entry == tab));
+        let active_terminal = match active_tab {
+            Some(CenterTab::Terminal(session_id)) => self
+                .terminals
+                .iter()
+                .find(|session| session.id == session_id)
+                .cloned(),
+            _ => None,
+        };
+        let active_diff_session = match active_tab {
+            Some(CenterTab::Diff(diff_id)) => self
+                .diff_sessions
+                .iter()
+                .find(|session| session.id == diff_id)
+                .cloned(),
+            _ => None,
+        };
 
         div()
             .flex_1()
@@ -2616,24 +2980,41 @@ impl ArborWindow {
                             .flex()
                             .items_center()
                             .overflow_hidden()
-                            .when(terminals.is_empty(), |this| {
+                            .when(tabs.is_empty(), |this| {
                                 this.child(
                                     div()
                                         .px_3()
                                         .text_xs()
                                         .text_color(rgb(theme.text_muted))
-                                        .child("No terminal tabs"),
+                                        .child("No tabs"),
                                 )
                             })
-                            .children(terminals.iter().enumerate().map(|(index, session)| {
-                                let is_active = active_terminal_id == Some(session.id);
-                                let session_id = session.id;
-                                let terminal_count = terminals.len();
-                                let relation = active_terminal_index
-                                    .map(|active_index| index.cmp(&active_index));
+                            .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
+                                let is_active = active_tab == Some(tab);
+                                let tab_count = tabs.len();
+                                let relation =
+                                    active_tab_index.map(|active_index| index.cmp(&active_index));
+                                let tab_label = match tab {
+                                    CenterTab::Terminal(session_id) => self
+                                        .terminals
+                                        .iter()
+                                        .find(|session| session.id == session_id)
+                                        .map(terminal_tab_title)
+                                        .unwrap_or_else(|| "terminal".to_owned()),
+                                    CenterTab::Diff(diff_id) => self
+                                        .diff_sessions
+                                        .iter()
+                                        .find(|session| session.id == diff_id)
+                                        .map(diff_tab_title)
+                                        .unwrap_or_else(|| "diff".to_owned()),
+                                };
+                                let tab_id = match tab {
+                                    CenterTab::Terminal(id) => ("center-tab-terminal", id),
+                                    CenterTab::Diff(id) => ("center-tab-diff", id),
+                                };
 
                                 div()
-                                    .id(("terminal-tab", session.id))
+                                    .id(tab_id)
                                     .h_full()
                                     .cursor_pointer()
                                     .min_w(px(122.))
@@ -2655,10 +3036,10 @@ impl ArborWindow {
                                             } else {
                                                 theme.text_muted
                                             }))
-                                            .child(terminal_tab_title(session)),
+                                            .child(tab_label),
                                     )
                                     .when(index == 0, |this| this.border_l_1())
-                                    .when(index + 1 == terminal_count, |this| this.border_r_1())
+                                    .when(index + 1 == tab_count, |this| this.border_r_1())
                                     .map(|this| match relation {
                                         Some(std::cmp::Ordering::Equal) => {
                                             this.border_l_1().border_r_1()
@@ -2671,8 +3052,13 @@ impl ArborWindow {
                                         },
                                         None => this.border_b_1(),
                                     })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.select_terminal(session_id, window, cx)
+                                    .on_click(cx.listener(move |this, _, window, cx| match tab {
+                                        CenterTab::Terminal(session_id) => {
+                                            this.select_terminal(session_id, window, cx);
+                                        },
+                                        CenterTab::Diff(diff_id) => {
+                                            this.select_diff_tab(diff_id, cx);
+                                        },
                                     }))
                             })),
                     )
@@ -2713,45 +3099,48 @@ impl ArborWindow {
                     .flex_1()
                     .min_h_0()
                     .bg(rgb(theme.terminal_bg))
-                    .when(active_terminal.is_none(), |this| {
-                        this.child(
-                            div()
-                                .h_full()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .text_center()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child("Terminal workspace"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Press Cmd-T to open a terminal tab."),
-                                )
-                                .child(
-                                    action_button(
-                                        theme,
-                                        "spawn-terminal-empty-state",
-                                        "Open Terminal Tab",
-                                        false,
-                                        false,
+                    .when(
+                        active_terminal.is_none() && active_diff_session.is_none(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .text_center()
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(theme.text_primary))
+                                            .child("Workspace"),
                                     )
-                                    .on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            this.spawn_terminal_session(window, cx)
-                                        },
-                                    )),
-                                ),
-                        )
-                    })
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(theme.text_muted))
+                                            .child("Press Cmd-T to open a terminal tab."),
+                                    )
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            "spawn-terminal-empty-state",
+                                            "Open Terminal Tab",
+                                            false,
+                                            false,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.spawn_terminal_session(window, cx)
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        },
+                    )
                     .when_some(active_terminal, |this, session| {
                         let selection = self.terminal_selection_for_session(session.id);
                         let styled_lines =
@@ -2817,6 +3206,15 @@ impl ArborWindow {
                                         ),
                                 ),
                         )
+                    })
+                    .when_some(active_diff_session, |this, session| {
+                        let mono_font = terminal_mono_font(cx);
+                        this.child(render_diff_session(
+                            session,
+                            theme,
+                            &self.diff_scroll_handle,
+                            mono_font,
+                        ))
                     }),
             )
     }
@@ -2834,8 +3232,11 @@ impl ArborWindow {
             .child(self.render_terminal_panel(window, cx))
     }
 
-    fn render_right_pane(&mut self, _: &mut Context<Self>) -> impl IntoElement {
+    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
+        let selected_path = self.selected_changed_file.clone();
+        let has_changed_file_selected = selected_path.is_some();
+
         div()
             .w(px(self.right_pane_width))
             .h_full()
@@ -2845,6 +3246,20 @@ impl ArborWindow {
             .flex()
             .flex_col()
             .gap_2()
+            .child(
+                div().h(px(24.)).flex().items_center().justify_end().child(
+                    action_button(
+                        theme,
+                        "open-diff-tab",
+                        "Diff",
+                        has_changed_file_selected,
+                        !has_changed_file_selected,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_diff_tab_for_selected_file(cx);
+                    })),
+                ),
+            )
             .child(
                 div()
                     .id("changes-scroll")
@@ -2857,6 +3272,9 @@ impl ArborWindow {
                     .font_family(FONT_MONO)
                     .gap_0()
                     .children(self.changed_files.iter().map(|change| {
+                        let is_selected = selected_path
+                            .as_ref()
+                            .is_some_and(|selected| selected.as_path() == change.path.as_path());
                         let status_color = match change.kind {
                             ChangeKind::Added => 0xa6e3a1,
                             ChangeKind::Modified => 0xf9e2af,
@@ -2882,16 +3300,29 @@ impl ArborWindow {
                             change.path.as_path(),
                             self.right_pane_width,
                         );
+                        let file_path = change.path.clone();
 
                         div()
                             .h(px(24.))
                             .px_1()
+                            .cursor_pointer()
                             .flex()
                             .items_center()
                             .justify_between()
                             .gap_2()
                             .border_b_1()
                             .border_color(rgb(theme.border))
+                            .bg(rgb(if is_selected {
+                                theme.panel_active_bg
+                            } else {
+                                theme.sidebar_bg
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    this.select_changed_file(file_path.clone(), cx);
+                                }),
+                            )
                             .child(
                                 div()
                                     .flex_none()
@@ -3318,6 +3749,647 @@ fn terminal_tab_title(session: &TerminalSession) -> String {
     };
 
     truncate_with_ellipsis(last_command.trim(), TERMINAL_TAB_COMMAND_MAX_CHARS)
+}
+
+fn diff_tab_title(session: &DiffSession) -> String {
+    truncate_with_ellipsis(&session.title, TERMINAL_TAB_COMMAND_MAX_CHARS)
+}
+
+fn build_worktree_diff_document(
+    worktree_path: &Path,
+    changed_files: &[ChangedFile],
+) -> Result<(Vec<DiffLine>, HashMap<PathBuf, usize>), String> {
+    let mut lines = Vec::new();
+    let mut file_row_indices = HashMap::new();
+
+    for changed_file in changed_files {
+        file_row_indices.insert(changed_file.path.clone(), lines.len());
+        lines.push(DiffLine {
+            left_line_number: None,
+            right_line_number: None,
+            left_text: format!(
+                "{} {}",
+                change_code(changed_file.kind),
+                changed_file.path.display()
+            ),
+            right_text: String::new(),
+            kind: DiffLineKind::FileHeader,
+        });
+
+        let file_lines = build_file_diff_lines(worktree_path, changed_file.path.as_path())?;
+        if file_lines.is_empty() {
+            lines.push(DiffLine {
+                left_line_number: None,
+                right_line_number: None,
+                left_text: "  no textual changes".to_owned(),
+                right_text: String::new(),
+                kind: DiffLineKind::Context,
+            });
+        } else {
+            lines.extend(file_lines);
+        }
+    }
+
+    Ok((lines, file_row_indices))
+}
+
+fn build_file_diff_lines(worktree_path: &Path, file_path: &Path) -> Result<Vec<DiffLine>, String> {
+    let head_bytes = read_head_file_bytes(worktree_path, file_path)?;
+    let worktree_bytes = read_worktree_file_bytes(worktree_path, file_path)?;
+    let head_text = String::from_utf8_lossy(&head_bytes).into_owned();
+    let worktree_text = String::from_utf8_lossy(&worktree_bytes).into_owned();
+    Ok(build_side_by_side_diff_lines(&head_text, &worktree_text))
+}
+
+fn read_head_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8>, String> {
+    let relative = git_relative_path(file_path)?;
+    let object_spec = format!("HEAD:{relative}");
+
+    let exists_status = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["cat-file", "-e", object_spec.as_str()])
+        .status()
+        .map_err(|error| {
+            format!(
+                "failed to check git object `{object_spec}` in `{}`: {error}",
+                worktree_path.display()
+            )
+        })?;
+
+    if !exists_status.success() {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["show", object_spec.as_str()])
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to read `{relative}` at HEAD in `{}`: {error}",
+                worktree_path.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "failed to read `{relative}` at HEAD in `{}`: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(output.stdout)
+}
+
+fn read_worktree_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8>, String> {
+    let absolute = worktree_path.join(file_path);
+    match fs::read(&absolute) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!(
+            "failed to read worktree file `{}`: {error}",
+            absolute.display()
+        )),
+    }
+}
+
+fn git_relative_path(file_path: &Path) -> Result<String, String> {
+    let path_text = file_path.to_string_lossy();
+    if path_text.trim().is_empty() {
+        return Err("cannot diff an empty path".to_owned());
+    }
+
+    Ok(path_text.replace('\\', "/"))
+}
+
+fn build_side_by_side_diff_lines(before_text: &str, after_text: &str) -> Vec<DiffLine> {
+    let before_rope = Rope::from_str(before_text);
+    let after_rope = Rope::from_str(after_text);
+    let input = BlobInternedInput::new(before_text.as_bytes(), after_text.as_bytes());
+    let mut diff = BlobDiff::compute(DiffAlgorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
+
+    let mut lines = Vec::new();
+    let mut before_cursor = 0_usize;
+    let mut after_cursor = 0_usize;
+
+    for hunk in diff.hunks() {
+        let before_start = hunk.before.start as usize;
+        let before_end = hunk.before.end as usize;
+        let after_start = hunk.after.start as usize;
+        let after_end = hunk.after.end as usize;
+
+        push_context_diff_lines(
+            &mut lines,
+            &before_rope,
+            &after_rope,
+            before_cursor,
+            before_start,
+            after_cursor,
+            after_start,
+        );
+
+        let removed_count = before_end.saturating_sub(before_start);
+        let added_count = after_end.saturating_sub(after_start);
+        let changed_count = removed_count.max(added_count);
+
+        for offset in 0..changed_count {
+            let left_index = (offset < removed_count).then_some(before_start + offset);
+            let right_index = (offset < added_count).then_some(after_start + offset);
+            let kind = match (left_index.is_some(), right_index.is_some()) {
+                (true, true) => DiffLineKind::Modified,
+                (true, false) => DiffLineKind::Removed,
+                (false, true) => DiffLineKind::Added,
+                (false, false) => DiffLineKind::Context,
+            };
+            push_diff_line(
+                &mut lines,
+                &before_rope,
+                &after_rope,
+                left_index,
+                right_index,
+                kind,
+            );
+        }
+
+        before_cursor = before_end;
+        after_cursor = after_end;
+    }
+
+    push_context_diff_lines(
+        &mut lines,
+        &before_rope,
+        &after_rope,
+        before_cursor,
+        input.before.len(),
+        after_cursor,
+        input.after.len(),
+    );
+
+    lines
+}
+
+fn push_context_diff_lines(
+    output: &mut Vec<DiffLine>,
+    before_rope: &Rope,
+    after_rope: &Rope,
+    before_start: usize,
+    before_end: usize,
+    after_start: usize,
+    after_end: usize,
+) {
+    let before_count = before_end.saturating_sub(before_start);
+    let after_count = after_end.saturating_sub(after_start);
+    let paired_count = before_count.min(after_count);
+
+    for offset in 0..paired_count {
+        push_diff_line(
+            output,
+            before_rope,
+            after_rope,
+            Some(before_start + offset),
+            Some(after_start + offset),
+            DiffLineKind::Context,
+        );
+    }
+
+    for offset in paired_count..before_count {
+        push_diff_line(
+            output,
+            before_rope,
+            after_rope,
+            Some(before_start + offset),
+            None,
+            DiffLineKind::Removed,
+        );
+    }
+
+    for offset in paired_count..after_count {
+        push_diff_line(
+            output,
+            before_rope,
+            after_rope,
+            None,
+            Some(after_start + offset),
+            DiffLineKind::Added,
+        );
+    }
+}
+
+fn push_diff_line(
+    output: &mut Vec<DiffLine>,
+    before_rope: &Rope,
+    after_rope: &Rope,
+    left_index: Option<usize>,
+    right_index: Option<usize>,
+    kind: DiffLineKind,
+) {
+    output.push(DiffLine {
+        left_line_number: left_index.map(|index| index + 1),
+        right_line_number: right_index.map(|index| index + 1),
+        left_text: left_index
+            .map(|index| rope_display_line(before_rope, index))
+            .unwrap_or_default(),
+        right_text: right_index
+            .map(|index| rope_display_line(after_rope, index))
+            .unwrap_or_default(),
+        kind,
+    });
+}
+
+fn rope_display_line(rope: &Rope, line_index: usize) -> String {
+    if line_index >= rope.len_lines() {
+        return String::new();
+    }
+
+    let mut text = rope.line(line_index).to_string();
+    while text.ends_with('\n') || text.ends_with('\r') {
+        let _ = text.pop();
+    }
+    text.replace('\t', "    ")
+}
+
+fn render_diff_session(
+    session: DiffSession,
+    theme: ThemePalette,
+    scroll_handle: &UniformListScrollHandle,
+    mono_font: gpui::Font,
+) -> Div {
+    let path_label = truncate_middle_text(&session.title, 84);
+    let line_count = session.lines.len();
+    let is_loading = session.is_loading;
+    let session_id = session.id;
+
+    div()
+        .h_full()
+        .w_full()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(28.))
+                .px_3()
+                .bg(rgb(theme.tab_active_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .font(mono_font.clone())
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .child(path_label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_disabled))
+                        .child(if is_loading {
+                            "loading...".to_owned()
+                        } else {
+                            format!("{line_count} rows")
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id(("diff-scroll", session_id))
+                .flex_1()
+                .min_h_0()
+                .bg(rgb(theme.terminal_bg))
+                .when(is_loading, |this| {
+                    this.child(
+                        div()
+                            .h_full()
+                            .w_full()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .text_sm()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Computing diff..."),
+                    )
+                })
+                .when(!is_loading, |this| {
+                    let lines = session.lines.clone();
+                    let zonemap_lines = lines.clone();
+                    let scroll_handle = scroll_handle.clone();
+                    let mono_font = mono_font.clone();
+                    let zonemap_reserved_width =
+                        px(DIFF_ZONEMAP_WIDTH_PX + (DIFF_ZONEMAP_MARGIN_PX * 2.));
+                    this.child(
+                        div()
+                            .relative()
+                            .size_full()
+                            .child(
+                                uniform_list(
+                                    ("diff-list", session_id),
+                                    lines.len(),
+                                    move |range, _, _| {
+                                        range
+                                            .map(|index| {
+                                                render_diff_row(
+                                                    lines[index].clone(),
+                                                    theme,
+                                                    mono_font.clone(),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                )
+                                .size_full()
+                                .pr(zonemap_reserved_width)
+                                .track_scroll(scroll_handle.clone()),
+                            )
+                            .child(render_diff_zonemap(zonemap_lines, theme, &scroll_handle)),
+                    )
+                }),
+        )
+}
+
+fn render_diff_row(line: DiffLine, theme: ThemePalette, mono_font: gpui::Font) -> Div {
+    if line.kind == DiffLineKind::FileHeader {
+        return div()
+            .w_full()
+            .h(px(DIFF_ROW_HEIGHT_PX))
+            .min_h(px(DIFF_ROW_HEIGHT_PX))
+            .bg(rgb(theme.tab_active_bg))
+            .px_2()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .font(mono_font)
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .whitespace_nowrap()
+                    .text_color(rgb(theme.text_primary))
+                    .child(line.left_text),
+            );
+    }
+
+    let (left_bg, right_bg) = diff_line_backgrounds(line.kind, theme);
+    let (left_marker, right_marker) = diff_line_markers(line.kind);
+    let (left_text_color, right_text_color) = diff_line_text_colors(line.kind, theme);
+    div()
+        .w_full()
+        .h(px(DIFF_ROW_HEIGHT_PX))
+        .min_h(px(DIFF_ROW_HEIGHT_PX))
+        .flex()
+        .child(render_diff_column(
+            line.left_line_number,
+            line.left_text,
+            left_marker,
+            left_bg,
+            left_text_color,
+            theme,
+            mono_font.clone(),
+        ))
+        .child(render_diff_column(
+            line.right_line_number,
+            line.right_text,
+            right_marker,
+            right_bg,
+            right_text_color,
+            theme,
+            mono_font,
+        ))
+}
+
+fn render_diff_column(
+    line_number: Option<usize>,
+    text: String,
+    marker: char,
+    background: u32,
+    text_color: u32,
+    theme: ThemePalette,
+    mono_font: gpui::Font,
+) -> Div {
+    let number_width = px((DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * TERMINAL_CELL_WIDTH_PX) + 12.);
+
+    div()
+        .flex_1()
+        .min_w(px(420.))
+        .h_full()
+        .bg(rgb(background))
+        .child(
+            div()
+                .h_full()
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(number_width)
+                        .flex_none()
+                        .text_right()
+                        .text_xs()
+                        .text_color(rgb(theme.text_disabled))
+                        .child(line_number.map_or(String::new(), |line| line.to_string())),
+                )
+                .child(
+                    div()
+                        .w(px(10.))
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(diff_marker_color(marker)))
+                        .child(marker.to_string()),
+                )
+                .child(
+                    div()
+                        .font(mono_font)
+                        .text_xs()
+                        .whitespace_nowrap()
+                        .text_color(rgb(text_color))
+                        .child(if text.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            text
+                        }),
+                ),
+        )
+}
+
+fn render_diff_zonemap(
+    lines: Arc<[DiffLine]>,
+    theme: ThemePalette,
+    scroll_handle: &UniformListScrollHandle,
+) -> Div {
+    let scroll_handle_for_draw = scroll_handle.clone();
+    let scroll_handle_for_click = scroll_handle.clone();
+    let total_rows = lines.len();
+    let marker_rows: Vec<(usize, u32)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| zonemap_marker_color(line.kind).map(|color| (index, color)))
+        .collect();
+
+    div()
+        .absolute()
+        .right(px(DIFF_ZONEMAP_MARGIN_PX))
+        .top(px(DIFF_ZONEMAP_MARGIN_PX))
+        .bottom(px(DIFF_ZONEMAP_MARGIN_PX))
+        .w(px(DIFF_ZONEMAP_WIDTH_PX))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, _| {
+            if total_rows == 0 {
+                return;
+            }
+
+            let bounds = scroll_handle_for_click.0.borrow().base_handle.bounds();
+            let height = bounds.size.height.to_f64() as f32;
+            if !height.is_finite() || height <= 0. {
+                return;
+            }
+
+            let relative_y = (f32::from(event.position.y - bounds.top()) / height).clamp(0., 1.);
+            let mut target_row = (relative_y * total_rows as f32).floor() as usize;
+            if target_row >= total_rows {
+                target_row = total_rows.saturating_sub(1);
+            }
+            scroll_handle_for_click.scroll_to_item(target_row, ScrollStrategy::Center);
+        })
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _cx| {
+                    window.paint_quad(fill(bounds, rgb(theme.app_bg)));
+
+                    let track_origin = point(bounds.origin.x + px(1.), bounds.origin.y + px(1.));
+                    let track_size = size(
+                        (bounds.size.width - px(2.)).max(px(1.)),
+                        (bounds.size.height - px(2.)).max(px(1.)),
+                    );
+                    let track_bounds = Bounds::new(track_origin, track_size);
+                    window.paint_quad(fill(track_bounds, rgb(theme.panel_bg)));
+
+                    if total_rows == 0 {
+                        return;
+                    }
+
+                    let height = track_bounds.size.height.to_f64() as f32;
+                    if !height.is_finite() || height <= 0. {
+                        return;
+                    }
+
+                    let marker_origin_x = track_bounds.origin.x + px(1.);
+                    let marker_width = (track_bounds.size.width - px(2.)).max(px(1.));
+
+                    for (row_index, color) in &marker_rows {
+                        let y_ratio = *row_index as f32 / total_rows as f32;
+                        let y = track_bounds.origin.y + px(y_ratio * height);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(marker_origin_x, y),
+                                size(marker_width, px(DIFF_ZONEMAP_MARKER_HEIGHT_PX)),
+                            ),
+                            rgb(*color),
+                        ));
+                    }
+
+                    let (visible_top, visible_bottom) =
+                        diff_visible_row_range(&scroll_handle_for_draw, total_rows);
+                    let visible_count =
+                        visible_bottom.saturating_sub(visible_top).saturating_add(1);
+                    let thumb_top_ratio = visible_top as f32 / total_rows as f32;
+                    let thumb_height_ratio = visible_count as f32 / total_rows as f32;
+                    let thumb_height = px((thumb_height_ratio * height)
+                        .max(DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX)
+                        .min(height));
+                    let max_thumb_top =
+                        track_bounds.origin.y + track_bounds.size.height - thumb_height;
+                    let thumb_top = (track_bounds.origin.y + px(thumb_top_ratio * height))
+                        .min(max_thumb_top)
+                        .max(track_bounds.origin.y);
+
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(track_bounds.origin.x, thumb_top),
+                            size(track_bounds.size.width, thumb_height),
+                        ),
+                        rgb(theme.accent),
+                    ));
+                },
+            )
+            .size_full(),
+        )
+}
+
+fn diff_visible_row_range(
+    scroll_handle: &UniformListScrollHandle,
+    total_rows: usize,
+) -> (usize, usize) {
+    if total_rows == 0 {
+        return (0, 0);
+    }
+
+    let state = scroll_handle.0.borrow();
+    let top = state
+        .base_handle
+        .top_item()
+        .min(total_rows.saturating_sub(1));
+    let bottom = state
+        .base_handle
+        .bottom_item()
+        .min(total_rows.saturating_sub(1));
+    (top, bottom.max(top))
+}
+
+fn zonemap_marker_color(kind: DiffLineKind) -> Option<u32> {
+    match kind {
+        DiffLineKind::FileHeader => Some(0x6d88a6),
+        DiffLineKind::Added => Some(0x72d69c),
+        DiffLineKind::Removed => Some(0xeb6f92),
+        DiffLineKind::Modified => Some(0xf9e2af),
+        DiffLineKind::Context => None,
+    }
+}
+
+fn diff_line_backgrounds(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
+    match kind {
+        DiffLineKind::FileHeader => (theme.tab_active_bg, theme.tab_active_bg),
+        DiffLineKind::Context
+        | DiffLineKind::Added
+        | DiffLineKind::Removed
+        | DiffLineKind::Modified => (theme.terminal_bg, theme.terminal_bg),
+    }
+}
+
+fn diff_line_text_colors(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
+    match kind {
+        DiffLineKind::FileHeader => (theme.text_primary, theme.text_primary),
+        DiffLineKind::Context => (theme.text_primary, theme.text_primary),
+        DiffLineKind::Added => (theme.text_disabled, 0x8fd7ad),
+        DiffLineKind::Removed => (0xf2a4b7, theme.text_disabled),
+        DiffLineKind::Modified => (0xe7d399, 0xe7d399),
+    }
+}
+
+fn diff_line_markers(kind: DiffLineKind) -> (char, char) {
+    match kind {
+        DiffLineKind::FileHeader => (' ', ' '),
+        DiffLineKind::Context => (' ', ' '),
+        DiffLineKind::Added => (' ', '+'),
+        DiffLineKind::Removed => ('-', ' '),
+        DiffLineKind::Modified => ('~', '~'),
+    }
+}
+
+fn diff_marker_color(marker: char) -> u32 {
+    match marker {
+        '+' => 0x72d69c,
+        '-' => 0xeb6f92,
+        '~' => 0xf9e2af,
+        _ => 0x7c8599,
+    }
 }
 
 fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
@@ -4727,7 +5799,8 @@ fn main() {
 #[allow(clippy::expect_used)]
 mod tests {
     use crate::{
-        TerminalSession, TerminalState, styled_lines_for_session,
+        DiffLineKind, TerminalSession, TerminalState, build_side_by_side_diff_lines,
+        styled_lines_for_session,
         terminal_backend::{
             TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
         },
@@ -5035,5 +6108,32 @@ mod tests {
         let input = "src/main.rs";
         let truncated = crate::truncate_middle_text(input, 32);
         assert_eq!(truncated, input);
+    }
+
+    #[test]
+    fn side_by_side_diff_marks_modified_lines() {
+        let lines = build_side_by_side_diff_lines("alpha\nbeta\n", "alpha\ngamma\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].kind, DiffLineKind::Context);
+        assert_eq!(lines[0].left_text, "alpha");
+        assert_eq!(lines[0].right_text, "alpha");
+        assert_eq!(lines[1].kind, DiffLineKind::Modified);
+        assert_eq!(lines[1].left_text, "beta");
+        assert_eq!(lines[1].right_text, "gamma");
+    }
+
+    #[test]
+    fn side_by_side_diff_marks_inserted_and_removed_lines() {
+        let insertion = build_side_by_side_diff_lines("one\n", "one\ntwo\n");
+        assert_eq!(insertion.len(), 2);
+        assert_eq!(insertion[1].kind, DiffLineKind::Added);
+        assert_eq!(insertion[1].left_text, "");
+        assert_eq!(insertion[1].right_text, "two");
+
+        let removal = build_side_by_side_diff_lines("one\ntwo\n", "one\n");
+        assert_eq!(removal.len(), 2);
+        assert_eq!(removal[1].kind, DiffLineKind::Removed);
+        assert_eq!(removal[1].left_text, "two");
+        assert_eq!(removal[1].right_text, "");
     }
 }
