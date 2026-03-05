@@ -1,6 +1,7 @@
 use {
     gix::status::{UntrackedFiles, index_worktree::iter::Summary},
     std::{
+        collections::HashMap,
         fmt, fs,
         path::{Path, PathBuf},
         process::Command,
@@ -41,6 +42,8 @@ impl fmt::Display for ChangeKind {
 pub struct ChangedFile {
     pub path: PathBuf,
     pub kind: ChangeKind,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,6 +64,7 @@ pub enum ChangesError {
 
 pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError> {
     let repository = open_repository(repo_path)?;
+    let summary_by_path = diff_line_summary_by_path(repo_path)?;
 
     let status_iter = repository
         .status(gix::progress::Discard)
@@ -87,9 +91,14 @@ pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError>
             continue;
         };
 
+        let path = PathBuf::from(String::from_utf8_lossy(item.rela_path().as_ref()).into_owned());
+        let line_summary = summary_by_path.get(&path).copied().unwrap_or_default();
+
         files.push(ChangedFile {
-            path: PathBuf::from(String::from_utf8_lossy(item.rela_path().as_ref()).into_owned()),
+            path,
             kind: summary_to_change_kind(summary),
+            additions: line_summary.additions,
+            deletions: line_summary.deletions,
         });
     }
 
@@ -104,7 +113,19 @@ pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError>
 }
 
 pub fn diff_line_summary(repo_path: &Path) -> Result<DiffLineSummary, ChangesError> {
-    let mut summary = parse_numstat_output(&run_git_command(repo_path, &[
+    let mut summary = DiffLineSummary::default();
+    for line_summary in diff_line_summary_by_path(repo_path)?.values() {
+        summary.additions += line_summary.additions;
+        summary.deletions += line_summary.deletions;
+    }
+
+    Ok(summary)
+}
+
+fn diff_line_summary_by_path(
+    repo_path: &Path,
+) -> Result<HashMap<PathBuf, DiffLineSummary>, ChangesError> {
+    let mut summary_by_path = parse_numstat_output_by_path(&run_git_command(repo_path, &[
         "diff",
         "--numstat",
         "HEAD",
@@ -129,10 +150,11 @@ pub fn diff_line_summary(repo_path: &Path) -> Result<DiffLineSummary, ChangesErr
             continue;
         };
 
-        summary.additions += count_lines(&contents);
+        let entry = summary_by_path.entry(PathBuf::from(relative)).or_default();
+        entry.additions += count_lines(&contents);
     }
 
-    Ok(summary)
+    Ok(summary_by_path)
 }
 
 fn open_repository(path: &Path) -> Result<gix::Repository, ChangesError> {
@@ -193,8 +215,8 @@ fn run_git_command_bytes(repo_path: &Path, args: &[&str]) -> Result<Vec<u8>, Cha
     })
 }
 
-fn parse_numstat_output(output: &str) -> DiffLineSummary {
-    let mut summary = DiffLineSummary::default();
+fn parse_numstat_output_by_path(output: &str) -> HashMap<PathBuf, DiffLineSummary> {
+    let mut summary_by_path = HashMap::new();
 
     for line in output.lines() {
         let mut columns = line.split('\t');
@@ -204,16 +226,25 @@ fn parse_numstat_output(output: &str) -> DiffLineSummary {
         let Some(removed_column) = columns.next() else {
             continue;
         };
+        let Some(path_column) = columns.next() else {
+            continue;
+        };
 
-        if let Ok(additions) = added_column.parse::<usize>() {
-            summary.additions += additions;
+        let additions = added_column.parse::<usize>().unwrap_or(0);
+        let deletions = removed_column.parse::<usize>().unwrap_or(0);
+        if additions == 0 && deletions == 0 {
+            continue;
         }
-        if let Ok(deletions) = removed_column.parse::<usize>() {
-            summary.deletions += deletions;
-        }
+
+        let path = PathBuf::from(path_column);
+        let entry = summary_by_path
+            .entry(path)
+            .or_insert_with(DiffLineSummary::default);
+        entry.additions += additions;
+        entry.deletions += deletions;
     }
 
-    summary
+    summary_by_path
 }
 
 fn count_lines(contents: &[u8]) -> usize {

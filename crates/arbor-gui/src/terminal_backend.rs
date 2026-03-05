@@ -5,7 +5,7 @@ use {
         grid::Dimensions,
         index::{Column, Line, Point},
         term::{
-            Config,
+            Config, TermMode,
             cell::{Cell, Flags},
             color::Colors,
         },
@@ -43,17 +43,14 @@ const TERMINAL_ANSI_DIM_8: [u32; 8] = [
     0x3b3f4a, 0xa7545a, 0x6d8f59, 0xb8985b, 0x457cad, 0x8d54a0, 0x3c818a, 0x8f969b,
 ];
 
+pub const EMBEDDED_TERMINAL_DEFAULT_FG: u32 = TERMINAL_DEFAULT_FG;
+pub const EMBEDDED_TERMINAL_DEFAULT_BG: u32 = TERMINAL_DEFAULT_BG;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalBackendKind {
     Embedded,
     Alacritty,
     Ghostty,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TerminalBackendDescriptor {
-    pub kind: TerminalBackendKind,
-    pub label: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -173,34 +170,6 @@ impl TerminalEmulator {
         };
         self.term.resize(dimensions);
     }
-}
-
-pub const BACKEND_DESCRIPTORS: [TerminalBackendDescriptor; 3] = [
-    TerminalBackendDescriptor {
-        kind: TerminalBackendKind::Embedded,
-        label: "Embedded",
-    },
-    TerminalBackendDescriptor {
-        kind: TerminalBackendKind::Alacritty,
-        label: "Alacritty",
-    },
-    TerminalBackendDescriptor {
-        kind: TerminalBackendKind::Ghostty,
-        label: "Ghostty",
-    },
-];
-
-pub fn descriptor_for_kind(kind: TerminalBackendKind) -> TerminalBackendDescriptor {
-    let mut descriptor = BACKEND_DESCRIPTORS[0];
-
-    for candidate in BACKEND_DESCRIPTORS {
-        if candidate.kind == kind {
-            descriptor = candidate;
-            break;
-        }
-    }
-
-    descriptor
 }
 
 pub fn launch_backend(kind: TerminalBackendKind, cwd: &Path) -> Result<TerminalLaunch, String> {
@@ -490,6 +459,10 @@ fn snapshot_output(term: &Term<VoidListener>) -> String {
 }
 
 fn snapshot_cursor(term: &Term<VoidListener>) -> Option<TerminalCursor> {
+    if !term.mode().contains(TermMode::SHOW_CURSOR) {
+        return None;
+    }
+
     let grid = term.grid();
     let top = grid.topmost_line().0;
     let bottom = grid.bottommost_line().0;
@@ -946,6 +919,18 @@ mod tests {
         let rendered = styled_line_to_string(styled_lines.first());
 
         assert_eq!(rendered, "A☀️B");
+    }
+
+    #[test]
+    fn snapshot_cursor_respects_cursor_visibility_mode() {
+        let mut emulator = TerminalEmulator::new();
+        assert!(snapshot_cursor(&emulator.term).is_some());
+
+        emulator.process("\u{1b}[?25l".as_bytes());
+        assert!(snapshot_cursor(&emulator.term).is_none());
+
+        emulator.process("\u{1b}[?25h".as_bytes());
+        assert!(snapshot_cursor(&emulator.term).is_some());
     }
 
     fn styled_line_to_string(line: Option<&TerminalStyledLine>) -> String {

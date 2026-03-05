@@ -1,7 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeKind {
-    OneDark,
-    AyuDark,
+    One,
+    Ayu,
+    Gruvbox,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -23,19 +24,22 @@ pub struct ThemePalette {
     pub notice_text: u32,
     pub accent: u32,
     pub terminal_cursor: u32,
+    pub terminal_selection_bg: u32,
+    pub terminal_selection_fg: u32,
 }
 
 impl ThemeKind {
     pub fn label(self) -> &'static str {
         match self {
-            ThemeKind::OneDark => "One Dark",
-            ThemeKind::AyuDark => "Ayu Dark",
+            ThemeKind::One => "One Dark",
+            ThemeKind::Ayu => "Ayu Dark",
+            ThemeKind::Gruvbox => "Gruvbox Dark",
         }
     }
 
     pub fn palette(self) -> ThemePalette {
         match self {
-            ThemeKind::OneDark => ThemePalette {
+            ThemeKind::One => ThemePalette {
                 chrome_bg: 0x3b414d,
                 chrome_border: 0x464b57,
                 app_bg: 0x282c33,
@@ -53,8 +57,10 @@ impl ThemeKind {
                 notice_text: 0xffe3dc,
                 accent: 0x74ade8,
                 terminal_cursor: 0xebdbb2,
+                terminal_selection_bg: 0x3e4451,
+                terminal_selection_fg: 0xc8ccd4,
             },
-            ThemeKind::AyuDark => ThemePalette {
+            ThemeKind::Ayu => ThemePalette {
                 chrome_bg: 0x313337,
                 chrome_border: 0x3f4043,
                 app_bg: 0x0d1016,
@@ -72,6 +78,29 @@ impl ThemeKind {
                 notice_text: 0xffe3dc,
                 accent: 0x5ac1fe,
                 terminal_cursor: 0xbfbdb6,
+                terminal_selection_bg: 0x2f3f53,
+                terminal_selection_fg: 0xd9d7cf,
+            },
+            ThemeKind::Gruvbox => ThemePalette {
+                chrome_bg: 0x3c3836,
+                chrome_border: 0x504945,
+                app_bg: 0x282828,
+                sidebar_bg: 0x32302f,
+                terminal_bg: 0x282828,
+                panel_bg: 0x32302f,
+                panel_active_bg: 0x3c3836,
+                tab_bg: 0x32302f,
+                tab_active_bg: 0x282828,
+                border: 0x504945,
+                text_primary: 0xebdbb2,
+                text_muted: 0xa89984,
+                text_disabled: 0x928374,
+                notice_bg: 0x5d3330,
+                notice_text: 0xffe3dc,
+                accent: 0x83a598,
+                terminal_cursor: 0xebdbb2,
+                terminal_selection_bg: 0x504945,
+                terminal_selection_fg: 0xebdbb2,
             },
         }
     }
