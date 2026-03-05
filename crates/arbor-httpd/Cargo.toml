@@ -1,26 +1,28 @@
 [package]
-name = "arbor-gui"
+name = "arbor-httpd"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "Arbor"
+name = "arbor-httpd"
 path = "src/main.rs"
 
 [dependencies]
 arbor-core = { path = "../arbor-core" }
-alacritty_terminal = { workspace = true }
-config = { workspace = true }
-gix-diff = { workspace = true, features = ["blob-experimental"] }
-gpui = { workspace = true }
-imara-diff = { workspace = true }
+arbor-web-ui = { path = "../arbor-web-ui" }
+axum = { workspace = true, features = ["ws"] }
+futures-util = "0.3"
 portable-pty = { workspace = true }
-ropey = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-syntect = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
