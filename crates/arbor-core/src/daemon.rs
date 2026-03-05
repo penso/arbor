@@ -17,6 +17,7 @@ pub struct CreateOrAttachRequest {
     pub shell: String,
     pub cols: u16,
     pub rows: u16,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,12 @@ pub struct KillRequest {
     pub session_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotRequest {
+    pub session_id: String,
+    pub max_lines: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSignal {
     Interrupt,
@@ -61,7 +68,26 @@ pub enum TerminalSignal {
     Kill,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalSessionState {
+    #[default]
+    Running,
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSnapshot {
+    pub session_id: String,
+    pub output_tail: String,
+    pub exit_code: Option<i32>,
+    pub state: TerminalSessionState,
+    pub updated_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct DaemonSessionRecord {
     pub session_id: String,
     pub workspace_id: String,
@@ -69,6 +95,12 @@ pub struct DaemonSessionRecord {
     pub shell: String,
     pub cols: u16,
     pub rows: u16,
+    pub title: Option<String>,
+    pub last_command: Option<String>,
+    pub output_tail: Option<String>,
+    pub exit_code: Option<i32>,
+    pub state: Option<TerminalSessionState>,
+    pub updated_at_unix_ms: Option<u64>,
 }
 
 pub trait TerminalDaemon {
@@ -83,6 +115,7 @@ pub trait TerminalDaemon {
     fn signal(&mut self, request: SignalRequest) -> Result<(), Self::Error>;
     fn detach(&mut self, request: DetachRequest) -> Result<(), Self::Error>;
     fn kill(&mut self, request: KillRequest) -> Result<(), Self::Error>;
+    fn snapshot(&self, request: SnapshotRequest) -> Result<Option<TerminalSnapshot>, Self::Error>;
     fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, Self::Error>;
 }
 
@@ -217,7 +250,7 @@ pub fn default_daemon_session_store() -> JsonDaemonSessionStore {
 }
 
 pub fn daemon_contract_outline() -> &'static str {
-    "create_or_attach -> write -> resize -> signal -> detach -> kill -> list_sessions, with session records persisted by DaemonSessionStore"
+    "create_or_attach -> write -> resize -> signal -> detach -> kill -> snapshot -> list_sessions, with session records persisted by DaemonSessionStore"
 }
 
 pub fn normalize_session_store_path(path: &Path) -> PathBuf {
@@ -250,6 +283,12 @@ mod tests {
             shell: "/bin/zsh".to_owned(),
             cols: 120,
             rows: 35,
+            title: Some("term-1".to_owned()),
+            last_command: Some("cargo test".to_owned()),
+            output_tail: Some("running tests".to_owned()),
+            exit_code: None,
+            state: Some(crate::daemon::TerminalSessionState::Running),
+            updated_at_unix_ms: Some(1_700_000_000_000),
         }];
 
         store.save(&sessions)?;
@@ -272,12 +311,46 @@ mod tests {
             shell: "/bin/zsh".to_owned(),
             cols: 100,
             rows: 30,
+            title: Some("term-1".to_owned()),
+            last_command: Some("git status".to_owned()),
+            output_tail: Some("On branch main".to_owned()),
+            exit_code: None,
+            state: Some(crate::daemon::TerminalSessionState::Running),
+            updated_at_unix_ms: Some(1_700_000_000_000),
         };
         store.upsert(session.clone())?;
         store.remove("session-1")?;
 
         let loaded = store.load()?;
         assert!(loaded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn loads_legacy_records_without_new_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("sessions.json");
+        let store = JsonDaemonSessionStore::new(path.clone());
+        std::fs::write(
+            &path,
+            r#"[
+  {
+    "session_id": "session-1",
+    "workspace_id": "workspace-1",
+    "cwd": "/tmp/workspace-1",
+    "shell": "/bin/zsh",
+    "cols": 120,
+    "rows": 35
+  }
+]
+"#,
+        )?;
+
+        let loaded = store.load()?;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].session_id, "session-1");
+        assert!(loaded[0].title.is_none());
+        assert!(loaded[0].state.is_none());
         Ok(())
     }
 }

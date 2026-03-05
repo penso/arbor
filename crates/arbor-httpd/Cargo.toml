@@ -1,0 +1,28 @@
+[package]
+name = "arbor-httpd"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "arbor-httpd"
+path = "src/main.rs"
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+arbor-web-ui = { path = "../arbor-web-ui" }
+axum = { workspace = true, features = ["ws"] }
+futures-util = "0.3"
+portable-pty = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

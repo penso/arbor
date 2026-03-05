@@ -1,6 +1,7 @@
 mod app_config;
 mod repository_store;
 mod terminal_backend;
+mod terminal_daemon_http;
 mod terminal_keys;
 mod theme;
 mod ui_state_store;
@@ -8,7 +9,11 @@ mod ui_state_store;
 use {
     arbor_core::{
         changes::{self, ChangeKind, ChangedFile},
-        daemon::{self, DaemonSessionRecord},
+        daemon::{
+            self, CreateOrAttachRequest, DaemonSessionRecord, DetachRequest, KillRequest,
+            ResizeRequest, SignalRequest, SnapshotRequest, TerminalSessionState, TerminalSignal,
+            WriteRequest,
+        },
         worktree,
     },
     gix_diff::blob::v2::{
@@ -28,7 +33,7 @@ use {
         collections::HashMap,
         env, fs,
         path::{Path, PathBuf},
-        process::Command,
+        process::{Command, Stdio},
         sync::{Arc, Mutex},
         time::{Duration, Instant, SystemTime},
     },
@@ -37,6 +42,7 @@ use {
         TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalStyledCell,
         TerminalStyledLine, TerminalStyledRun,
     },
+    terminal_daemon_http::HttpTerminalDaemon,
     theme::{ThemeKind, ThemePalette},
 };
 
@@ -61,6 +67,7 @@ const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 28;
+const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_LEFT_PANE_WIDTH: f32 = 290.;
 const DEFAULT_RIGHT_PANE_WIDTH: f32 = 340.;
 const LEFT_PANE_MIN_WIDTH: f32 = 220.;
@@ -75,6 +82,8 @@ const DIFF_ZONEMAP_WIDTH_PX: f32 = 14.;
 const DIFF_ZONEMAP_MARGIN_PX: f32 = 4.;
 const DIFF_ZONEMAP_MARKER_HEIGHT_PX: f32 = 2.;
 const DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX: f32 = 12.;
+const TAB_ICON_TERMINAL: &str = "\u{f489}";
+const TAB_ICON_DIFF: &str = "\u{f440}";
 
 static QUIT_ARMED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -146,17 +155,22 @@ struct RepositorySummary {
 #[derive(Clone)]
 struct TerminalSession {
     id: u64,
+    daemon_session_id: String,
     worktree_path: PathBuf,
     title: String,
     last_command: Option<String>,
     pending_command: String,
     command: String,
     state: TerminalState,
+    exit_code: Option<i32>,
+    updated_at_unix_ms: Option<u64>,
+    cols: u16,
+    rows: u16,
     generation: u64,
     output: String,
     styled_output: Vec<TerminalStyledLine>,
     cursor: Option<TerminalCursor>,
-    runtime: Option<EmbeddedTerminal>,
+    runtime: Option<TerminalRuntime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +178,12 @@ enum TerminalState {
     Running,
     Completed,
     Failed,
+}
+
+#[derive(Clone)]
+enum TerminalRuntime {
+    Embedded(EmbeddedTerminal),
+    Daemon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,8 +215,11 @@ struct DiffSession {
     id: u64,
     worktree_path: PathBuf,
     title: String,
+    raw_lines: Arc<[DiffLine]>,
+    raw_file_row_indices: HashMap<PathBuf, usize>,
     lines: Arc<[DiffLine]>,
     file_row_indices: HashMap<PathBuf, usize>,
+    wrapped_columns: usize,
     is_loading: bool,
 }
 
@@ -257,6 +280,8 @@ struct CreatedWorktree {
 struct ArborWindow {
     repository_store: Box<dyn repository_store::RepositoryStore>,
     daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
+    terminal_daemon: Option<HttpTerminalDaemon>,
+    daemon_base_url: String,
     ui_state_store: Box<dyn ui_state_store::UiStateStore>,
     config_path: PathBuf,
     config_last_modified: Option<SystemTime>,
@@ -318,6 +343,8 @@ impl ArborWindow {
                 return Self {
                     repository_store,
                     daemon_session_store,
+                    terminal_daemon: None,
+                    daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
                     ui_state_store,
                     config_path: config_path.clone(),
                     config_last_modified: app_config::config_last_modified(&config_path),
@@ -367,6 +394,8 @@ impl ArborWindow {
                 return Self {
                     repository_store,
                     daemon_session_store,
+                    terminal_daemon: None,
+                    daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
                     ui_state_store,
                     config_path: config_path.clone(),
                     config_last_modified: app_config::config_last_modified(&config_path),
@@ -416,6 +445,36 @@ impl ArborWindow {
         if let Err(error) = daemon_session_store.load() {
             notice_parts.push(format!("failed to load daemon session metadata: {error}"));
         }
+        let daemon_base_url =
+            daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
+        let mut terminal_daemon = match HttpTerminalDaemon::new(&daemon_base_url) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
+                None
+            },
+        };
+        let (initial_daemon_records, attach_daemon_runtime) =
+            if let Some(daemon) = terminal_daemon.as_ref() {
+                match daemon.list_sessions() {
+                    Ok(records) => (records, true),
+                    Err(error) => {
+                        let error_text = error.to_string();
+                        if daemon_error_is_connection_refused(&error_text) {
+                            terminal_daemon = None;
+                            (Vec::new(), false)
+                        } else {
+                            notice_parts.push(format!(
+                                "failed to list terminal sessions from daemon at {}: {error}",
+                                daemon.base_url()
+                            ));
+                            (Vec::new(), false)
+                        }
+                    },
+                }
+            } else {
+                (Vec::new(), false)
+            };
 
         let mut repositories = match repository_store.load_roots() {
             Ok(roots) => repository_store::resolve_repositories_from_roots(roots),
@@ -469,6 +528,8 @@ impl ArborWindow {
         let mut app = Self {
             repository_store,
             daemon_session_store,
+            terminal_daemon,
+            daemon_base_url,
             ui_state_store,
             config_path,
             config_last_modified,
@@ -513,6 +574,7 @@ impl ArborWindow {
         };
 
         app.refresh_worktrees(cx);
+        app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
         let _ = app.ensure_selected_worktree_terminal();
         app.sync_daemon_session_store(cx);
         app.start_terminal_poller(cx);
@@ -630,6 +692,41 @@ impl ArborWindow {
             Err(error) => notices.push(error),
         }
 
+        let next_daemon_base_url = daemon_base_url_from_config(loaded.config.daemon_url.as_deref());
+        if self.daemon_base_url != next_daemon_base_url {
+            self.daemon_base_url = next_daemon_base_url.clone();
+            self.terminal_daemon = match HttpTerminalDaemon::new(&next_daemon_base_url) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    notices.push(format!(
+                        "invalid daemon_url `{next_daemon_base_url}`: {error}"
+                    ));
+                    None
+                },
+            };
+            changed = true;
+        }
+
+        if let Some(daemon) = self.terminal_daemon.as_ref() {
+            match daemon.list_sessions() {
+                Ok(records) => {
+                    changed |= self.restore_terminal_sessions_from_records(records, true);
+                },
+                Err(error) => {
+                    let error_text = error.to_string();
+                    if daemon_error_is_connection_refused(&error_text) {
+                        self.terminal_daemon = None;
+                        changed = true;
+                    } else {
+                        notices.push(format!(
+                            "failed to list terminal sessions from daemon at {}: {error}",
+                            daemon.base_url()
+                        ));
+                    }
+                },
+            }
+        }
+
         if !notices.is_empty() {
             self.notice = Some(notices.join(" | "));
             changed = true;
@@ -645,17 +742,28 @@ impl ArborWindow {
             Ok(value) if !value.trim().is_empty() => value,
             _ => "/bin/zsh".to_owned(),
         };
+        let updated_at_unix_ms = current_unix_timestamp_millis();
 
         let records: Vec<DaemonSessionRecord> = self
             .terminals
             .iter()
             .map(|session| DaemonSessionRecord {
-                session_id: session.id.to_string(),
+                session_id: session.daemon_session_id.clone(),
                 workspace_id: session.worktree_path.display().to_string(),
                 cwd: session.worktree_path.clone(),
-                shell: shell.clone(),
-                cols: 120,
-                rows: 35,
+                shell: if session.command.trim().is_empty() {
+                    shell.clone()
+                } else {
+                    session.command.clone()
+                },
+                cols: session.cols.max(2),
+                rows: session.rows.max(1),
+                title: Some(session.title.clone()),
+                last_command: session.last_command.clone(),
+                output_tail: Some(terminal_output_tail_for_metadata(session, 64, 24_000)),
+                exit_code: session.exit_code,
+                state: Some(daemon_state_from_terminal_state(session.state)),
+                updated_at_unix_ms: session.updated_at_unix_ms.or(updated_at_unix_ms),
             })
             .collect();
 
@@ -665,61 +773,307 @@ impl ArborWindow {
         }
     }
 
+    fn restore_terminal_sessions_from_records(
+        &mut self,
+        mut records: Vec<DaemonSessionRecord>,
+        attach_runtime: bool,
+    ) -> bool {
+        if records.is_empty() {
+            return false;
+        }
+
+        records.sort_by(|left, right| {
+            right
+                .updated_at_unix_ms
+                .unwrap_or(0)
+                .cmp(&left.updated_at_unix_ms.unwrap_or(0))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+
+        let mut changed = false;
+
+        for record in records {
+            if record.session_id.trim().is_empty() {
+                continue;
+            }
+
+            let Some(worktree_path) = self.worktree_path_for_session_record(&record) else {
+                continue;
+            };
+            let session_state = terminal_state_from_daemon_record(&record);
+            let title = record
+                .title
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| format!("term-{}", self.next_terminal_id));
+            let command = record.shell.clone();
+            let output = record.output_tail.clone().unwrap_or_default();
+            let cols = record.cols.max(2);
+            let rows = record.rows.max(1);
+
+            if let Some(session) = self
+                .terminals
+                .iter_mut()
+                .find(|session| session.daemon_session_id == record.session_id)
+            {
+                if session.worktree_path != worktree_path {
+                    session.worktree_path = worktree_path.clone();
+                    changed = true;
+                }
+                if session.title != title {
+                    session.title = title.clone();
+                    changed = true;
+                }
+                if session.command != command {
+                    session.command = command.clone();
+                    changed = true;
+                }
+                if session.output != output {
+                    session.output = output.clone();
+                    session.styled_output.clear();
+                    session.cursor = None;
+                    changed = true;
+                }
+                if session.state != session_state {
+                    session.state = session_state;
+                    changed = true;
+                }
+                if session.exit_code != record.exit_code {
+                    session.exit_code = record.exit_code;
+                    changed = true;
+                }
+                if session.updated_at_unix_ms != record.updated_at_unix_ms {
+                    session.updated_at_unix_ms = record.updated_at_unix_ms;
+                    changed = true;
+                }
+                if session.cols != cols || session.rows != rows {
+                    session.cols = cols;
+                    session.rows = rows;
+                    changed = true;
+                }
+                if attach_runtime && session.runtime.is_none() {
+                    session.runtime = Some(TerminalRuntime::Daemon);
+                    changed = true;
+                }
+            } else {
+                let session_id = self.next_terminal_id;
+                self.next_terminal_id += 1;
+                self.terminals.push(TerminalSession {
+                    id: session_id,
+                    daemon_session_id: record.session_id.clone(),
+                    worktree_path: worktree_path.clone(),
+                    title,
+                    last_command: record.last_command.clone(),
+                    pending_command: String::new(),
+                    command,
+                    state: session_state,
+                    exit_code: record.exit_code,
+                    updated_at_unix_ms: record.updated_at_unix_ms,
+                    cols,
+                    rows,
+                    generation: 0,
+                    output,
+                    styled_output: Vec::new(),
+                    cursor: None,
+                    runtime: attach_runtime.then_some(TerminalRuntime::Daemon),
+                });
+                changed = true;
+            }
+
+            let mapped_terminal_id = self
+                .terminals
+                .iter()
+                .find(|session| session.daemon_session_id == record.session_id)
+                .map(|session| session.id);
+            if let Some(mapped_terminal_id) = mapped_terminal_id {
+                self.active_terminal_by_worktree
+                    .entry(worktree_path)
+                    .or_insert(mapped_terminal_id);
+            }
+        }
+
+        changed
+    }
+
+    fn worktree_path_for_session_record(&self, record: &DaemonSessionRecord) -> Option<PathBuf> {
+        if let Some(path) = self.match_worktree_path(record.cwd.as_path()) {
+            return Some(path);
+        }
+
+        let workspace_path = PathBuf::from(record.workspace_id.clone());
+        self.match_worktree_path(workspace_path.as_path())
+    }
+
+    fn match_worktree_path(&self, candidate: &Path) -> Option<PathBuf> {
+        self.worktrees
+            .iter()
+            .find(|worktree| paths_equivalent(worktree.path.as_path(), candidate))
+            .map(|worktree| worktree.path.clone())
+    }
+
     fn sync_running_terminals(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         let follow_output = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
         let target_grid_size =
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
+        let daemon = self.terminal_daemon.clone();
         let mut sessions_to_close = Vec::new();
 
-        for session in &mut self.terminals {
-            let Some(runtime) = session.runtime.as_ref() else {
+        for index in 0..self.terminals.len() {
+            let Some(runtime) = self
+                .terminals
+                .get(index)
+                .and_then(|session| session.runtime.clone())
+            else {
                 continue;
             };
 
-            if active_terminal_id == Some(session.id)
-                && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
-                && let Err(error) = runtime.resize(rows, cols, pixel_width, pixel_height)
-            {
-                self.notice = Some(format!("failed to resize terminal: {error}"));
-            }
+            match runtime {
+                TerminalRuntime::Embedded(runtime) => {
+                    let session_id = self.terminals[index].id;
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
+                        && let Err(error) = runtime.resize(rows, cols, pixel_width, pixel_height)
+                    {
+                        self.notice = Some(format!("failed to resize terminal: {error}"));
+                    }
 
-            let generation = runtime.generation();
-            if generation == session.generation {
-                continue;
-            }
+                    let generation = runtime.generation();
+                    if generation == self.terminals[index].generation {
+                        continue;
+                    }
 
-            let snapshot = runtime.snapshot();
-            let output = snapshot.output;
-            let styled_output = snapshot.styled_lines;
-            let cursor = snapshot.cursor;
-            if output != session.output
-                || styled_output != session.styled_output
-                || cursor != session.cursor
-            {
-                session.output = output;
-                session.styled_output = styled_output;
-                session.cursor = cursor;
-                changed = true;
-            }
-            session.generation = generation;
+                    let snapshot = runtime.snapshot();
+                    let session = &mut self.terminals[index];
+                    let output = snapshot.output;
+                    let styled_output = snapshot.styled_lines;
+                    let cursor = snapshot.cursor;
+                    if output != session.output
+                        || styled_output != session.styled_output
+                        || cursor != session.cursor
+                    {
+                        session.output = output;
+                        session.styled_output = styled_output;
+                        session.cursor = cursor;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        changed = true;
+                    }
+                    session.generation = generation;
 
-            if let Some(exit_code) = snapshot.exit_code
-                && session.state == TerminalState::Running
-            {
-                if exit_code == 0 {
-                    sessions_to_close.push(session.id);
-                } else {
-                    session.state = TerminalState::Failed;
-                    session.runtime = None;
-                    changed = true;
-                    self.notice = Some(format!(
-                        "terminal tab `{}` exited with code {exit_code}",
-                        session.title,
-                    ));
-                }
-            }
+                    if let Some(exit_code) = snapshot.exit_code
+                        && session.state == TerminalState::Running
+                    {
+                        session.exit_code = Some(exit_code);
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        if exit_code == 0 {
+                            sessions_to_close.push(session.id);
+                        } else {
+                            session.state = TerminalState::Failed;
+                            session.runtime = None;
+                            changed = true;
+                            self.notice = Some(format!(
+                                "terminal tab `{}` exited with code {exit_code}",
+                                session.title,
+                            ));
+                        }
+                    }
+                },
+                TerminalRuntime::Daemon => {
+                    let Some(daemon) = daemon.as_ref() else {
+                        continue;
+                    };
+
+                    let (session_id, daemon_session_id, previous_cols, previous_rows, title) = {
+                        let session = &self.terminals[index];
+                        (
+                            session.id,
+                            session.daemon_session_id.clone(),
+                            session.cols,
+                            session.rows,
+                            session.title.clone(),
+                        )
+                    };
+
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, ..)) = target_grid_size
+                        && (cols != previous_cols || rows != previous_rows)
+                    {
+                        match daemon.resize(ResizeRequest {
+                            session_id: daemon_session_id.clone(),
+                            cols,
+                            rows,
+                        }) {
+                            Ok(()) => {
+                                let session = &mut self.terminals[index];
+                                session.cols = cols;
+                                session.rows = rows;
+                                changed = true;
+                            },
+                            Err(error) => {
+                                self.notice = Some(format!("failed to resize terminal: {error}"));
+                            },
+                        }
+                    }
+
+                    match daemon.snapshot(SnapshotRequest {
+                        session_id: daemon_session_id,
+                        max_lines: 220,
+                    }) {
+                        Ok(Some(snapshot)) => {
+                            let session = &mut self.terminals[index];
+                            let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
+                            if session.output != snapshot.output_tail {
+                                session.output = snapshot.output_tail;
+                                session.styled_output.clear();
+                                session.cursor = None;
+                                changed = true;
+                            }
+                            if session.state != snapshot_state {
+                                session.state = snapshot_state;
+                                changed = true;
+                            }
+                            if session.exit_code != snapshot.exit_code {
+                                session.exit_code = snapshot.exit_code;
+                                changed = true;
+                            }
+                            if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
+                                session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
+                                changed = true;
+                            }
+
+                            if let Some(exit_code) = snapshot.exit_code {
+                                if exit_code == 0 {
+                                    sessions_to_close.push(session.id);
+                                } else if session.state == TerminalState::Failed {
+                                    session.runtime = None;
+                                    changed = true;
+                                    self.notice = Some(format!(
+                                        "terminal tab `{title}` exited with code {exit_code}",
+                                    ));
+                                }
+                            }
+                        },
+                        Ok(None) => {
+                            sessions_to_close.push(session_id);
+                        },
+                        Err(error) => {
+                            let error_text = error.to_string();
+                            if daemon_error_is_connection_refused(&error_text) {
+                                self.terminal_daemon = None;
+                                let session = &mut self.terminals[index];
+                                session.runtime = None;
+                                session.state = TerminalState::Failed;
+                                changed = true;
+                            } else {
+                                self.notice = Some(format!(
+                                    "failed to load daemon snapshot for terminal `{title}`: {error}"
+                                ));
+                            }
+                        },
+                    }
+                },
+            };
         }
 
         for session_id in sessions_to_close {
@@ -1103,6 +1457,25 @@ impl ArborWindow {
         else {
             return false;
         };
+
+        if let Some(session) = self.terminals.get(index)
+            && matches!(session.runtime, Some(TerminalRuntime::Daemon))
+            && let Some(daemon) = self.terminal_daemon.as_ref()
+        {
+            let result = if session.state == TerminalState::Running {
+                daemon.kill(KillRequest {
+                    session_id: session.daemon_session_id.clone(),
+                })
+            } else {
+                daemon.detach(DetachRequest {
+                    session_id: session.daemon_session_id.clone(),
+                })
+            };
+
+            if let Err(error) = result {
+                self.notice = Some(format!("failed to close terminal session: {error}"));
+            }
+        }
 
         let closed = self.terminals.remove(index);
         if self
@@ -1772,12 +2145,17 @@ impl ArborWindow {
 
         let mut session = TerminalSession {
             id: session_id,
+            daemon_session_id: session_id.to_string(),
             worktree_path: cwd.clone(),
             title: format!("term-{session_id}"),
             last_command: None,
             pending_command: String::new(),
             command: String::new(),
             state: TerminalState::Running,
+            exit_code: None,
+            updated_at_unix_ms: current_unix_timestamp_millis(),
+            cols: 120,
+            rows: 35,
             generation: 0,
             output: String::new(),
             styled_output: Vec::new(),
@@ -1785,40 +2163,96 @@ impl ArborWindow {
             runtime: None,
         };
 
-        match terminal_backend::launch_backend(backend_kind, &cwd) {
-            Ok(TerminalLaunch::Embedded(runtime)) => {
-                session.command = "embedded shell".to_owned();
-                session.generation = runtime.generation();
-                session.runtime = Some(runtime);
-                session.output = String::new();
-                session.styled_output = Vec::new();
-                session.cursor = None;
-            },
-            Ok(TerminalLaunch::External(result)) => {
-                session.command = result.command;
-                session.output = trim_to_last_lines(result.output, 120);
-                session.styled_output = Vec::new();
-                session.cursor = None;
-                session.state = if result.success {
-                    TerminalState::Completed
-                } else {
-                    TerminalState::Failed
-                };
-                if !result.success {
-                    self.notice = Some(format!(
-                        "terminal backend launch failed with code {:?}",
-                        result.code,
-                    ));
-                }
-            },
-            Err(error) => {
-                session.command = "launch backend".to_owned();
-                session.output = error.clone();
-                session.styled_output = Vec::new();
-                session.cursor = None;
-                session.state = TerminalState::Failed;
-                self.notice = Some(format!("terminal session failed: {error}"));
-            },
+        let mut launched_with_daemon = false;
+        if backend_kind == TerminalBackendKind::Embedded
+            && let Some(daemon) = self.terminal_daemon.as_ref()
+        {
+            let shell = match env::var("SHELL") {
+                Ok(value) if !value.trim().is_empty() => value,
+                _ => "/bin/zsh".to_owned(),
+            };
+            match daemon.create_or_attach(CreateOrAttachRequest {
+                session_id: String::new(),
+                workspace_id: cwd.display().to_string(),
+                cwd: cwd.clone(),
+                shell,
+                cols: 120,
+                rows: 35,
+                title: Some(session.title.clone()),
+            }) {
+                Ok(response) => {
+                    let daemon_session = response.session;
+                    session.daemon_session_id = daemon_session.session_id.clone();
+                    session.title = daemon_session
+                        .title
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(session.title);
+                    session.last_command = daemon_session.last_command.clone();
+                    session.command = daemon_session.shell.clone();
+                    session.output = daemon_session.output_tail.clone().unwrap_or_default();
+                    session.state = terminal_state_from_daemon_record(&daemon_session);
+                    session.exit_code = daemon_session.exit_code;
+                    session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
+                    session.cols = daemon_session.cols.max(2);
+                    session.rows = daemon_session.rows.max(1);
+                    session.runtime = Some(TerminalRuntime::Daemon);
+                    launched_with_daemon = true;
+                },
+                Err(error) => {
+                    let error_text = error.to_string();
+                    if daemon_error_is_connection_refused(&error_text) {
+                        self.terminal_daemon = None;
+                    } else {
+                        self.notice = Some(format!(
+                            "failed to create daemon terminal session (falling back to local embedded terminal): {error}"
+                        ));
+                    }
+                },
+            }
+        }
+
+        if !launched_with_daemon {
+            match terminal_backend::launch_backend(backend_kind, &cwd) {
+                Ok(TerminalLaunch::Embedded(runtime)) => {
+                    session.command = "embedded shell".to_owned();
+                    session.generation = runtime.generation();
+                    session.runtime = Some(TerminalRuntime::Embedded(runtime));
+                    session.output = String::new();
+                    session.styled_output = Vec::new();
+                    session.cursor = None;
+                    session.exit_code = None;
+                    session.updated_at_unix_ms = current_unix_timestamp_millis();
+                },
+                Ok(TerminalLaunch::External(result)) => {
+                    session.command = result.command;
+                    session.output = trim_to_last_lines(result.output, 120);
+                    session.styled_output = Vec::new();
+                    session.cursor = None;
+                    session.state = if result.success {
+                        TerminalState::Completed
+                    } else {
+                        TerminalState::Failed
+                    };
+                    session.exit_code = result.code;
+                    session.updated_at_unix_ms = current_unix_timestamp_millis();
+                    if !result.success {
+                        self.notice = Some(format!(
+                            "terminal backend launch failed with code {:?}",
+                            result.code,
+                        ));
+                    }
+                },
+                Err(error) => {
+                    session.command = "launch backend".to_owned();
+                    session.output = error.clone();
+                    session.styled_output = Vec::new();
+                    session.cursor = None;
+                    session.state = TerminalState::Failed;
+                    session.updated_at_unix_ms = current_unix_timestamp_millis();
+                    self.notice = Some(format!("terminal session failed: {error}"));
+                },
+            }
         }
 
         self.terminals.push(session);
@@ -1844,7 +2278,7 @@ impl ArborWindow {
             return;
         };
 
-        if self.active_terminal_id_for_selected_worktree() == Some(session_id) {
+        if self.active_center_tab_for_selected_worktree() == Some(CenterTab::Terminal(session_id)) {
             window.focus(&self.terminal_focus);
             self.focus_terminal_on_next_render = false;
             return;
@@ -1916,8 +2350,11 @@ impl ArborWindow {
                     id: session_id,
                     worktree_path: worktree_path.clone(),
                     title: "Diff".to_owned(),
+                    raw_lines: Arc::<[DiffLine]>::from(Vec::<DiffLine>::new()),
+                    raw_file_row_indices: HashMap::new(),
                     lines: Arc::<[DiffLine]>::from(Vec::<DiffLine>::new()),
                     file_row_indices: HashMap::new(),
+                    wrapped_columns: 0,
                     is_loading: true,
                 });
                 self.active_diff_session_id = Some(session_id);
@@ -1938,8 +2375,11 @@ impl ArborWindow {
             .find(|session| session.id == session_id)
         {
             session.is_loading = true;
+            session.raw_lines = Arc::<[DiffLine]>::from(Vec::<DiffLine>::new());
+            session.raw_file_row_indices.clear();
             session.lines = Arc::<[DiffLine]>::from(Vec::<DiffLine>::new());
             session.file_row_indices.clear();
+            session.wrapped_columns = 0;
         }
         cx.notify();
 
@@ -1951,6 +2391,7 @@ impl ArborWindow {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                let wrap_columns = this.estimated_diff_wrap_columns(terminal_cell_width_px(cx));
                 let Some(session) = this
                     .diff_sessions
                     .iter_mut()
@@ -1961,8 +2402,18 @@ impl ArborWindow {
 
                 match diff_document {
                     Ok((lines, file_row_indices)) => {
-                        session.lines = Arc::<[DiffLine]>::from(lines);
-                        session.file_row_indices = file_row_indices;
+                        let raw_lines = Arc::<[DiffLine]>::from(lines);
+                        let raw_file_row_indices = file_row_indices;
+                        let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
+                            raw_lines.as_ref(),
+                            &raw_file_row_indices,
+                            wrap_columns,
+                        );
+                        session.raw_lines = raw_lines;
+                        session.raw_file_row_indices = raw_file_row_indices;
+                        session.lines = Arc::<[DiffLine]>::from(wrapped_lines);
+                        session.file_row_indices = wrapped_indices;
+                        session.wrapped_columns = wrap_columns;
                         session.is_loading = false;
 
                         if let Some(target_path) = this.pending_diff_scroll_to_file.clone()
@@ -1972,14 +2423,24 @@ impl ArborWindow {
                         }
                     },
                     Err(error) => {
-                        session.lines = Arc::<[DiffLine]>::from(vec![DiffLine {
+                        let fallback_lines = Arc::<[DiffLine]>::from(vec![DiffLine {
                             left_line_number: None,
                             right_line_number: None,
                             left_text: format!("failed to build diff: {error}"),
                             right_text: String::new(),
                             kind: DiffLineKind::FileHeader,
                         }]);
-                        session.file_row_indices.clear();
+                        let fallback_indices = HashMap::new();
+                        let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
+                            fallback_lines.as_ref(),
+                            &fallback_indices,
+                            wrap_columns,
+                        );
+                        session.raw_lines = fallback_lines;
+                        session.raw_file_row_indices = fallback_indices;
+                        session.lines = Arc::<[DiffLine]>::from(wrapped_lines);
+                        session.file_row_indices = wrapped_indices;
+                        session.wrapped_columns = wrap_columns;
                         session.is_loading = false;
                         this.notice = Some(format!("failed to build diff: {error}"));
                     },
@@ -2012,11 +2473,47 @@ impl ArborWindow {
         })
     }
 
-    fn active_terminal_runtime_by_id(&self, session_id: u64) -> Option<EmbeddedTerminal> {
-        self.terminals
+    fn write_input_to_terminal(&mut self, session_id: u64, input: &[u8]) -> Result<(), String> {
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        let Some(index) = self
+            .terminals
             .iter()
-            .find(|session| session.id == session_id)
-            .and_then(|session| session.runtime.clone())
+            .position(|session| session.id == session_id)
+        else {
+            return Ok(());
+        };
+
+        let runtime = self.terminals[index].runtime.clone();
+        match runtime {
+            Some(TerminalRuntime::Embedded(runtime)) => runtime.write_input(input),
+            Some(TerminalRuntime::Daemon) => {
+                let Some(daemon) = self.terminal_daemon.as_ref() else {
+                    return Err("terminal daemon is not configured".to_owned());
+                };
+                let daemon_session_id = self.terminals[index].daemon_session_id.clone();
+                if input == [0x03] {
+                    daemon
+                        .signal(SignalRequest {
+                            session_id: daemon_session_id,
+                            signal: TerminalSignal::Interrupt,
+                        })
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    daemon
+                        .write(WriteRequest {
+                            session_id: daemon_session_id,
+                            bytes: input.to_vec(),
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+                Ok(())
+            },
+            None => Ok(()),
+        }
     }
 
     fn clear_terminal_selection(&mut self) {
@@ -2273,11 +2770,7 @@ impl ArborWindow {
         }
 
         self.append_pasted_text_to_pending_command(session_id, &text);
-        let Some(runtime) = self.active_terminal_runtime_by_id(session_id) else {
-            return;
-        };
-
-        if let Err(error) = runtime.write_input(text.as_bytes()) {
+        if let Err(error) = self.write_input_to_terminal(session_id, text.as_bytes()) {
             self.notice = Some(format!("failed to paste into terminal: {error}"));
         }
     }
@@ -2315,15 +2808,11 @@ impl ArborWindow {
         self.clear_terminal_selection_for_session(active_terminal_id);
         self.track_terminal_command_input(active_terminal_id, &event.keystroke);
 
-        let Some(runtime) = self.active_terminal_runtime_by_id(active_terminal_id) else {
-            return;
-        };
-
         let Some(input) = terminal_keys::terminal_bytes_from_keystroke(&event.keystroke) else {
             return;
         };
 
-        if let Err(error) = runtime.write_input(&input) {
+        if let Err(error) = self.write_input_to_terminal(active_terminal_id, &input) {
             self.notice = Some(format!("failed to write to terminal: {error}"));
         }
         cx.stop_propagation();
@@ -2370,6 +2859,60 @@ impl ArborWindow {
         let left_reducible = (self.left_pane_width - LEFT_PANE_MIN_WIDTH).max(0.);
         let left_reduction = overflow.min(left_reducible);
         self.left_pane_width -= left_reduction;
+    }
+
+    fn estimated_diff_wrap_columns(&self, cell_width_px: f32) -> usize {
+        let fallback_window_width = self.left_pane_width
+            + self.right_pane_width
+            + PANE_CENTER_MIN_WIDTH
+            + (2. * PANE_RESIZE_HANDLE_WIDTH);
+        let window_width = self
+            .last_persisted_ui_state
+            .window
+            .map(|window| window.width as f32)
+            .unwrap_or(fallback_window_width)
+            .max(600.);
+        let center_width = (window_width
+            - self.left_pane_width
+            - self.right_pane_width
+            - (2. * PANE_RESIZE_HANDLE_WIDTH))
+            .max(PANE_CENTER_MIN_WIDTH);
+        let list_width =
+            (center_width - DIFF_ZONEMAP_WIDTH_PX - (DIFF_ZONEMAP_MARGIN_PX * 2.)).max(80.);
+        let column_width = (list_width / 2.).max(40.);
+        let safe_cell_width = cell_width_px.max(1.);
+        let line_number_width = (DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * safe_cell_width) + 12.;
+        let marker_width = 10.;
+        let horizontal_padding = 16.;
+        let horizontal_gaps = 16.;
+        let text_width = (column_width
+            - line_number_width
+            - marker_width
+            - horizontal_padding
+            - horizontal_gaps)
+            .max(safe_cell_width);
+        let estimated_columns = (text_width / safe_cell_width).floor() as usize;
+        estimated_columns.clamp(12, 240)
+    }
+
+    fn rewrap_diff_sessions_if_needed(&mut self, wrap_columns: usize) {
+        for session in &mut self.diff_sessions {
+            if session.is_loading
+                || session.raw_lines.is_empty()
+                || session.wrapped_columns == wrap_columns
+            {
+                continue;
+            }
+
+            let (wrapped_lines, wrapped_indices) = wrap_diff_document_lines(
+                session.raw_lines.as_ref(),
+                &session.raw_file_row_indices,
+                wrap_columns,
+            );
+            session.lines = Arc::<[DiffLine]>::from(wrapped_lines);
+            session.file_row_indices = wrapped_indices;
+            session.wrapped_columns = wrap_columns;
+        }
     }
 
     fn ui_state_snapshot(&self, window: &Window) -> ui_state_store::UiState {
@@ -2908,6 +3451,9 @@ impl ArborWindow {
     }
 
     fn render_terminal_panel(&mut self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let wrap_columns = self.estimated_diff_wrap_columns(terminal_cell_width_px(cx));
+        self.rewrap_diff_sessions_if_needed(wrap_columns);
+
         let theme = self.theme();
         let terminals = self.selected_worktree_terminals();
         let diff_sessions = self.selected_worktree_diff_sessions();
@@ -2994,19 +3540,23 @@ impl ArborWindow {
                                 let tab_count = tabs.len();
                                 let relation =
                                     active_tab_index.map(|active_index| index.cmp(&active_index));
-                                let tab_label = match tab {
-                                    CenterTab::Terminal(session_id) => self
-                                        .terminals
-                                        .iter()
-                                        .find(|session| session.id == session_id)
-                                        .map(terminal_tab_title)
-                                        .unwrap_or_else(|| "terminal".to_owned()),
-                                    CenterTab::Diff(diff_id) => self
-                                        .diff_sessions
-                                        .iter()
-                                        .find(|session| session.id == diff_id)
-                                        .map(diff_tab_title)
-                                        .unwrap_or_else(|| "diff".to_owned()),
+                                let (tab_icon, tab_label) = match tab {
+                                    CenterTab::Terminal(session_id) => (
+                                        TAB_ICON_TERMINAL,
+                                        self.terminals
+                                            .iter()
+                                            .find(|session| session.id == session_id)
+                                            .map(terminal_tab_title)
+                                            .unwrap_or_else(|| "terminal".to_owned()),
+                                    ),
+                                    CenterTab::Diff(diff_id) => (
+                                        TAB_ICON_DIFF,
+                                        self.diff_sessions
+                                            .iter()
+                                            .find(|session| session.id == diff_id)
+                                            .map(diff_tab_title)
+                                            .unwrap_or_else(|| "diff".to_owned()),
+                                    ),
                                 };
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
@@ -3028,6 +3578,17 @@ impl ArborWindow {
                                     } else {
                                         theme.tab_bg
                                     }))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_xs()
+                                            .text_color(rgb(if is_active {
+                                                theme.text_primary
+                                            } else {
+                                                theme.text_muted
+                                            }))
+                                            .child(tab_icon),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -3610,6 +4171,96 @@ impl ArborWindow {
     }
 }
 
+fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
+    match state {
+        TerminalState::Running => TerminalSessionState::Running,
+        TerminalState::Completed => TerminalSessionState::Completed,
+        TerminalState::Failed => TerminalSessionState::Failed,
+    }
+}
+
+fn terminal_state_from_daemon_state(state: TerminalSessionState) -> TerminalState {
+    match state {
+        TerminalSessionState::Running => TerminalState::Running,
+        TerminalSessionState::Completed => TerminalState::Completed,
+        TerminalSessionState::Failed => TerminalState::Failed,
+    }
+}
+
+fn terminal_state_from_daemon_record(record: &DaemonSessionRecord) -> TerminalState {
+    if let Some(state) = record.state {
+        return terminal_state_from_daemon_state(state);
+    }
+
+    match record.exit_code {
+        Some(0) => TerminalState::Completed,
+        Some(_) => TerminalState::Failed,
+        None => TerminalState::Running,
+    }
+}
+
+fn terminal_output_tail_for_metadata(
+    session: &TerminalSession,
+    max_lines: usize,
+    max_chars: usize,
+) -> String {
+    let lines = terminal_display_lines(session);
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let start = lines.len().saturating_sub(max_lines);
+    let mut tail = lines
+        .into_iter()
+        .skip(start)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+
+    let char_count = tail.chars().count();
+    if char_count > max_chars {
+        let skip = char_count.saturating_sub(max_chars);
+        tail = tail.chars().skip(skip).collect::<String>();
+    }
+
+    tail
+}
+
+fn current_unix_timestamp_millis() -> Option<u64> {
+    let duration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    u64::try_from(duration.as_millis()).ok()
+}
+
+fn daemon_base_url_from_config(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_DAEMON_BASE_URL)
+        .to_owned()
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left_canonical = left.canonicalize().ok();
+    let right_canonical = right.canonicalize().ok();
+
+    left_canonical
+        .zip(right_canonical)
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn daemon_error_is_connection_refused(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("connection refused")
+        || lower.contains("failed to connect")
+        || lower.contains("actively refused")
+}
+
 impl WorktreeSummary {
     fn from_worktree(entry: &worktree::Worktree, repo_root: &Path) -> Self {
         let label = entry
@@ -3776,7 +4427,11 @@ fn build_worktree_diff_document(
             kind: DiffLineKind::FileHeader,
         });
 
-        let file_lines = build_file_diff_lines(worktree_path, changed_file.path.as_path())?;
+        let file_lines = build_file_diff_lines(
+            worktree_path,
+            changed_file.path.as_path(),
+            changed_file.kind,
+        )?;
         if file_lines.is_empty() {
             lines.push(DiffLine {
                 left_line_number: None,
@@ -3793,9 +4448,19 @@ fn build_worktree_diff_document(
     Ok((lines, file_row_indices))
 }
 
-fn build_file_diff_lines(worktree_path: &Path, file_path: &Path) -> Result<Vec<DiffLine>, String> {
-    let head_bytes = read_head_file_bytes(worktree_path, file_path)?;
-    let worktree_bytes = read_worktree_file_bytes(worktree_path, file_path)?;
+fn build_file_diff_lines(
+    worktree_path: &Path,
+    file_path: &Path,
+    change_kind: ChangeKind,
+) -> Result<Vec<DiffLine>, String> {
+    let head_bytes = match change_kind {
+        ChangeKind::Added | ChangeKind::IntentToAdd => Vec::new(),
+        _ => read_head_file_bytes(worktree_path, file_path)?,
+    };
+    let worktree_bytes = match change_kind {
+        ChangeKind::Removed => Vec::new(),
+        _ => read_worktree_file_bytes(worktree_path, file_path)?,
+    };
     let head_text = String::from_utf8_lossy(&head_bytes).into_owned();
     let worktree_text = String::from_utf8_lossy(&worktree_bytes).into_owned();
     Ok(build_side_by_side_diff_lines(&head_text, &worktree_text))
@@ -3809,6 +4474,8 @@ fn read_head_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8
         .arg("-C")
         .arg(worktree_path)
         .args(["cat-file", "-e", object_spec.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(|error| {
             format!(
@@ -4082,12 +4749,11 @@ fn render_diff_session(
                     let zonemap_lines = lines.clone();
                     let scroll_handle = scroll_handle.clone();
                     let mono_font = mono_font.clone();
-                    let zonemap_reserved_width =
-                        px(DIFF_ZONEMAP_WIDTH_PX + (DIFF_ZONEMAP_MARGIN_PX * 2.));
                     this.child(
                         div()
-                            .relative()
                             .size_full()
+                            .min_w_0()
+                            .flex()
                             .child(
                                 uniform_list(
                                     ("diff-list", session_id),
@@ -4096,6 +4762,8 @@ fn render_diff_session(
                                         range
                                             .map(|index| {
                                                 render_diff_row(
+                                                    session_id,
+                                                    index,
                                                     lines[index].clone(),
                                                     theme,
                                                     mono_font.clone(),
@@ -4104,8 +4772,9 @@ fn render_diff_session(
                                             .collect::<Vec<_>>()
                                     },
                                 )
-                                .size_full()
-                                .pr(zonemap_reserved_width)
+                                .h_full()
+                                .flex_1()
+                                .min_w_0()
                                 .track_scroll(scroll_handle.clone()),
                             )
                             .child(render_diff_zonemap(zonemap_lines, theme, &scroll_handle)),
@@ -4114,9 +4783,20 @@ fn render_diff_session(
         )
 }
 
-fn render_diff_row(line: DiffLine, theme: ThemePalette, mono_font: gpui::Font) -> Div {
+fn render_diff_row(
+    session_id: u64,
+    row_index: usize,
+    line: DiffLine,
+    theme: ThemePalette,
+    mono_font: gpui::Font,
+) -> impl IntoElement {
     if line.kind == DiffLineKind::FileHeader {
         return div()
+            .id(diff_row_element_id(
+                "diff-row-header",
+                session_id,
+                row_index,
+            ))
             .w_full()
             .h(px(DIFF_ROW_HEIGHT_PX))
             .min_h(px(DIFF_ROW_HEIGHT_PX))
@@ -4126,6 +4806,7 @@ fn render_diff_row(line: DiffLine, theme: ThemePalette, mono_font: gpui::Font) -
             .items_center()
             .child(
                 div()
+                    .min_w_0()
                     .font(mono_font)
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -4139,11 +4820,16 @@ fn render_diff_row(line: DiffLine, theme: ThemePalette, mono_font: gpui::Font) -
     let (left_marker, right_marker) = diff_line_markers(line.kind);
     let (left_text_color, right_text_color) = diff_line_text_colors(line.kind, theme);
     div()
+        .id(diff_row_element_id("diff-row", session_id, row_index))
         .w_full()
+        .min_w_0()
         .h(px(DIFF_ROW_HEIGHT_PX))
         .min_h(px(DIFF_ROW_HEIGHT_PX))
         .flex()
         .child(render_diff_column(
+            session_id,
+            row_index,
+            0,
             line.left_line_number,
             line.left_text,
             left_marker,
@@ -4153,6 +4839,9 @@ fn render_diff_row(line: DiffLine, theme: ThemePalette, mono_font: gpui::Font) -
             mono_font.clone(),
         ))
         .child(render_diff_column(
+            session_id,
+            row_index,
+            1,
             line.right_line_number,
             line.right_text,
             right_marker,
@@ -4164,6 +4853,9 @@ fn render_diff_row(line: DiffLine, theme: ThemePalette, mono_font: gpui::Font) -
 }
 
 fn render_diff_column(
+    session_id: u64,
+    row_index: usize,
+    side: usize,
     line_number: Option<usize>,
     text: String,
     marker: char,
@@ -4171,17 +4863,23 @@ fn render_diff_column(
     text_color: u32,
     theme: ThemePalette,
     mono_font: gpui::Font,
-) -> Div {
+) -> impl IntoElement {
     let number_width = px((DIFF_LINE_NUMBER_WIDTH_CHARS as f32 * TERMINAL_CELL_WIDTH_PX) + 12.);
 
+    let column_id = diff_row_side_element_id("diff-column", session_id, row_index, side);
+    let marker_id = diff_row_side_element_id("diff-marker", session_id, row_index, side);
+    let text_id = diff_row_side_element_id("diff-text", session_id, row_index, side);
+
     div()
+        .id(column_id)
         .flex_1()
-        .min_w(px(420.))
+        .min_w_0()
         .h_full()
         .bg(rgb(background))
         .child(
             div()
                 .h_full()
+                .min_w_0()
                 .px_2()
                 .flex()
                 .items_center()
@@ -4197,6 +4895,7 @@ fn render_diff_column(
                 )
                 .child(
                     div()
+                        .id(marker_id)
                         .w(px(10.))
                         .flex_none()
                         .text_xs()
@@ -4205,6 +4904,9 @@ fn render_diff_column(
                 )
                 .child(
                     div()
+                        .id(text_id)
+                        .min_w_0()
+                        .flex_1()
                         .font(mono_font)
                         .text_xs()
                         .whitespace_nowrap()
@@ -4225,19 +4927,18 @@ fn render_diff_zonemap(
 ) -> Div {
     let scroll_handle_for_draw = scroll_handle.clone();
     let scroll_handle_for_click = scroll_handle.clone();
+    let scroll_handle_for_drag = scroll_handle.clone();
     let total_rows = lines.len();
-    let marker_rows: Vec<(usize, u32)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| zonemap_marker_color(line.kind).map(|color| (index, color)))
-        .collect();
+    let marker_spans = build_zonemap_marker_spans(lines.as_ref());
 
     div()
-        .absolute()
-        .right(px(DIFF_ZONEMAP_MARGIN_PX))
-        .top(px(DIFF_ZONEMAP_MARGIN_PX))
-        .bottom(px(DIFF_ZONEMAP_MARGIN_PX))
-        .w(px(DIFF_ZONEMAP_WIDTH_PX))
+        .h_full()
+        .w(px(DIFF_ZONEMAP_WIDTH_PX + (DIFF_ZONEMAP_MARGIN_PX * 2.)))
+        .pt(px(DIFF_ZONEMAP_MARGIN_PX))
+        .pb(px(DIFF_ZONEMAP_MARGIN_PX))
+        .pl(px(DIFF_ZONEMAP_MARGIN_PX))
+        .pr(px(DIFF_ZONEMAP_MARGIN_PX))
+        .flex_none()
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, _| {
             if total_rows == 0 {
@@ -4256,6 +4957,24 @@ fn render_diff_zonemap(
                 target_row = total_rows.saturating_sub(1);
             }
             scroll_handle_for_click.scroll_to_item(target_row, ScrollStrategy::Center);
+        })
+        .on_mouse_move(move |event: &MouseMoveEvent, _, _| {
+            if event.pressed_button != Some(MouseButton::Left) || total_rows == 0 {
+                return;
+            }
+
+            let bounds = scroll_handle_for_drag.0.borrow().base_handle.bounds();
+            let height = bounds.size.height.to_f64() as f32;
+            if !height.is_finite() || height <= 0. {
+                return;
+            }
+
+            let relative_y = (f32::from(event.position.y - bounds.top()) / height).clamp(0., 1.);
+            let mut target_row = (relative_y * total_rows as f32).floor() as usize;
+            if target_row >= total_rows {
+                target_row = total_rows.saturating_sub(1);
+            }
+            scroll_handle_for_drag.scroll_to_item(target_row, ScrollStrategy::Center);
         })
         .child(
             canvas(
@@ -4283,15 +5002,19 @@ fn render_diff_zonemap(
                     let marker_origin_x = track_bounds.origin.x + px(1.);
                     let marker_width = (track_bounds.size.width - px(2.)).max(px(1.));
 
-                    for (row_index, color) in &marker_rows {
-                        let y_ratio = *row_index as f32 / total_rows as f32;
-                        let y = track_bounds.origin.y + px(y_ratio * height);
+                    for span in &marker_spans {
+                        let start_ratio = span.start_row as f32 / total_rows as f32;
+                        let end_ratio = span.end_row.saturating_add(1) as f32 / total_rows as f32;
+                        let y = track_bounds.origin.y + px(start_ratio * height);
+                        let marker_height =
+                            px(((end_ratio - start_ratio) * height)
+                                .max(DIFF_ZONEMAP_MARKER_HEIGHT_PX));
                         window.paint_quad(fill(
                             Bounds::new(
                                 point(marker_origin_x, y),
-                                size(marker_width, px(DIFF_ZONEMAP_MARKER_HEIGHT_PX)),
+                                size(marker_width, marker_height),
                             ),
-                            rgb(*color),
+                            rgb(span.color),
                         ));
                     }
 
@@ -4323,6 +5046,39 @@ fn render_diff_zonemap(
         )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ZonemapMarkerSpan {
+    start_row: usize,
+    end_row: usize,
+    color: u32,
+}
+
+fn build_zonemap_marker_spans(lines: &[DiffLine]) -> Vec<ZonemapMarkerSpan> {
+    let mut spans: Vec<ZonemapMarkerSpan> = Vec::new();
+
+    for (row, line) in lines.iter().enumerate() {
+        let Some(color) = zonemap_marker_color(line.kind) else {
+            continue;
+        };
+
+        if let Some(last) = spans.last_mut()
+            && last.color == color
+            && row == last.end_row.saturating_add(1)
+        {
+            last.end_row = row;
+            continue;
+        }
+
+        spans.push(ZonemapMarkerSpan {
+            start_row: row,
+            end_row: row,
+            color,
+        });
+    }
+
+    spans
+}
+
 fn diff_visible_row_range(
     scroll_handle: &UniformListScrollHandle,
     total_rows: usize,
@@ -4332,15 +5088,17 @@ fn diff_visible_row_range(
     }
 
     let state = scroll_handle.0.borrow();
-    let top = state
-        .base_handle
-        .top_item()
-        .min(total_rows.saturating_sub(1));
-    let bottom = state
-        .base_handle
-        .bottom_item()
-        .min(total_rows.saturating_sub(1));
-    (top, bottom.max(top))
+    let max_row = total_rows.saturating_sub(1);
+    let viewport_height = f32::from(state.base_handle.bounds().size.height).max(0.);
+    let scroll_offset_y = (-f32::from(state.base_handle.offset().y)).max(0.);
+
+    let top = (scroll_offset_y / DIFF_ROW_HEIGHT_PX).floor() as usize;
+    let visible_rows = ((viewport_height / DIFF_ROW_HEIGHT_PX).ceil() as usize).max(1);
+    let bottom = top.saturating_add(visible_rows.saturating_sub(1));
+
+    let clamped_top = top.min(max_row);
+    let clamped_bottom = bottom.min(max_row);
+    (clamped_top, clamped_bottom.max(clamped_top))
 }
 
 fn zonemap_marker_color(kind: DiffLineKind) -> Option<u32> {
@@ -4369,7 +5127,7 @@ fn diff_line_text_colors(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) 
         DiffLineKind::Context => (theme.text_primary, theme.text_primary),
         DiffLineKind::Added => (theme.text_disabled, 0x8fd7ad),
         DiffLineKind::Removed => (0xf2a4b7, theme.text_disabled),
-        DiffLineKind::Modified => (0xe7d399, 0xe7d399),
+        DiffLineKind::Modified => (0xf2a4b7, 0x8fd7ad),
     }
 }
 
@@ -4379,7 +5137,7 @@ fn diff_line_markers(kind: DiffLineKind) -> (char, char) {
         DiffLineKind::Context => (' ', ' '),
         DiffLineKind::Added => (' ', '+'),
         DiffLineKind::Removed => ('-', ' '),
-        DiffLineKind::Modified => ('~', '~'),
+        DiffLineKind::Modified => ('-', '+'),
     }
 }
 
@@ -4390,6 +5148,110 @@ fn diff_marker_color(marker: char) -> u32 {
         '~' => 0xf9e2af,
         _ => 0x7c8599,
     }
+}
+
+fn wrap_diff_document_lines(
+    raw_lines: &[DiffLine],
+    raw_file_row_indices: &HashMap<PathBuf, usize>,
+    wrap_columns: usize,
+) -> (Vec<DiffLine>, HashMap<PathBuf, usize>) {
+    let mut wrapped_lines = Vec::new();
+    let mut raw_to_wrapped_index = Vec::with_capacity(raw_lines.len());
+
+    for raw_line in raw_lines {
+        raw_to_wrapped_index.push(wrapped_lines.len());
+        wrapped_lines.extend(wrap_diff_line(raw_line.clone(), wrap_columns));
+    }
+
+    let wrapped_file_row_indices = raw_file_row_indices
+        .iter()
+        .map(|(path, raw_index)| {
+            let wrapped_index = raw_to_wrapped_index.get(*raw_index).copied().unwrap_or(0);
+            (path.clone(), wrapped_index)
+        })
+        .collect::<HashMap<_, _>>();
+
+    (wrapped_lines, wrapped_file_row_indices)
+}
+
+fn wrap_diff_line(line: DiffLine, wrap_columns: usize) -> Vec<DiffLine> {
+    let wrap_columns = wrap_columns.max(1);
+    if line.kind == DiffLineKind::FileHeader {
+        return split_diff_text_chunks(line.left_text, wrap_columns.saturating_mul(2))
+            .into_iter()
+            .map(|chunk| DiffLine {
+                left_line_number: None,
+                right_line_number: None,
+                left_text: chunk,
+                right_text: String::new(),
+                kind: DiffLineKind::FileHeader,
+            })
+            .collect();
+    }
+
+    let left_chunks = split_diff_text_chunks(line.left_text, wrap_columns);
+    let right_chunks = split_diff_text_chunks(line.right_text, wrap_columns);
+    let chunk_count = left_chunks.len().max(right_chunks.len()).max(1);
+    let mut wrapped = Vec::with_capacity(chunk_count);
+
+    for index in 0..chunk_count {
+        wrapped.push(DiffLine {
+            left_line_number: (index == 0).then_some(line.left_line_number).flatten(),
+            right_line_number: (index == 0).then_some(line.right_line_number).flatten(),
+            left_text: left_chunks.get(index).cloned().unwrap_or_default(),
+            right_text: right_chunks.get(index).cloned().unwrap_or_default(),
+            kind: line.kind,
+        });
+    }
+
+    wrapped
+}
+
+fn split_diff_text_chunks(text: String, wrap_columns: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let wrap_columns = wrap_columns.max(1);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0_usize;
+
+    for ch in text.chars() {
+        current.push(ch);
+        current_len += 1;
+
+        if current_len >= wrap_columns {
+            chunks.push(current);
+            current = String::new();
+            current_len = 0;
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+
+    chunks
+}
+
+fn diff_row_element_id(prefix: &'static str, session_id: u64, row_index: usize) -> ElementId {
+    let session_scope = ElementId::from((prefix, session_id));
+    ElementId::from((session_scope, row_index.to_string()))
+}
+
+fn diff_row_side_element_id(
+    prefix: &'static str,
+    session_id: u64,
+    row_index: usize,
+    side: usize,
+) -> ElementId {
+    let row_scope = diff_row_element_id(prefix, session_id, row_index);
+    ElementId::from((row_scope, side.to_string()))
 }
 
 fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
@@ -5815,12 +6677,17 @@ mod tests {
     ) -> TerminalSession {
         TerminalSession {
             id: 1,
+            daemon_session_id: "daemon-test-1".to_owned(),
             worktree_path: std::path::PathBuf::from("/tmp/worktree"),
             title: "term-1".to_owned(),
             last_command: None,
             pending_command: String::new(),
             command: "zsh".to_owned(),
             state: TerminalState::Running,
+            exit_code: None,
+            updated_at_unix_ms: None,
+            cols: 120,
+            rows: 35,
             generation: 0,
             output: text.to_owned(),
             styled_output: vec![TerminalStyledLine {

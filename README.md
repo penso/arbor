@@ -14,11 +14,15 @@ Arbor is a Rust workspace for a desktop Git worktree manager inspired by tools l
 
 - `arbor-core`: worktree primitives (list/add/remove, porcelain parsing)
 - `arbor-gui`: GPUI desktop app (`arbor` binary)
+- `arbor-httpd`: remote HTTP daemon (`arbor-httpd` binary)
+- `arbor-web-ui`: TypeScript dashboard assets + helper crate
 
 ## Workspace Layout
 
 - `crates/arbor-core`
 - `crates/arbor-gui`
+- `crates/arbor-httpd`
+- `crates/arbor-web-ui`
 
 ## Development
 
@@ -29,6 +33,36 @@ Use `just` as the task runner.
 - `just lint`
 - `just test`
 - `just run`
+- `just run-httpd`
+
+## Remote Access
+
+Run the remote daemon:
+
+- `just run-httpd`
+- or `ARBOR_HTTPD_BIND=0.0.0.0:8787 cargo +nightly-2025-11-30 run -p arbor-httpd`
+
+HTTP API:
+
+- `GET /api/v1/health`
+- `GET /api/v1/repositories`
+- `GET /api/v1/worktrees`
+- `GET /api/v1/terminals`
+- `POST /api/v1/terminals`
+- `GET /api/v1/terminals/:session_id/snapshot`
+- `POST /api/v1/terminals/:session_id/write`
+- `POST /api/v1/terminals/:session_id/resize`
+- `POST /api/v1/terminals/:session_id/signal`
+- `POST /api/v1/terminals/:session_id/detach`
+- `DELETE /api/v1/terminals/:session_id`
+- `GET /api/v1/terminals/:session_id/ws`
+
+If `crates/arbor-web-ui/app/dist/index.html` is missing, the daemon attempts an on-demand build with `npm`.
+
+Desktop daemon URL override:
+
+- `~/.config/arbor/config.toml`
+- `daemon_url = "http://127.0.0.1:8787"`
 
 ## CI
 
