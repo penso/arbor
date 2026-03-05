@@ -13,10 +13,14 @@ path = "src/main.rs"
 arbor-core = { path = "../arbor-core" }
 alacritty_terminal = { workspace = true }
 config = { workspace = true }
+gix-diff = { workspace = true, features = ["blob-experimental"] }
 gpui = { workspace = true }
+imara-diff = { workspace = true }
 portable-pty = { workspace = true }
+ropey = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+syntect = { workspace = true }
 
 [lints]
 workspace = true
