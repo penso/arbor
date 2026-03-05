@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].[0-9][0-9]'
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY_TOOLCHAIN: nightly-2025-11-30
+
+jobs:
+  validate-tag:
+    name: Validate Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate tag format
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^[0-9]{8}\.[0-9]{2}$ ]]; then
+            echo "tag must match YYYYMMDD.NN (example: 20260301.01)"
+            exit 1
+          fi
+
+  build-macos:
+    name: Build macOS app
+    needs: validate-tag
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Add Rust targets
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+      - name: Build macOS binaries
+        run: |
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target aarch64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target x86_64-apple-darwin
+      - name: Package macOS app
+        shell: bash
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/Arbor \
+            target/x86_64-apple-darwin/release/Arbor \
+            -output dist/Arbor
+          ./scripts/ci/package-macos.sh "${{ github.ref_name }}" "universal2-apple-darwin" "dist/Arbor" "dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux app (${{ matrix.target }})
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Install Linux ARM64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Add Rust target
+        shell: bash
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build Linux binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target "${{ matrix.target }}"
+      - name: Package Linux app
+        shell: bash
+        run: |
+          mkdir -p dist
+          ./scripts/ci/package-linux.sh "${{ github.ref_name }}" "${{ matrix.target }}" "target/${{ matrix.target }}/release/Arbor" "dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows app
+    needs: validate-tag
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Add Rust target
+        run: rustup target add x86_64-pc-windows-msvc
+      - name: Build Windows binary
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target x86_64-pc-windows-msvc
+      - name: Package Windows app
+        run: |
+          New-Item -Path dist -ItemType Directory -Force | Out-Null
+          .\scripts\ci\package-windows.ps1 -Tag "${{ github.ref_name }}" -TargetTriple "x86_64-pc-windows-msvc" -BinaryPath "target\x86_64-pc-windows-msvc\release\Arbor.exe" -OutputDir "dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Release
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          ls -lah dist
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/* --clobber
+          else
+            gh release create "${tag}" dist/* --title "${tag}" --generate-notes
+          fi
