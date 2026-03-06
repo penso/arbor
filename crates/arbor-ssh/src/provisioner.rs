@@ -1,12 +1,9 @@
 use {
     arbor_core::{
         outpost::RemoteHost,
-        remote::{
-            ProvisionResult, RemoteCommandOutput, RemoteError, RemoteProvisioner, RemoteTransport,
-        },
+        remote::{ProvisionResult, RemoteError, RemoteProvisioner, RemoteTransport},
     },
     crate::connection::SshConnection,
-    std::process::Command,
 };
 
 pub struct SshProvisioner<'a> {
@@ -50,7 +47,7 @@ impl RemoteProvisioner for SshProvisioner<'_> {
                 "GIT_SSH_COMMAND='ssh -F /dev/null' \
                  git clone --branch {branch} --single-branch {clone_url} {remote_path}"
             );
-            let clone_output = run_ssh_command_with_agent(self.host, &clone_cmd)?;
+            let clone_output = self.connection.run_command_with_agent_forwarding(&clone_cmd)?;
             if clone_output.exit_code != Some(0) {
                 return Err(RemoteError::Command(format!(
                     "git clone failed: {}",
@@ -66,57 +63,6 @@ impl RemoteProvisioner for SshProvisioner<'_> {
             has_remote_daemon,
         })
     }
-}
-
-fn ensure_agent_has_keys(host: &RemoteHost) {
-    // Check if agent already has identities.
-    if let Ok(output) = Command::new("ssh-add").arg("-l").output() {
-        if output.status.success() {
-            return;
-        }
-    }
-
-    // Agent is empty — load the host's configured identity file if set.
-    if let Some(ref identity_file) = host.identity_file {
-        let _ = Command::new("ssh-add").arg(identity_file).output();
-        return;
-    }
-
-    // No explicit identity: try loading default keys.
-    let _ = Command::new("ssh-add").output();
-}
-
-fn run_ssh_command_with_agent(
-    host: &RemoteHost,
-    command: &str,
-) -> Result<RemoteCommandOutput, RemoteError> {
-    ensure_agent_has_keys(host);
-
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-A")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("StrictHostKeyChecking=accept-new");
-
-    if host.port != 22 {
-        cmd.arg("-p").arg(host.port.to_string());
-    }
-
-    if let Some(ref identity_file) = host.identity_file {
-        cmd.arg("-i").arg(identity_file);
-    }
-
-    cmd.arg(format!("{}@{}", host.user, host.hostname))
-        .arg(command);
-
-    let output = cmd
-        .output()
-        .map_err(|e| RemoteError::Command(format!("failed to spawn ssh: {e}")))?;
-
-    Ok(RemoteCommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code(),
-    })
 }
 
 fn detect_remote_daemon(connection: &SshConnection, host: &RemoteHost) -> bool {
