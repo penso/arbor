@@ -71,10 +71,7 @@ pub fn resolve_repository_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
-    match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => path,
-    }
+    worktree::canonicalize_if_possible(path)
 }
 
 #[cfg(test)]

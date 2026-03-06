@@ -267,7 +267,7 @@ struct CreateWorktreeModal {
 
 enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
-    MoveActiveField(bool),
+    MoveActiveField,
     Backspace,
     Append(String),
     ClearError,
@@ -1549,10 +1549,6 @@ impl ArborWindow {
         }
     }
 
-    fn close_active_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_active_tab(window, cx);
-    }
-
     fn theme(&self) -> ThemePalette {
         self.theme_kind.palette()
     }
@@ -1856,20 +1852,10 @@ impl ArborWindow {
             ModalInputEvent::SetActiveField(field) => {
                 modal.active_field = field;
             },
-            ModalInputEvent::MoveActiveField(reverse) => {
-                modal.active_field = match (modal.active_field, reverse) {
-                    (CreateWorktreeField::RepositoryPath, false) => {
-                        CreateWorktreeField::WorktreeName
-                    },
-                    (CreateWorktreeField::WorktreeName, false) => {
-                        CreateWorktreeField::RepositoryPath
-                    },
-                    (CreateWorktreeField::RepositoryPath, true) => {
-                        CreateWorktreeField::WorktreeName
-                    },
-                    (CreateWorktreeField::WorktreeName, true) => {
-                        CreateWorktreeField::RepositoryPath
-                    },
+            ModalInputEvent::MoveActiveField => {
+                modal.active_field = match modal.active_field {
+                    CreateWorktreeField::RepositoryPath => CreateWorktreeField::WorktreeName,
+                    CreateWorktreeField::WorktreeName => CreateWorktreeField::RepositoryPath,
                 };
             },
             ModalInputEvent::Backspace => {
@@ -1988,7 +1974,7 @@ impl ArborWindow {
             },
             "tab" => {
                 self.update_create_worktree_modal_input(
-                    ModalInputEvent::MoveActiveField(event.keystroke.modifiers.shift),
+                    ModalInputEvent::MoveActiveField,
                     cx,
                 );
                 cx.stop_propagation();
@@ -2054,7 +2040,7 @@ impl ArborWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_active_terminal_session(window, cx);
+        self.close_active_tab(window, cx);
     }
 
     fn action_refresh_worktrees(
@@ -4280,10 +4266,7 @@ fn terminal_output_tail_for_metadata(
 }
 
 fn current_unix_timestamp_millis() -> Option<u64> {
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    u64::try_from(duration.as_millis()).ok()
+    daemon::current_unix_timestamp_millis()
 }
 
 fn daemon_base_url_from_config(raw: Option<&str>) -> String {
@@ -4294,16 +4277,7 @@ fn daemon_base_url_from_config(raw: Option<&str>) -> String {
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    let left_canonical = left.canonicalize().ok();
-    let right_canonical = right.canonicalize().ok();
-
-    left_canonical
-        .zip(right_canonical)
-        .is_some_and(|(left, right)| left == right)
+    worktree::paths_equivalent(left, right)
 }
 
 fn daemon_error_is_connection_refused(message: &str) -> bool {
@@ -5696,10 +5670,7 @@ fn repository_display_name(path: &Path) -> String {
 }
 
 fn short_branch(value: &str) -> String {
-    value
-        .strip_prefix("refs/heads/")
-        .unwrap_or(value)
-        .to_owned()
+    worktree::short_branch(value)
 }
 
 fn expand_home_path(path: &str) -> Result<PathBuf, String> {

@@ -201,6 +201,36 @@ fn ensure_success(output: Output) -> Result<Output, WorktreeError> {
     Err(WorktreeError::GitCommandFailed(message))
 }
 
+/// Strips `refs/heads/` prefix from a full git branch ref.
+pub fn short_branch(value: &str) -> String {
+    value
+        .strip_prefix("refs/heads/")
+        .unwrap_or(value)
+        .to_owned()
+}
+
+/// Compares two paths, falling back to canonicalization when they differ textually.
+pub fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left_canonical = left.canonicalize().ok();
+    let right_canonical = right.canonicalize().ok();
+
+    left_canonical
+        .zip(right_canonical)
+        .is_some_and(|(left, right)| left == right)
+}
+
+/// Canonicalizes a path if possible, returning the original on failure.
+pub fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
+    match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => path,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {

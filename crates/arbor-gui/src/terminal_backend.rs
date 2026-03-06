@@ -14,7 +14,6 @@ use {
     portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
     std::{
         env,
-        ffi::OsStr,
         io::{Read, Write},
         path::Path,
         process::{Command, Stdio},
@@ -194,7 +193,7 @@ impl EmbeddedTerminal {
 
         let mut command = CommandBuilder::new(default_shell());
         command.arg("-l");
-        command.cwd(path_as_os_str(cwd));
+        command.cwd(cwd.as_os_str());
 
         if env::var_os("TERM").is_none() {
             command.env("TERM", "xterm-256color");
@@ -693,11 +692,7 @@ fn ansi_256_to_rgb(index: u8) -> u32 {
 }
 
 fn default_shell() -> String {
-    env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned())
-}
-
-fn path_as_os_str(path: &Path) -> &OsStr {
-    path.as_os_str()
+    arbor_core::daemon::default_shell()
 }
 
 fn launch_alacritty(cwd: &Path) -> Result<TerminalRunResult, String> {

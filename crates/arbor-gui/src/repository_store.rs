@@ -106,10 +106,7 @@ pub fn repository_roots_from_summaries(repositories: &[crate::RepositorySummary]
 }
 
 fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
-    match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => path,
-    }
+    worktree::canonicalize_if_possible(path)
 }
 
 fn serialize_json_string_array(values: &[String]) -> String {

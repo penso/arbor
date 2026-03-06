@@ -12,7 +12,6 @@ use {
         path::PathBuf,
         sync::{Arc, Mutex, MutexGuard},
         thread,
-        time::{SystemTime, UNIX_EPOCH},
     },
     thiserror::Error,
     tokio::sync::broadcast,
@@ -410,8 +409,10 @@ impl LocalTerminalDaemon {
             .collect()
     }
 
-    fn persist_current_sessions(&self) -> Result<(), LocalTerminalDaemonError> {
-        let live_records = self.collect_live_records();
+    fn merge_live_and_stored(
+        &self,
+        live_records: Vec<DaemonSessionRecord>,
+    ) -> Result<Vec<DaemonSessionRecord>, LocalTerminalDaemonError> {
         let live_ids: HashSet<String> = live_records
             .iter()
             .map(|record| record.session_id.clone())
@@ -419,15 +420,16 @@ impl LocalTerminalDaemon {
 
         let mut stored = self.session_store.load()?;
         stored.retain(|record| {
-            if live_ids.contains(&record.session_id) {
-                return false;
-            }
-
-            !is_generated_daemon_session_id(&record.session_id)
+            !live_ids.contains(&record.session_id)
+                && !is_generated_daemon_session_id(&record.session_id)
         });
         stored.extend(live_records);
+        Ok(stored)
+    }
 
-        self.session_store.save(&stored)?;
+    fn persist_current_sessions(&self) -> Result<(), LocalTerminalDaemonError> {
+        let merged = self.merge_live_and_stored(self.collect_live_records())?;
+        self.session_store.save(&merged)?;
         Ok(())
     }
 
@@ -528,23 +530,7 @@ impl TerminalDaemon for LocalTerminalDaemon {
     }
 
     fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, Self::Error> {
-        let live_records = self.collect_live_records();
-        let live_ids: HashSet<String> = live_records
-            .iter()
-            .map(|record| record.session_id.clone())
-            .collect();
-
-        let mut stored = self.session_store.load()?;
-        stored.retain(|record| {
-            if live_ids.contains(&record.session_id) {
-                return false;
-            }
-
-            !is_generated_daemon_session_id(&record.session_id)
-        });
-        stored.extend(live_records);
-
-        Ok(stored)
+        self.merge_live_and_stored(self.collect_live_records())
     }
 }
 
@@ -553,15 +539,11 @@ fn is_generated_daemon_session_id(session_id: &str) -> bool {
 }
 
 fn default_shell() -> String {
-    match std::env::var("SHELL") {
-        Ok(shell) if !shell.trim().is_empty() => shell,
-        _ => "/bin/zsh".to_owned(),
-    }
+    arbor_core::daemon::default_shell()
 }
 
 fn current_unix_timestamp_millis() -> Option<u64> {
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-    u64::try_from(duration.as_millis()).ok()
+    arbor_core::daemon::current_unix_timestamp_millis()
 }
 
 fn trim_to_last_lines(text: &str, max_lines: usize) -> String {

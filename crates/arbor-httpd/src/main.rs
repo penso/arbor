@@ -589,15 +589,7 @@ async fn process_ws_client_message(
                 })
                 .map_err(|error| error.to_string())?;
         },
-        Message::Ping(payload) => {
-            let mut daemon = state.daemon.lock().await;
-            daemon
-                .write(WriteRequest {
-                    session_id: session_id.to_owned(),
-                    bytes: payload.to_vec(),
-                })
-                .map_err(|error| error.to_string())?;
-        },
+        Message::Ping(_) => {},
         Message::Pong(_) => {},
         Message::Close(_) => {
             return Ok(false);
@@ -707,23 +699,11 @@ fn repository_display_name(path: &Path) -> String {
 }
 
 fn short_branch(value: &str) -> String {
-    value
-        .strip_prefix("refs/heads/")
-        .unwrap_or(value)
-        .to_owned()
+    worktree::short_branch(value)
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    let left_canonical = left.canonicalize().ok();
-    let right_canonical = right.canonicalize().ok();
-
-    left_canonical
-        .zip(right_canonical)
-        .is_some_and(|(left, right)| left == right)
+    worktree::paths_equivalent(left, right)
 }
 
 fn internal_error(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {

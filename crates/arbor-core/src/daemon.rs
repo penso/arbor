@@ -2,7 +2,8 @@ use {
     serde::{Deserialize, Serialize},
     std::{
         env, fs,
-        path::{Path, PathBuf},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
     },
     thiserror::Error,
 };
@@ -249,24 +250,22 @@ pub fn default_daemon_session_store() -> JsonDaemonSessionStore {
     JsonDaemonSessionStore::default()
 }
 
-pub fn daemon_contract_outline() -> &'static str {
-    "create_or_attach -> write -> resize -> signal -> detach -> kill -> snapshot -> list_sessions, with session records persisted by DaemonSessionStore"
+pub fn current_unix_timestamp_millis() -> Option<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(duration.as_millis()).ok()
 }
 
-pub fn normalize_session_store_path(path: &Path) -> PathBuf {
-    match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => path.to_path_buf(),
+pub fn default_shell() -> String {
+    match env::var("SHELL") {
+        Ok(shell) if !shell.trim().is_empty() => shell,
+        _ => "/bin/zsh".to_owned(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use {
-        crate::daemon::{
-            DaemonSessionRecord, DaemonSessionStore, JsonDaemonSessionStore,
-            normalize_session_store_path,
-        },
+        crate::daemon::{DaemonSessionRecord, DaemonSessionStore, JsonDaemonSessionStore},
         std::path::PathBuf,
     };
 
@@ -294,7 +293,6 @@ mod tests {
         store.save(&sessions)?;
         let loaded = store.load()?;
         assert_eq!(loaded, sessions);
-        assert_eq!(normalize_session_store_path(&path), path.canonicalize()?);
         Ok(())
     }
 
