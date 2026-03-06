@@ -255,6 +255,13 @@ pub fn current_unix_timestamp_millis() -> Option<u64> {
     u64::try_from(duration.as_millis()).ok()
 }
 
+pub fn default_shell() -> String {
+    match env::var("SHELL") {
+        Ok(shell) if !shell.trim().is_empty() => shell,
+        _ => "/bin/zsh".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {

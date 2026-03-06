@@ -539,10 +539,7 @@ fn is_generated_daemon_session_id(session_id: &str) -> bool {
 }
 
 fn default_shell() -> String {
-    match std::env::var("SHELL") {
-        Ok(shell) if !shell.trim().is_empty() => shell,
-        _ => "/bin/zsh".to_owned(),
-    }
+    arbor_core::daemon::default_shell()
 }
 
 fn current_unix_timestamp_millis() -> Option<u64> {
