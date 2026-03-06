@@ -613,9 +613,7 @@ impl ArborWindow {
             create_worktree_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
-            left_pane_visible: startup_ui_state
-                .left_pane_visible
-                .unwrap_or(true),
+            left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             worktree_nav_back: Vec::new(),
             worktree_nav_forward: Vec::new(),
@@ -1755,11 +1753,11 @@ impl ArborWindow {
     }
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(old) = self.active_worktree_index {
-            if old != index {
-                self.worktree_nav_back.push(old);
-                self.worktree_nav_forward.clear();
-            }
+        if let Some(old) = self.active_worktree_index
+            && old != index
+        {
+            self.worktree_nav_back.push(old);
+            self.worktree_nav_forward.clear();
         }
         self.active_worktree_index = Some(index);
         self.active_diff_session_id = None;
@@ -1875,7 +1873,7 @@ impl ArborWindow {
             if name.starts_with('.') {
                 continue;
             }
-            let is_dir = entry.file_type().map_or(false, |ft| ft.is_dir());
+            let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
             if is_dir
                 && matches!(
                     name.as_str(),
@@ -1888,9 +1886,8 @@ impl ArborWindow {
         }
 
         children.sort_by(|a, b| {
-            b.2.cmp(&a.2).then_with(|| {
-                a.0.to_lowercase().cmp(&b.0.to_lowercase())
-            })
+            b.2.cmp(&a.2)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
         });
 
         for (name, full_path, is_dir) in children {
@@ -2127,10 +2124,7 @@ impl ArborWindow {
                 return;
             },
             "tab" => {
-                self.update_create_worktree_modal_input(
-                    ModalInputEvent::MoveActiveField,
-                    cx,
-                );
+                self.update_create_worktree_modal_input(ModalInputEvent::MoveActiveField, cx);
                 cx.stop_propagation();
                 return;
             },
@@ -2335,8 +2329,8 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let all_collapsed = (0..self.repositories.len())
-            .all(|i| self.collapsed_repositories.contains(&i));
+        let all_collapsed =
+            (0..self.repositories.len()).all(|i| self.collapsed_repositories.contains(&i));
         if all_collapsed {
             self.collapsed_repositories.clear();
         } else {
@@ -3414,22 +3408,18 @@ impl ArborWindow {
                         .size(px(24.))
                         .rounded_full()
                         .overflow_hidden()
-                        .child(
-                            img(url)
+                        .child(img(url).size_full().with_fallback(move || {
+                            div()
                                 .size_full()
-                                .with_fallback(move || {
-                                    div()
-                                        .size_full()
-                                        .font_family(FONT_MONO)
-                                        .text_size(px(14.))
-                                        .text_color(rgb(theme.text_muted))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child("\u{f09b}")
-                                        .into_any_element()
-                                }),
-                        )
+                                .font_family(FONT_MONO)
+                                .text_size(px(14.))
+                                .text_color(rgb(theme.text_muted))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("\u{f09b}")
+                                .into_any_element()
+                        }))
                         .into_any_element()
                 } else {
                     div()
@@ -3483,11 +3473,9 @@ impl ArborWindow {
                                 theme.text_muted
                             }))
                             .child(first_char)
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| {
-                                    this.select_worktree(wt_index, window, cx);
-                                }),
-                            ),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_worktree(wt_index, window, cx);
+                            })),
                     );
                 }
             }
@@ -4397,12 +4385,8 @@ impl ArborWindow {
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let selected_path = self.selected_changed_file.clone();
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(div()
+        div().flex_1().min_h_0().flex().flex_col().child(
+            div()
                 .id("changes-scroll")
                 .flex_1()
                 .min_h_0()
@@ -4413,93 +4397,94 @@ impl ArborWindow {
                 .font_family(FONT_MONO)
                 .p_1()
                 .children(self.changed_files.iter().map(|change| {
-                        let is_selected = selected_path
-                            .as_ref()
-                            .is_some_and(|selected| selected.as_path() == change.path.as_path());
-                        let status_color = match change.kind {
-                            ChangeKind::Added => 0xa6e3a1,
-                            ChangeKind::Modified => 0xf9e2af,
-                            ChangeKind::Removed => 0xf38ba8,
-                            ChangeKind::Renamed => 0x89dceb,
-                            ChangeKind::Copied => 0x74c7ec,
-                            ChangeKind::TypeChange => 0xcba6f7,
-                            ChangeKind::Conflict => 0xf38ba8,
-                            ChangeKind::IntentToAdd => 0x94e2d5,
-                        };
-                        let path_color = match change.kind {
-                            ChangeKind::Added => 0x8fd7ad,
-                            ChangeKind::Removed => 0xf2a4b7,
-                            ChangeKind::Modified => 0xd9d7cf,
-                            ChangeKind::Renamed => 0x8ecae6,
-                            ChangeKind::Copied => 0x91d7e3,
-                            ChangeKind::TypeChange => 0xc4b1ee,
-                            ChangeKind::Conflict => 0xf38ba8,
-                            ChangeKind::IntentToAdd => 0x94e2d5,
-                        };
-                        let show_line_stats = change.additions > 0 || change.deletions > 0;
-                        let display_path = truncate_middle_path_for_width(
-                            change.path.as_path(),
-                            self.right_pane_width,
-                        );
-                        let file_path = change.path.clone();
+                    let is_selected = selected_path
+                        .as_ref()
+                        .is_some_and(|selected| selected.as_path() == change.path.as_path());
+                    let status_color = match change.kind {
+                        ChangeKind::Added => 0xa6e3a1,
+                        ChangeKind::Modified => 0xf9e2af,
+                        ChangeKind::Removed => 0xf38ba8,
+                        ChangeKind::Renamed => 0x89dceb,
+                        ChangeKind::Copied => 0x74c7ec,
+                        ChangeKind::TypeChange => 0xcba6f7,
+                        ChangeKind::Conflict => 0xf38ba8,
+                        ChangeKind::IntentToAdd => 0x94e2d5,
+                    };
+                    let path_color = match change.kind {
+                        ChangeKind::Added => 0x8fd7ad,
+                        ChangeKind::Removed => 0xf2a4b7,
+                        ChangeKind::Modified => 0xd9d7cf,
+                        ChangeKind::Renamed => 0x8ecae6,
+                        ChangeKind::Copied => 0x91d7e3,
+                        ChangeKind::TypeChange => 0xc4b1ee,
+                        ChangeKind::Conflict => 0xf38ba8,
+                        ChangeKind::IntentToAdd => 0x94e2d5,
+                    };
+                    let show_line_stats = change.additions > 0 || change.deletions > 0;
+                    let display_path = truncate_middle_path_for_width(
+                        change.path.as_path(),
+                        self.right_pane_width,
+                    );
+                    let file_path = change.path.clone();
 
-                        div()
-                            .h(px(24.))
-                            .pl(px(4.))
-                            .pr_1()
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                    this.select_changed_file(file_path.clone(), cx);
-                                    this.open_diff_tab_for_selected_file(cx);
+                    div()
+                        .h(px(24.))
+                        .pl(px(4.))
+                        .pr_1()
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.select_changed_file(file_path.clone(), cx);
+                                this.open_diff_tab_for_selected_file(cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(rgb(status_color))
+                                .child(change_code(change.kind)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_xs()
+                                .text_color(rgb(path_color))
+                                .child(display_path),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_1()
+                                .when(show_line_stats, |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x72d69c))
+                                            .child(format!("+{}", change.additions)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xeb6f92))
+                                            .child(format!("-{}", change.deletions)),
+                                    )
                                 }),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(status_color))
-                                    .child(change_code(change.kind)),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(rgb(path_color))
-                                    .child(display_path),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_1()
-                                    .when(show_line_stats, |this| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x72d69c))
-                                                .child(format!("+{}", change.additions)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xeb6f92))
-                                                .child(format!("-{}", change.deletions)),
-                                        )
-                                    }),
-                            )
-                    })))
+                        )
+                })),
+        )
     }
 
     fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
@@ -4507,96 +4492,93 @@ impl ArborWindow {
         let selected_entry = self.selected_file_tree_entry.clone();
         let expanded_dirs = &self.expanded_dirs;
 
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(div()
-            .id("file-tree-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .scrollbar_width(px(10.))
-            .flex()
-            .flex_col()
-            .font_family(FONT_MONO)
-            .p_1()
-            .children(self.file_tree_entries.iter().map(|entry| {
-                let is_selected = selected_entry
-                    .as_ref()
-                    .is_some_and(|selected| selected == &entry.path);
-                let indent = entry.depth as f32 * 16. + 4.;
-                let entry_path = entry.path.clone();
-                let is_dir = entry.is_dir;
+        div().flex_1().min_h_0().flex().flex_col().child(
+            div()
+                .id("file-tree-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(10.))
+                .flex()
+                .flex_col()
+                .font_family(FONT_MONO)
+                .p_1()
+                .children(self.file_tree_entries.iter().map(|entry| {
+                    let is_selected = selected_entry
+                        .as_ref()
+                        .is_some_and(|selected| selected == &entry.path);
+                    let indent = entry.depth as f32 * 16. + 4.;
+                    let entry_path = entry.path.clone();
+                    let is_dir = entry.is_dir;
 
-                let chevron = if is_dir {
-                    if expanded_dirs.contains(&entry.path) {
-                        "\u{f078}" // chevron down
+                    let chevron = if is_dir {
+                        if expanded_dirs.contains(&entry.path) {
+                            "\u{f078}" // chevron down
+                        } else {
+                            "\u{f054}" // chevron right
+                        }
                     } else {
-                        "\u{f054}" // chevron right
-                    }
-                } else {
-                    " "
-                };
+                        " "
+                    };
 
-                let (file_icon, icon_color) = file_icon_and_color(&entry.name, is_dir);
+                    let (file_icon, icon_color) = file_icon_and_color(&entry.name, is_dir);
 
-                div()
-                    .id(ElementId::Name(
-                        format!("ft-{}", entry.path.display()).into(),
-                    ))
-                    .h(px(24.))
-                    .pl(px(indent))
-                    .pr_1()
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .bg(rgb(if is_selected {
-                        theme.panel_active_bg
-                    } else {
-                        theme.sidebar_bg
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            if is_dir {
-                                this.toggle_file_tree_dir(entry_path.clone(), cx);
-                            } else {
-                                this.select_file_tree_entry(entry_path.clone(), cx);
-                            }
-                        }),
-                    )
-                    .child(
-                        div()
-                            .w(px(12.))
-                            .flex_none()
-                            .text_size(px(10.))
-                            .text_color(rgb(theme.text_muted))
-                            .child(chevron),
-                    )
-                    .child(
-                        div()
-                            .w(px(20.))
-                            .flex_none()
-                            .text_size(px(18.))
-                            .text_color(rgb(icon_color))
-                            .child(file_icon),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_xs()
-                            .text_color(rgb(icon_color))
-                            .when(is_dir, |this| this.font_weight(FontWeight::SEMIBOLD))
-                            .child(entry.name.clone()),
-                    )
-            })))
+                    div()
+                        .id(ElementId::Name(
+                            format!("ft-{}", entry.path.display()).into(),
+                        ))
+                        .h(px(24.))
+                        .pl(px(indent))
+                        .pr_1()
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .bg(rgb(if is_selected {
+                            theme.panel_active_bg
+                        } else {
+                            theme.sidebar_bg
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                if is_dir {
+                                    this.toggle_file_tree_dir(entry_path.clone(), cx);
+                                } else {
+                                    this.select_file_tree_entry(entry_path.clone(), cx);
+                                }
+                            }),
+                        )
+                        .child(
+                            div()
+                                .w(px(12.))
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(rgb(theme.text_muted))
+                                .child(chevron),
+                        )
+                        .child(
+                            div()
+                                .w(px(20.))
+                                .flex_none()
+                                .text_size(px(18.))
+                                .text_color(rgb(icon_color))
+                                .child(file_icon),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_xs()
+                                .text_color(rgb(icon_color))
+                                .when(is_dir, |this| this.font_weight(FontWeight::SEMIBOLD))
+                                .child(entry.name.clone()),
+                        )
+                })),
+        )
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
@@ -4647,18 +4629,20 @@ impl ArborWindow {
                     ))
                     .child(status_text(theme, "•"))
                     .child(status_text(theme, format!("terminals {terminal_count}")))
-                    .child(if self.worktree_stats_loading || self.worktree_prs_loading {
-                        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                        let frame_index = (SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis()
-                            / 100) as usize
-                            % frames.len();
-                        status_text(theme, format!("{} loading", frames[frame_index]))
-                    } else {
-                        status_text(theme, "ready")
-                    }),
+                    .child(
+                        if self.worktree_stats_loading || self.worktree_prs_loading {
+                            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                            let frame_index = (SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                                / 100) as usize
+                                % frames.len();
+                            status_text(theme, format!("{} loading", frames[frame_index]))
+                        } else {
+                            status_text(theme, "ready")
+                        },
+                    ),
             )
     }
 
@@ -6144,7 +6128,7 @@ fn file_icon_and_color(name: &str, is_dir: bool) -> (&'static str, u32) {
         "Dockerfile" | ".dockerignore" => return ("\u{e7b0}", 0x61afef),
         "Makefile" | "Justfile" => return ("\u{e615}", 0x98c379),
         ".gitignore" | ".env" => return ("\u{e615}", 0x838994),
-        _ => {}
+        _ => {},
     }
 
     // Check extension
