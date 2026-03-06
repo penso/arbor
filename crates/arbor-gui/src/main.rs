@@ -4027,7 +4027,6 @@ impl ArborWindow {
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let selected_path = self.selected_changed_file.clone();
-        let has_selected = selected_path.is_some();
         div()
             .flex_1()
             .min_h_0()
@@ -4085,11 +4084,9 @@ impl ArborWindow {
                             .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                                     this.select_changed_file(file_path.clone(), cx);
-                                    if event.click_count == 2 {
-                                        this.open_diff_tab_for_selected_file(cx);
-                                    }
+                                    this.open_diff_tab_for_selected_file(cx);
                                 }),
                             )
                             .child(
@@ -4132,32 +4129,7 @@ impl ArborWindow {
                                         )
                                     }),
                             )
-                    })),
-            )
-            .when(has_selected, |this| {
-                this.child(
-                    div()
-                        .h(px(28.))
-                        .px_2()
-                        .border_t_1()
-                        .border_color(rgb(theme.border))
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .child(
-                            action_button(
-                                theme,
-                                "open-diff-tab",
-                                "Diff",
-                                true,
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_diff_tab_for_selected_file(cx);
-                            })),
-                        ),
-                )
-            })
+                    })))
     }
 
     fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
