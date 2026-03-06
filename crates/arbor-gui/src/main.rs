@@ -267,7 +267,7 @@ struct CreateWorktreeModal {
 
 enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
-    MoveActiveField(bool),
+    MoveActiveField,
     Backspace,
     Append(String),
     ClearError,
@@ -1549,10 +1549,6 @@ impl ArborWindow {
         }
     }
 
-    fn close_active_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_active_tab(window, cx);
-    }
-
     fn theme(&self) -> ThemePalette {
         self.theme_kind.palette()
     }
@@ -1856,20 +1852,10 @@ impl ArborWindow {
             ModalInputEvent::SetActiveField(field) => {
                 modal.active_field = field;
             },
-            ModalInputEvent::MoveActiveField(reverse) => {
-                modal.active_field = match (modal.active_field, reverse) {
-                    (CreateWorktreeField::RepositoryPath, false) => {
-                        CreateWorktreeField::WorktreeName
-                    },
-                    (CreateWorktreeField::WorktreeName, false) => {
-                        CreateWorktreeField::RepositoryPath
-                    },
-                    (CreateWorktreeField::RepositoryPath, true) => {
-                        CreateWorktreeField::WorktreeName
-                    },
-                    (CreateWorktreeField::WorktreeName, true) => {
-                        CreateWorktreeField::RepositoryPath
-                    },
+            ModalInputEvent::MoveActiveField => {
+                modal.active_field = match modal.active_field {
+                    CreateWorktreeField::RepositoryPath => CreateWorktreeField::WorktreeName,
+                    CreateWorktreeField::WorktreeName => CreateWorktreeField::RepositoryPath,
                 };
             },
             ModalInputEvent::Backspace => {
@@ -1988,7 +1974,7 @@ impl ArborWindow {
             },
             "tab" => {
                 self.update_create_worktree_modal_input(
-                    ModalInputEvent::MoveActiveField(event.keystroke.modifiers.shift),
+                    ModalInputEvent::MoveActiveField,
                     cx,
                 );
                 cx.stop_propagation();
@@ -2054,7 +2040,7 @@ impl ArborWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_active_terminal_session(window, cx);
+        self.close_active_tab(window, cx);
     }
 
     fn action_refresh_worktrees(

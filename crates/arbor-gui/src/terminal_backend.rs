@@ -692,7 +692,7 @@ fn ansi_256_to_rgb(index: u8) -> u32 {
 }
 
 fn default_shell() -> String {
-    env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned())
+    arbor_core::daemon::default_shell()
 }
 
 fn launch_alacritty(cwd: &Path) -> Result<TerminalRunResult, String> {
