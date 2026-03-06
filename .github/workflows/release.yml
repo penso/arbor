@@ -96,8 +96,12 @@ jobs:
 
           # Restrict existing sources to amd64 only, then add the ports
           # mirror for arm64 packages (the default mirrors don't carry arm64).
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list 2>/dev/null || true
+          # Ubuntu 24.04 uses deb822 (.sources) format; pin with Architectures.
+          sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          # Also handle any traditional .list files (skip those with existing [arch=]).
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+            [ -f "$f" ] && sudo sed -i '/^\s*#/!s/^deb \([^[]\)/deb [arch=amd64] \1/' "$f" 2>/dev/null || true
+          done
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
