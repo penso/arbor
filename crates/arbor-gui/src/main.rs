@@ -120,6 +120,7 @@ fn terminal_mono_font(cx: &App) -> gpui::Font {
 
 actions!(arbor, [
     RequestQuit,
+    NewWindow,
     SpawnTerminal,
     CloseActiveTerminal,
     RefreshWorktrees,
@@ -131,7 +132,11 @@ actions!(arbor, [
     UseGruvboxTheme,
     UseEmbeddedBackend,
     UseAlacrittyBackend,
-    UseGhosttyBackend
+    UseGhosttyBackend,
+    ToggleLeftPane,
+    NavigateWorktreeBack,
+    NavigateWorktreeForward,
+    CollapseAllRepositories
 ]);
 
 #[derive(Debug, Clone)]
@@ -336,6 +341,10 @@ struct ArborWindow {
     file_tree_entries: Vec<FileTreeEntry>,
     expanded_dirs: HashSet<PathBuf>,
     selected_file_tree_entry: Option<PathBuf>,
+    left_pane_visible: bool,
+    collapsed_repositories: HashSet<usize>,
+    worktree_nav_back: Vec<usize>,
+    worktree_nav_forward: Vec<usize>,
 }
 
 impl ArborWindow {
@@ -407,6 +416,10 @@ impl ArborWindow {
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
+                    left_pane_visible: true,
+                    collapsed_repositories: HashSet::new(),
+                    worktree_nav_back: Vec::new(),
+                    worktree_nav_forward: Vec::new(),
                 };
             },
         };
@@ -462,6 +475,10 @@ impl ArborWindow {
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
+                    left_pane_visible: true,
+                    collapsed_repositories: HashSet::new(),
+                    worktree_nav_back: Vec::new(),
+                    worktree_nav_forward: Vec::new(),
                 };
             },
         };
@@ -596,6 +613,12 @@ impl ArborWindow {
             create_worktree_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
+            left_pane_visible: startup_ui_state
+                .left_pane_visible
+                .unwrap_or(true),
+            collapsed_repositories: HashSet::new(),
+            worktree_nav_back: Vec::new(),
+            worktree_nav_forward: Vec::new(),
             last_persisted_ui_state: startup_ui_state,
             last_ui_state_error: None,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
@@ -1732,6 +1755,12 @@ impl ArborWindow {
     }
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(old) = self.active_worktree_index {
+            if old != index {
+                self.worktree_nav_back.push(old);
+                self.worktree_nav_forward.clear();
+            }
+        }
         self.active_worktree_index = Some(index);
         self.active_diff_session_id = None;
         self.sync_active_repository_from_selected_worktree();
@@ -2240,6 +2269,80 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         self.switch_terminal_backend(TerminalBackendKind::Ghostty, cx);
+    }
+
+    fn action_toggle_left_pane(
+        &mut self,
+        _: &ToggleLeftPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.left_pane_visible = !self.left_pane_visible;
+        cx.notify();
+    }
+
+    fn action_navigate_worktree_back(
+        &mut self,
+        _: &NavigateWorktreeBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.worktree_nav_back.pop() {
+            if let Some(current) = self.active_worktree_index {
+                self.worktree_nav_forward.push(current);
+            }
+            self.active_worktree_index = Some(target);
+            self.active_diff_session_id = None;
+            self.sync_active_repository_from_selected_worktree();
+            let _ = self.reload_changed_files();
+            if self.ensure_selected_worktree_terminal() {
+                self.sync_daemon_session_store(cx);
+            }
+            self.terminal_scroll_handle.scroll_to_bottom();
+            window.focus(&self.terminal_focus);
+            self.focus_terminal_on_next_render = false;
+            cx.notify();
+        }
+    }
+
+    fn action_navigate_worktree_forward(
+        &mut self,
+        _: &NavigateWorktreeForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.worktree_nav_forward.pop() {
+            if let Some(current) = self.active_worktree_index {
+                self.worktree_nav_back.push(current);
+            }
+            self.active_worktree_index = Some(target);
+            self.active_diff_session_id = None;
+            self.sync_active_repository_from_selected_worktree();
+            let _ = self.reload_changed_files();
+            if self.ensure_selected_worktree_terminal() {
+                self.sync_daemon_session_store(cx);
+            }
+            self.terminal_scroll_handle.scroll_to_bottom();
+            window.focus(&self.terminal_focus);
+            self.focus_terminal_on_next_render = false;
+            cx.notify();
+        }
+    }
+
+    fn action_collapse_all_repositories(
+        &mut self,
+        _: &CollapseAllRepositories,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let all_collapsed = (0..self.repositories.len())
+            .all(|i| self.collapsed_repositories.contains(&i));
+        if all_collapsed {
+            self.collapsed_repositories.clear();
+        } else {
+            self.collapsed_repositories = (0..self.repositories.len()).collect();
+        }
+        cx.notify();
     }
 
     fn spawn_terminal_session_inner(&mut self, show_notice_on_missing_worktree: bool) -> bool {
@@ -3079,6 +3182,7 @@ impl ArborWindow {
                 width,
                 height,
             }),
+            left_pane_visible: Some(self.left_pane_visible),
         }
     }
 
@@ -3158,7 +3262,7 @@ impl ArborWindow {
             .occlude()
     }
 
-    fn render_top_bar(&self) -> impl IntoElement {
+    fn render_top_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
         let repository = self.selected_repository_label();
         let branch = self
@@ -3166,6 +3270,9 @@ impl ArborWindow {
             .map(|worktree| worktree.branch.clone())
             .unwrap_or_else(|| "no-worktree".to_owned());
         let centered_title = format!("{repository} · {branch}");
+        let back_enabled = !self.worktree_nav_back.is_empty();
+        let forward_enabled = !self.worktree_nav_forward.is_empty();
+        let sidebar_hidden = !self.left_pane_visible;
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -3174,6 +3281,86 @@ impl ArborWindow {
             .relative()
             .flex()
             .items_center()
+            // Left group: sidebar toggle + back/forward navigation (offset to clear macOS traffic lights)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(76.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .child(
+                        div()
+                            .id("toggle-sidebar")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if sidebar_hidden {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            }))
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.action_toggle_left_pane(&ToggleLeftPane, window, cx);
+                            }))
+                            .child("\u{f0c9}"),
+                    )
+                    .child(
+                        div()
+                            .id("nav-back")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if back_enabled {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(back_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, window, cx| {
+                                    this.action_navigate_worktree_back(
+                                        &NavigateWorktreeBack,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                            })
+                            .child("\u{f053}"),
+                    )
+                    .child(
+                        div()
+                            .id("nav-forward")
+                            .cursor_pointer()
+                            .font_family(FONT_MONO)
+                            .text_size(px(20.))
+                            .text_color(rgb(if forward_enabled {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(forward_enabled, |this| {
+                                this.on_click(cx.listener(|this, _, window, cx| {
+                                    this.action_navigate_worktree_forward(
+                                        &NavigateWorktreeForward,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                            })
+                            .child("\u{f054}"),
+                    ),
+            )
+            // Center: title
             .child(
                 div()
                     .absolute()
@@ -3192,10 +3379,126 @@ impl ArborWindow {
     }
 
     fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.left_pane_visible {
+            let theme = self.theme();
+            let repositories = self.repositories.clone();
+            let worktrees = self.worktrees.clone();
+            let mut pane = div()
+                .id("collapsed-left-pane")
+                .w(px(40.))
+                .h_full()
+                .flex_none()
+                .bg(rgb(theme.sidebar_bg))
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt_2()
+                .gap_1()
+                .overflow_y_scroll();
+
+            for (repo_index, repository) in repositories.iter().enumerate() {
+                let repo_worktrees: Vec<(usize, &WorktreeSummary)> = worktrees
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, w)| w.repo_root == repository.root)
+                    .collect();
+
+                // Add spacing between repo groups (not before the first)
+                if repo_index > 0 {
+                    pane = pane.child(div().h(px(4.)));
+                }
+
+                // Repo icon row: circular avatar or GitHub icon
+                let repo_icon = if let Some(url) = repository.avatar_url.clone() {
+                    div()
+                        .size(px(24.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .child(
+                            img(url)
+                                .size_full()
+                                .with_fallback(move || {
+                                    div()
+                                        .size_full()
+                                        .font_family(FONT_MONO)
+                                        .text_size(px(14.))
+                                        .text_color(rgb(theme.text_muted))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child("\u{f09b}")
+                                        .into_any_element()
+                                }),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .size(px(24.))
+                        .font_family(FONT_MONO)
+                        .text_size(px(14.))
+                        .text_color(rgb(theme.text_muted))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("\u{f09b}")
+                        .into_any_element()
+                };
+                pane = pane.child(repo_icon);
+
+                for (wt_index, worktree) in repo_worktrees {
+                    let is_active = self.active_worktree_index == Some(wt_index);
+                    let first_char: String = worktree
+                        .label
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .collect();
+
+                    pane = pane.child(
+                        div()
+                            .id(("collapsed-worktree", wt_index))
+                            .cursor_pointer()
+                            .size(px(30.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(if is_active {
+                                theme.accent
+                            } else {
+                                theme.border
+                            }))
+                            .bg(rgb(if is_active {
+                                theme.panel_active_bg
+                            } else {
+                                theme.panel_bg
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if is_active {
+                                theme.text_primary
+                            } else {
+                                theme.text_muted
+                            }))
+                            .child(first_char)
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.select_worktree(wt_index, window, cx);
+                                }),
+                            ),
+                    );
+                }
+            }
+
+            return pane;
+        }
         let theme = self.theme();
         let repositories = self.repositories.clone();
         let worktrees = self.worktrees.clone();
         div()
+            .id("left-pane")
             .w(px(self.left_pane_width))
             .h_full()
             .bg(rgb(theme.sidebar_bg))
@@ -3216,12 +3519,8 @@ impl ArborWindow {
                         |(repository_index, repository)| {
                             let is_active_repository =
                                 self.active_repository_index == Some(repository_index);
-                            let repository_icon = repository
-                                .label
-                                .chars()
-                                .next()
-                                .map(|ch| ch.to_ascii_uppercase().to_string())
-                                .unwrap_or_else(|| "R".to_owned());
+                            let is_collapsed =
+                                self.collapsed_repositories.contains(&repository_index);
                             let repository_avatar_url = repository.avatar_url.clone();
                             let repository_root = repository.root.clone();
                             let repo_worktrees: Vec<(usize, WorktreeSummary)> = worktrees
@@ -3267,66 +3566,79 @@ impl ArborWindow {
                                                 .flex_1()
                                                 .flex()
                                                 .items_center()
-                                                .gap_2()
+                                                .gap_1()
+                                                // Chevron toggle
                                                 .child(
                                                     div()
-                                                        .size(px(14.))
-                                                        .rounded_full()
-                                                        .overflow_hidden()
-                                                        .child(
-                                                            if let Some(url) =
-                                                                repository_avatar_url.clone()
-                                                            {
+                                                        .id(("repo-chevron", repository_index))
+                                                        .cursor_pointer()
+                                                        .font_family(FONT_MONO)
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .w(px(12.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child(if is_collapsed {
+                                                            "\u{f054}"
+                                                        } else {
+                                                            "\u{f078}"
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if this
+                                                                    .collapsed_repositories
+                                                                    .contains(&repository_index)
+                                                                {
+                                                                    this.collapsed_repositories
+                                                                        .remove(&repository_index);
+                                                                } else {
+                                                                    this.collapsed_repositories
+                                                                        .insert(repository_index);
+                                                                }
+                                                                cx.stop_propagation();
+                                                                cx.notify();
+                                                            },
+                                                        )),
+                                                )
+                                                // GitHub icon or avatar
+                                                .child(
+                                                    if let Some(url) =
+                                                        repository_avatar_url.clone()
+                                                    {
+                                                        div()
+                                                            .size(px(14.))
+                                                            .rounded_full()
+                                                            .overflow_hidden()
+                                                            .child(
                                                                 img(url)
                                                                     .size_full()
-                                                                    .with_fallback({
-                                                                        let repository_icon =
-                                                                            repository_icon.clone();
-                                                                        move || {
-                                                                            div()
-                                                                                .size_full()
-                                                                                .bg(rgb(
-                                                                                    theme
-                                                                                        .panel_active_bg,
-                                                                                ))
-                                                                                .flex()
-                                                                                .items_center()
-                                                                                .justify_center()
-                                                                                .text_size(px(9.))
-                                                                                .font_weight(
-                                                                                    FontWeight::SEMIBOLD,
-                                                                                )
-                                                                                .text_color(rgb(
-                                                                                    theme
-                                                                                        .text_primary,
-                                                                                ))
-                                                                                .child(
-                                                                                    repository_icon
-                                                                                        .clone(),
-                                                                                )
-                                                                                .into_any_element()
-                                                                        }
-                                                                    })
-                                                                    .into_any_element()
-                                                            } else {
-                                                                div()
-                                                                    .size_full()
-                                                                    .bg(rgb(theme.panel_active_bg))
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .justify_center()
-                                                                    .text_size(px(9.))
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
-                                                                    .text_color(rgb(
-                                                                        theme.text_primary,
-                                                                    ))
-                                                                    .child(repository_icon)
-                                                                    .into_any_element()
-                                                            },
-                                                        ),
+                                                                    .with_fallback(move || {
+                                                                        div()
+                                                                            .size_full()
+                                                                            .font_family(FONT_MONO)
+                                                                            .text_size(px(12.))
+                                                                            .text_color(rgb(
+                                                                                theme.text_muted,
+                                                                            ))
+                                                                            .flex()
+                                                                            .items_center()
+                                                                            .justify_center()
+                                                                            .child("\u{f09b}")
+                                                                            .into_any_element()
+                                                                    }),
+                                                            )
+                                                            .into_any_element()
+                                                    } else {
+                                                        div()
+                                                            .font_family(FONT_MONO)
+                                                            .text_size(px(12.))
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .child("\u{f09b}")
+                                                            .into_any_element()
+                                                    },
                                                 )
+                                                // Repository name
                                                 .child(
                                                     div()
                                                         .min_w_0()
@@ -3336,6 +3648,16 @@ impl ArborWindow {
                                                         .text_xs()
                                                         .text_color(rgb(theme.text_primary))
                                                         .child(repository.label.clone()),
+                                                )
+                                                // Worktree count badge
+                                                .child(
+                                                    div()
+                                                        .text_size(px(9.))
+                                                        .text_color(rgb(theme.text_disabled))
+                                                        .child(format!(
+                                                            "{}",
+                                                            repo_worktrees.len()
+                                                        )),
                                                 ),
                                         )
                                         .child(
@@ -3366,7 +3688,8 @@ impl ArborWindow {
                                                 })),
                                         ),
                                 )
-                                .child(
+                                .when(!is_collapsed, |this| {
+                                    this.child(
                                     div()
                                         .pl(px(8.))
                                         .flex()
@@ -3578,6 +3901,7 @@ impl ArborWindow {
                                             }),
                                         ),
                                 )
+                                })
                         },
                     )),
             )
@@ -3725,9 +4049,11 @@ impl ArborWindow {
 
                                 div()
                                     .id(tab_id)
+                                    .group("tab")
+                                    .relative()
                                     .h_full()
                                     .cursor_pointer()
-                                    .min_w(px(122.))
+                                    .w(px(160.))
                                     .px_4()
                                     .flex()
                                     .items_center()
@@ -3752,7 +4078,7 @@ impl ArborWindow {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_sm()
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
                                             } else {
@@ -3760,14 +4086,58 @@ impl ArborWindow {
                                             }))
                                             .child(tab_label),
                                     )
-                                    .when(index == 0, |this| this.border_l_1())
+                                    .child(
+                                        div()
+                                            .id(match tab {
+                                                CenterTab::Terminal(id) => ("tab-close-terminal", id),
+                                                CenterTab::Diff(id) => ("tab-close-diff", id),
+                                            })
+                                            .absolute()
+                                            .right(px(4.))
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(24.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(24.))
+                                            .text_color(rgb(theme.text_muted))
+                                            .invisible()
+                                            .group_hover("tab", |s| s.visible())
+                                            .child("×")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                                    cx.stop_propagation();
+                                                    match tab {
+                                                        CenterTab::Terminal(session_id) => {
+                                                            if this.close_terminal_session_by_id(session_id) {
+                                                                this.sync_daemon_session_store(cx);
+                                                                this.terminal_scroll_handle.scroll_to_bottom();
+                                                                window.focus(&this.terminal_focus);
+                                                                this.focus_terminal_on_next_render = false;
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                        CenterTab::Diff(diff_id) => {
+                                                            if this.close_diff_session_by_id(diff_id) {
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    }
+                                                }),
+                                            ),
+                                    )
                                     .when(index + 1 == tab_count, |this| this.border_r_1())
                                     .map(|this| match relation {
                                         Some(std::cmp::Ordering::Equal) => {
-                                            this.border_l_1().border_r_1()
+                                            let el = this.border_r_1();
+                                            if index == 0 { el } else { el.border_l_1() }
                                         },
                                         Some(std::cmp::Ordering::Less) => {
-                                            this.border_l_1().border_b_1()
+                                            let el = this.border_b_1();
+                                            if index == 0 { el } else { el.border_l_1() }
                                         },
                                         Some(std::cmp::Ordering::Greater) => {
                                             this.border_r_1().border_b_1()
@@ -4277,7 +4647,18 @@ impl ArborWindow {
                     ))
                     .child(status_text(theme, "•"))
                     .child(status_text(theme, format!("terminals {terminal_count}")))
-                    .child(status_text(theme, "ready")),
+                    .child(if self.worktree_stats_loading || self.worktree_prs_loading {
+                        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                        let frame_index = (SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            / 100) as usize
+                            % frames.len();
+                        status_text(theme, format!("{} loading", frames[frame_index]))
+                    } else {
+                        status_text(theme, "ready")
+                    }),
             )
     }
 
@@ -4627,7 +5008,11 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_use_embedded_backend))
             .on_action(cx.listener(Self::action_use_alacritty_backend))
             .on_action(cx.listener(Self::action_use_ghostty_backend))
-            .child(self.render_top_bar())
+            .on_action(cx.listener(Self::action_toggle_left_pane))
+            .on_action(cx.listener(Self::action_navigate_worktree_back))
+            .on_action(cx.listener(Self::action_navigate_worktree_forward))
+            .on_action(cx.listener(Self::action_collapse_all_repositories))
+            .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
             .child(div().when_some(self.notice.clone(), |this, notice| {
                 this.px_3()
@@ -4647,11 +5032,13 @@ impl Render for ArborWindow {
                     .flex_row()
                     .on_drag_move(cx.listener(Self::handle_pane_divider_drag_move))
                     .child(self.render_left_pane(cx))
-                    .child(self.render_pane_resize_handle(
-                        "left-pane-resize",
-                        DraggedPaneDivider::Left,
-                        theme,
-                    ))
+                    .when(self.left_pane_visible, |this| {
+                        this.child(self.render_pane_resize_handle(
+                            "left-pane-resize",
+                            DraggedPaneDivider::Left,
+                            theme,
+                        ))
+                    })
                     .child(self.render_center_pane(window, cx))
                     .child(self.render_pane_resize_handle(
                         "right-pane-resize",
@@ -6966,9 +7353,43 @@ fn request_quit(_: &RequestQuit, cx: &mut App) {
     );
 }
 
+fn open_arbor_window(cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
+    if let Err(error) = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(1180.), px(760.))),
+            app_id: Some("so.pen.arbor".to_owned()),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Arbor".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(9.), px(9.))),
+            }),
+            window_decorations: Some(WindowDecorations::Client),
+            ..Default::default()
+        },
+        |_, cx| {
+            cx.new(|cx| {
+                ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
+                    ui_state_store::UiState::default(),
+                    cx,
+                )
+            })
+        },
+    ) {
+        eprintln!("failed to open Arbor window: {error:#}");
+    }
+}
+
+fn new_window(_: &NewWindow, cx: &mut App) {
+    open_arbor_window(cx);
+}
+
 fn install_app_menu_and_keys(cx: &mut App) {
     cx.on_action(request_quit);
+    cx.on_action(new_window);
     cx.bind_keys([
+        KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-q", RequestQuit, None),
         KeyBinding::new("cmd-t", SpawnTerminal, None),
         KeyBinding::new("cmd-w", CloseActiveTerminal, None),
@@ -6982,6 +7403,9 @@ fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-1", UseEmbeddedBackend, None),
         KeyBinding::new("cmd-2", UseAlacrittyBackend, None),
         KeyBinding::new("cmd-3", UseGhosttyBackend, None),
+        KeyBinding::new("cmd-\\", ToggleLeftPane, None),
+        KeyBinding::new("cmd-[", NavigateWorktreeBack, None),
+        KeyBinding::new("cmd-]", NavigateWorktreeForward, None),
     ]);
     cx.set_menus(vec![
         Menu {
@@ -6995,6 +7419,8 @@ fn install_app_menu_and_keys(cx: &mut App) {
         Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("New Window", NewWindow),
+                MenuItem::separator(),
                 MenuItem::action("Add Repository...", OpenAddRepository),
                 MenuItem::separator(),
                 MenuItem::action("New Terminal Tab", SpawnTerminal),
@@ -7022,11 +7448,21 @@ fn install_app_menu_and_keys(cx: &mut App) {
             ],
         },
         Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleLeftPane),
+                MenuItem::action("Collapse All Repositories", CollapseAllRepositories),
+            ],
+        },
+        Menu {
             name: "Worktree".into(),
             items: vec![
                 MenuItem::action("Add Repository...", OpenAddRepository),
                 MenuItem::separator(),
                 MenuItem::action("New Worktree", OpenCreateWorktree),
+                MenuItem::separator(),
+                MenuItem::action("Navigate Back", NavigateWorktreeBack),
+                MenuItem::action("Navigate Forward", NavigateWorktreeForward),
                 MenuItem::separator(),
                 MenuItem::action("Refresh Worktrees", RefreshWorktrees),
                 MenuItem::action("Refresh Changes", RefreshChanges),
