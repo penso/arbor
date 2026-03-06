@@ -79,6 +79,7 @@ impl RemoteTransport for SshConnection {
         channel
             .open_session()
             .map_err(|e| RemoteError::Command(e.to_string()))?;
+        let _ = channel.request_auth_agent();
         channel
             .request_exec(command)
             .map_err(|e| RemoteError::Command(e.to_string()))?;

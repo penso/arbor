@@ -32,6 +32,7 @@ impl SshShell {
     pub fn open(session: &Session, cols: u32, rows: u32) -> Result<Self, ShellError> {
         let channel = session.new_channel()?;
         channel.open_session()?;
+        let _ = channel.request_auth_agent();
         channel.request_pty("xterm-256color", cols, rows)?;
         channel.request_shell()?;
 
