@@ -38,16 +38,41 @@ pub enum WorktreeError {
 
 pub fn repo_root(path: &Path) -> Result<PathBuf, WorktreeError> {
     let output = run_git_capture(path, &["rev-parse", "--show-toplevel"])?;
-    let stdout = String::from_utf8(output.stdout)?;
-    let root = stdout.trim();
+    let toplevel = String::from_utf8(output.stdout)?.trim().to_owned();
 
-    if root.is_empty() {
+    if toplevel.is_empty() {
         return Err(WorktreeError::InvalidPorcelain(
             "empty repository root returned by git".to_owned(),
         ));
     }
 
-    Ok(PathBuf::from(root))
+    // Detect linked worktrees: --git-common-dir returns ".git" in the main
+    // repo but an absolute path to the main repo's .git dir in a worktree.
+    let common_output = run_git_capture(path, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = String::from_utf8(common_output.stdout)?.trim().to_owned();
+
+    if common_dir.is_empty() || common_dir == ".git" {
+        return Ok(PathBuf::from(toplevel));
+    }
+
+    // Resolve the common dir to an absolute path (it may be relative to the
+    // worktree's git dir).
+    let common_path = {
+        let p = PathBuf::from(&common_dir);
+        if p.is_relative() {
+            let git_dir_output = run_git_capture(path, &["rev-parse", "--git-dir"])?;
+            let git_dir = String::from_utf8(git_dir_output.stdout)?.trim().to_owned();
+            canonicalize_if_possible(PathBuf::from(git_dir).join(p))
+        } else {
+            canonicalize_if_possible(p)
+        }
+    };
+
+    // The main repo root is the parent of the common .git dir.
+    match common_path.parent() {
+        Some(parent) => Ok(parent.to_path_buf()),
+        None => Ok(PathBuf::from(toplevel)),
+    }
 }
 
 pub fn list(path: &Path) -> Result<Vec<Worktree>, WorktreeError> {

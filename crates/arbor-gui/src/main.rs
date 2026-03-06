@@ -30,7 +30,7 @@ use {
     },
     ropey::Rope,
     std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         env, fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
@@ -195,6 +195,20 @@ enum CenterTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightPaneTab {
+    Changes,
+    FileTree,
+}
+
+#[derive(Debug, Clone)]
+struct FileTreeEntry {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+    depth: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiffLineKind {
     FileHeader,
     Context,
@@ -318,6 +332,10 @@ struct ArborWindow {
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
     notice: Option<String>,
+    right_pane_tab: RightPaneTab,
+    file_tree_entries: Vec<FileTreeEntry>,
+    expanded_dirs: HashSet<PathBuf>,
+    selected_file_tree_entry: Option<PathBuf>,
 }
 
 impl ArborWindow {
@@ -385,6 +403,10 @@ impl ArborWindow {
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notice: Some(format!("failed to read current directory: {error}")),
+                    right_pane_tab: RightPaneTab::Changes,
+                    file_tree_entries: Vec::new(),
+                    expanded_dirs: HashSet::new(),
+                    selected_file_tree_entry: None,
                 };
             },
         };
@@ -436,6 +458,10 @@ impl ArborWindow {
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notice: Some(format!("failed to resolve git repository root: {error}")),
+                    right_pane_tab: RightPaneTab::Changes,
+                    file_tree_entries: Vec::new(),
+                    expanded_dirs: HashSet::new(),
+                    selected_file_tree_entry: None,
                 };
             },
         };
@@ -573,6 +599,10 @@ impl ArborWindow {
             last_persisted_ui_state: startup_ui_state,
             last_ui_state_error: None,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
+            right_pane_tab: RightPaneTab::Changes,
+            file_tree_entries: Vec::new(),
+            expanded_dirs: HashSet::new(),
+            selected_file_tree_entry: None,
         };
 
         app.refresh_worktrees(cx);
@@ -1706,6 +1736,12 @@ impl ArborWindow {
         self.active_diff_session_id = None;
         self.sync_active_repository_from_selected_worktree();
         let _ = self.reload_changed_files();
+        self.expanded_dirs.clear();
+        self.selected_file_tree_entry = None;
+        self.file_tree_entries.clear();
+        if self.right_pane_tab == RightPaneTab::FileTree {
+            self.rebuild_file_tree();
+        }
         if self.ensure_selected_worktree_terminal() {
             self.sync_daemon_session_store(cx);
         }
@@ -1781,6 +1817,95 @@ impl ArborWindow {
         self.changed_files
             .iter()
             .find(|change| change.path == *selected_path)
+    }
+
+    fn rebuild_file_tree(&mut self) {
+        let Some(worktree_path) = self.selected_worktree_path().map(|p| p.to_path_buf()) else {
+            self.file_tree_entries.clear();
+            return;
+        };
+        let mut entries = Vec::new();
+        self.walk_directory(&worktree_path, &worktree_path, 0, &mut entries);
+        self.file_tree_entries = entries;
+    }
+
+    fn walk_directory(
+        &self,
+        base: &Path,
+        dir: &Path,
+        depth: usize,
+        entries: &mut Vec<FileTreeEntry>,
+    ) {
+        let Ok(read_dir) = fs::read_dir(dir) else {
+            return;
+        };
+
+        let mut children: Vec<(String, PathBuf, bool)> = Vec::new();
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let is_dir = entry.file_type().map_or(false, |ft| ft.is_dir());
+            if is_dir
+                && matches!(
+                    name.as_str(),
+                    "node_modules" | "target" | "__pycache__" | ".git"
+                )
+            {
+                continue;
+            }
+            children.push((name, entry.path(), is_dir));
+        }
+
+        children.sort_by(|a, b| {
+            b.2.cmp(&a.2).then_with(|| {
+                a.0.to_lowercase().cmp(&b.0.to_lowercase())
+            })
+        });
+
+        for (name, full_path, is_dir) in children {
+            let relative = full_path
+                .strip_prefix(base)
+                .unwrap_or(&full_path)
+                .to_path_buf();
+            entries.push(FileTreeEntry {
+                path: relative.clone(),
+                name,
+                is_dir,
+                depth,
+            });
+            if is_dir && self.expanded_dirs.contains(&relative) {
+                self.walk_directory(base, &full_path, depth + 1, entries);
+            }
+        }
+    }
+
+    fn toggle_file_tree_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.expanded_dirs.contains(&path) {
+            self.expanded_dirs.remove(&path);
+        } else {
+            self.expanded_dirs.insert(path.clone());
+        }
+        self.selected_file_tree_entry = Some(path);
+        self.rebuild_file_tree();
+        cx.notify();
+    }
+
+    fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.selected_file_tree_entry = Some(path);
+        cx.notify();
+    }
+
+    fn set_right_pane_tab(&mut self, tab: RightPaneTab, cx: &mut Context<Self>) {
+        if self.right_pane_tab == tab {
+            return;
+        }
+        self.right_pane_tab = tab;
+        if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
+            self.rebuild_file_tree();
+        }
+        cx.notify();
     }
 
     fn switch_terminal_backend(
@@ -3833,44 +3958,107 @@ impl ArborWindow {
 
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
-        let selected_path = self.selected_changed_file.clone();
-        let has_changed_file_selected = selected_path.is_some();
+        let content: Div = match self.right_pane_tab {
+            RightPaneTab::Changes => self.render_changes_content(cx),
+            RightPaneTab::FileTree => self.render_file_tree(cx),
+        };
 
         div()
             .w(px(self.right_pane_width))
             .h_full()
             .min_h_0()
             .bg(rgb(theme.sidebar_bg))
-            .p_3()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(
-                div().h(px(24.)).flex().items_center().justify_end().child(
+            .child(self.render_right_pane_tabs(cx))
+            .child(content)
+    }
+
+    fn render_right_pane_tabs(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let active_tab = self.right_pane_tab;
+        let show_diff_button = active_tab == RightPaneTab::Changes
+            && self.selected_changed_file.is_some();
+
+        let tab_button = |label: &'static str, tab: RightPaneTab| {
+            let is_active = active_tab == tab;
+            div()
+                .id(ElementId::Name(
+                    format!("right-tab-{label}").to_lowercase().into(),
+                ))
+                .flex_1()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_xs()
+                .font_family(FONT_UI)
+                .bg(rgb(if is_active {
+                    theme.tab_active_bg
+                } else {
+                    theme.tab_bg
+                }))
+                .text_color(rgb(if is_active {
+                    theme.text_primary
+                } else {
+                    theme.text_muted
+                }))
+                .when(is_active, |this| {
+                    this.border_b_2().border_color(rgb(theme.accent))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.set_right_pane_tab(tab, cx);
+                    }),
+                )
+                .child(label)
+        };
+
+        div()
+            .h(px(28.))
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(tab_button("Changes", RightPaneTab::Changes))
+            .child(tab_button("Files", RightPaneTab::FileTree))
+            .when(show_diff_button, |this| {
+                this.child(
                     action_button(
                         theme,
                         "open-diff-tab",
                         "Diff",
-                        has_changed_file_selected,
-                        !has_changed_file_selected,
+                        true,
+                        false,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.open_diff_tab_for_selected_file(cx);
                     })),
-                ),
-            )
-            .child(
-                div()
-                    .id("changes-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .scrollbar_width(px(10.))
-                    .flex()
-                    .flex_col()
-                    .font_family(FONT_MONO)
-                    .gap_0()
-                    .children(self.changed_files.iter().map(|change| {
+                )
+            })
+    }
+
+    fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let selected_path = self.selected_changed_file.clone();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div()
+                .id("changes-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(10.))
+                .flex()
+                .flex_col()
+                .font_family(FONT_MONO)
+                .p_1()
+                .children(self.changed_files.iter().map(|change| {
                         let is_selected = selected_path
                             .as_ref()
                             .is_some_and(|selected| selected.as_path() == change.path.as_path());
@@ -3903,19 +4091,13 @@ impl ArborWindow {
 
                         div()
                             .h(px(24.))
-                            .px_1()
+                            .pl(px(4.))
+                            .pr_1()
                             .cursor_pointer()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .border_b_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(if is_selected {
-                                theme.panel_active_bg
-                            } else {
-                                theme.sidebar_bg
-                            }))
+                            .gap_1()
+                            .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -3962,8 +4144,104 @@ impl ArborWindow {
                                         )
                                     }),
                             )
-                    })),
-            )
+                    })))
+    }
+
+    fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let selected_entry = self.selected_file_tree_entry.clone();
+        let expanded_dirs = &self.expanded_dirs;
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div()
+            .id("file-tree-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .scrollbar_width(px(10.))
+            .flex()
+            .flex_col()
+            .font_family(FONT_MONO)
+            .p_1()
+            .children(self.file_tree_entries.iter().map(|entry| {
+                let is_selected = selected_entry
+                    .as_ref()
+                    .is_some_and(|selected| selected == &entry.path);
+                let indent = entry.depth as f32 * 16. + 4.;
+                let entry_path = entry.path.clone();
+                let is_dir = entry.is_dir;
+
+                let chevron = if is_dir {
+                    if expanded_dirs.contains(&entry.path) {
+                        "\u{f078}" // chevron down
+                    } else {
+                        "\u{f054}" // chevron right
+                    }
+                } else {
+                    " "
+                };
+
+                let (file_icon, icon_color) = file_icon_and_color(&entry.name, is_dir);
+
+                div()
+                    .id(ElementId::Name(
+                        format!("ft-{}", entry.path.display()).into(),
+                    ))
+                    .h(px(24.))
+                    .pl(px(indent))
+                    .pr_1()
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .bg(rgb(if is_selected {
+                        theme.panel_active_bg
+                    } else {
+                        theme.sidebar_bg
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            if is_dir {
+                                this.toggle_file_tree_dir(entry_path.clone(), cx);
+                            } else {
+                                this.select_file_tree_entry(entry_path.clone(), cx);
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w(px(12.))
+                            .flex_none()
+                            .text_size(px(10.))
+                            .text_color(rgb(theme.text_muted))
+                            .child(chevron),
+                    )
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .flex_none()
+                            .text_size(px(18.))
+                            .text_color(rgb(icon_color))
+                            .child(file_icon),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(rgb(icon_color))
+                            .when(is_dir, |this| this.font_weight(FontWeight::SEMIBOLD))
+                            .child(entry.name.clone()),
+                    )
+            })))
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
@@ -5482,6 +5760,49 @@ fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .text_xs()
         .text_color(rgb(theme.text_muted))
         .child(text.into())
+}
+
+fn file_icon_and_color(name: &str, is_dir: bool) -> (&'static str, u32) {
+    if is_dir {
+        return ("\u{f07b}", 0xe5c07b);
+    }
+
+    // Check full filename first
+    match name {
+        "Dockerfile" | ".dockerignore" => return ("\u{e7b0}", 0x61afef),
+        "Makefile" | "Justfile" => return ("\u{e615}", 0x98c379),
+        ".gitignore" | ".env" => return ("\u{e615}", 0x838994),
+        _ => {}
+    }
+
+    // Check extension
+    let ext = name.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => ("\u{e7a8}", 0xe06c75),
+        "toml" => ("\u{e615}", 0x838994),
+        "py" => ("\u{e73c}", 0x61afef),
+        "js" => ("\u{e74e}", 0xe5c07b),
+        "ts" => ("\u{e628}", 0x61afef),
+        "jsx" | "tsx" => ("\u{e7ba}", 0x56b6c2),
+        "json" => ("\u{e60b}", 0xe5c07b),
+        "html" => ("\u{e736}", 0xe06c75),
+        "css" | "scss" | "sass" => ("\u{e749}", 0x56b6c2),
+        "md" | "mdx" => ("\u{e73e}", 0x61afef),
+        "yaml" | "yml" => ("\u{e615}", 0xc678dd),
+        "sh" | "bash" | "zsh" => ("\u{e795}", 0x98c379),
+        "go" => ("\u{e627}", 0x56b6c2),
+        "c" | "h" => ("\u{e61e}", 0x61afef),
+        "cpp" | "hpp" | "cc" => ("\u{e61d}", 0xe06c75),
+        "java" => ("\u{e738}", 0xe06c75),
+        "rb" => ("\u{e739}", 0xe06c75),
+        "swift" => ("\u{e755}", 0xe06c75),
+        "lock" => ("\u{f023}", 0x838994),
+        "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" => ("\u{f1c5}", 0xc678dd),
+        "txt" | "log" => ("\u{f15c}", 0x838994),
+        "xml" => ("\u{e619}", 0xe5c07b),
+        "sql" => ("\u{f1c0}", 0xe5c07b),
+        _ => ("\u{f15c}", 0x838994),
+    }
 }
 
 fn change_code(kind: ChangeKind) -> &'static str {
