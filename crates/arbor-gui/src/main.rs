@@ -2423,7 +2423,7 @@ impl ArborWindow {
         };
 
         self.diff_scroll_handle
-            .scroll_to_item(*row_index, ScrollStrategy::Top);
+            .scroll_to_item_strict(*row_index, ScrollStrategy::Top);
         true
     }
 
