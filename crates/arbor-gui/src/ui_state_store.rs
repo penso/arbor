@@ -14,6 +14,7 @@ pub struct UiState {
     pub left_pane_width: Option<i32>,
     pub right_pane_width: Option<i32>,
     pub window: Option<WindowGeometry>,
+    pub left_pane_visible: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
