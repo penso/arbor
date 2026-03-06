@@ -81,11 +81,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
-      - name: Install Linux ARM64 linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install Linux x86_64 GUI dependencies
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
+      - name: Install Linux ARM64 toolchain and GUI dependencies
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libxcb1-dev:arm64 \
+            libxkbcommon-dev:arm64 \
+            libxkbcommon-x11-dev:arm64
       - name: Add Rust target
         shell: bash
         run: rustup target add "${{ matrix.target }}"
@@ -94,6 +109,8 @@ jobs:
         run: |
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+            export PKG_CONFIG_ALLOW_CROSS=1
           fi
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --target "${{ matrix.target }}"
       - name: Package Linux app
