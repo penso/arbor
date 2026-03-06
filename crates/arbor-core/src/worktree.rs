@@ -37,6 +37,15 @@ pub enum WorktreeError {
 }
 
 pub fn repo_root(path: &Path) -> Result<PathBuf, WorktreeError> {
+    // Use `git worktree list` and take the first entry, which is always the
+    // main worktree.  This avoids `--show-toplevel` which returns the current
+    // worktree's path and would make linked worktrees look like separate repos.
+    let worktrees = list(path)?;
+    if let Some(main) = worktrees.first() {
+        return Ok(main.path.clone());
+    }
+
+    // Fallback for the unlikely case of an empty list.
     let output = run_git_capture(path, &["rev-parse", "--show-toplevel"])?;
     let toplevel = String::from_utf8(output.stdout)?.trim().to_owned();
 
