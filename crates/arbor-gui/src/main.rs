@@ -187,8 +187,137 @@ enum OutpostTerminalRuntime {
     RemoteDaemon {
         daemon: HttpTerminalDaemon,
     },
-    SshShell,
+    SshShell(SshTerminalShell),
     MoshShell(arbor_mosh::MoshShell),
+}
+
+/// SSH terminal shell wrapper that provides Clone (via Arc<Mutex>) and
+/// a terminal emulator for rendering. Polling is done from the GUI timer
+/// since libssh's Channel is not Send/Sync.
+#[derive(Clone)]
+struct SshTerminalShell {
+    shell: Arc<Mutex<arbor_ssh::shell::SshShell>>,
+    emulator: Arc<Mutex<arbor_terminal_emulator::TerminalEmulator>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl SshTerminalShell {
+    fn open(
+        connection: &arbor_ssh::connection::SshConnection,
+        cols: u16,
+        rows: u16,
+        remote_path: &str,
+    ) -> Result<Self, String> {
+        let shell =
+            arbor_ssh::shell::SshShell::open(connection.session(), u32::from(cols), u32::from(rows))
+                .map_err(|e| format!("failed to open SSH shell: {e}"))?;
+
+        // Send cd command to navigate to the outpost directory
+        shell
+            .write_input(format!("cd {remote_path} && clear\n").as_bytes())
+            .map_err(|e| format!("failed to send cd command: {e}"))?;
+
+        Ok(Self {
+            shell: Arc::new(Mutex::new(shell)),
+            emulator: Arc::new(Mutex::new(
+                arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols),
+            )),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        })
+    }
+
+    fn write_input(&self, bytes: &[u8]) -> Result<(), String> {
+        let shell = self
+            .shell
+            .lock()
+            .map_err(|_| "SSH shell lock poisoned".to_owned())?;
+        shell
+            .write_input(bytes)
+            .map_err(|e| format!("failed to write to SSH shell: {e}"))
+    }
+
+    /// Poll the shell for new output and feed it to the terminal emulator.
+    /// Called from the GUI polling timer. Returns true if new data was processed.
+    fn poll(&self) -> bool {
+        let shell = match self.shell.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        match shell.read_available() {
+            Ok(data) if !data.is_empty() => {
+                drop(shell);
+                let mut emulator = match self.emulator.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                emulator.process(&data);
+                self.generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                true
+            },
+            _ => false,
+        }
+    }
+
+    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+        let (output, styled_lines, cursor) = match self.emulator.lock() {
+            Ok(emulator) => (
+                emulator.snapshot_output(),
+                emulator.collect_styled_lines(),
+                emulator.snapshot_cursor(),
+            ),
+            Err(poisoned) => {
+                let emulator = poisoned.into_inner();
+                (
+                    emulator.snapshot_output(),
+                    emulator.collect_styled_lines(),
+                    emulator.snapshot_cursor(),
+                )
+            },
+        };
+
+        let is_closed = self
+            .shell
+            .lock()
+            .map(|s| s.is_closed() || s.is_eof())
+            .unwrap_or(true);
+
+        arbor_terminal_emulator::TerminalSnapshot {
+            output,
+            styled_lines,
+            cursor,
+            exit_code: if is_closed { Some(0) } else { None },
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
+        let shell = self
+            .shell
+            .lock()
+            .map_err(|_| "SSH shell lock poisoned".to_owned())?;
+        shell
+            .resize(u32::from(cols), u32::from(rows))
+            .map_err(|e| format!("failed to resize SSH shell: {e}"))?;
+        drop(shell);
+
+        if let Ok(mut emulator) = self.emulator.lock() {
+            emulator.resize(rows, cols);
+        }
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn close(&self) {
+        if let Ok(shell) = self.shell.lock() {
+            let _ = shell.close();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1290,8 +1419,57 @@ impl ArborWindow {
                         },
                     }
                 },
-                TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell) => {
-                    // SSH shell snapshot polling -- not yet wired
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ref ssh)) => {
+                    let session_id = self.terminals[index].id;
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, _pixel_width, _pixel_height)) = target_grid_size
+                        && let Err(error) = ssh.resize(rows, cols)
+                    {
+                        self.notice = Some(format!("failed to resize SSH terminal: {error}"));
+                    }
+
+                    // Poll for new data from the SSH channel
+                    ssh.poll();
+
+                    let generation = ssh.generation();
+                    if generation == self.terminals[index].generation {
+                        continue;
+                    }
+
+                    let snapshot = ssh.snapshot();
+                    let session = &mut self.terminals[index];
+                    let output = snapshot.output;
+                    let styled_output = snapshot.styled_lines;
+                    let cursor = snapshot.cursor;
+                    if output != session.output
+                        || styled_output != session.styled_output
+                        || cursor != session.cursor
+                    {
+                        session.output = output;
+                        session.styled_output = styled_output;
+                        session.cursor = cursor;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        changed = true;
+                    }
+                    session.generation = generation;
+
+                    if let Some(exit_code) = snapshot.exit_code
+                        && session.state == TerminalState::Running
+                    {
+                        session.exit_code = Some(exit_code);
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        if exit_code == 0 {
+                            sessions_to_close.push(session.id);
+                        } else {
+                            session.state = TerminalState::Failed;
+                            session.runtime = None;
+                            changed = true;
+                            self.notice = Some(format!(
+                                "SSH terminal tab `{}` exited with code {exit_code}",
+                                session.title,
+                            ));
+                        }
+                    }
                 },
                 TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh)) => {
                     let session_id = self.terminals[index].id;
@@ -1629,6 +1807,12 @@ impl ArborWindow {
     }
 
     fn selected_worktree_path(&self) -> Option<&Path> {
+        if let Some(outpost_index) = self.active_outpost_index {
+            return self
+                .outposts
+                .get(outpost_index)
+                .map(|outpost| outpost.repo_root.as_path());
+        }
         self.active_worktree_index
             .and_then(|index| self.worktrees.get(index))
             .map(|worktree| worktree.path.as_path())
@@ -1658,7 +1842,31 @@ impl ArborWindow {
 
     fn active_terminal_id_for_selected_worktree(&self) -> Option<u64> {
         let worktree_path = self.selected_worktree_path()?;
-        self.active_terminal_id_for_worktree(worktree_path)
+        let is_outpost = self.active_outpost_index.is_some();
+
+        self.active_terminal_by_worktree
+            .get(worktree_path)
+            .copied()
+            .filter(|session_id| {
+                self.terminals.iter().any(|session| {
+                    session.id == *session_id
+                        && session.worktree_path.as_path() == worktree_path
+                        && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
+                            matches!(rt, TerminalRuntime::Outpost(_))
+                        })
+                })
+            })
+            .or_else(|| {
+                self.terminals
+                    .iter()
+                    .find(|session| {
+                        session.worktree_path.as_path() == worktree_path
+                            && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
+                                matches!(rt, TerminalRuntime::Outpost(_))
+                            })
+                    })
+                    .map(|session| session.id)
+            })
     }
 
     fn selected_worktree_terminals(&self) -> Vec<&TerminalSession> {
@@ -1666,9 +1874,16 @@ impl ArborWindow {
             return Vec::new();
         };
 
+        let is_outpost = self.active_outpost_index.is_some();
+
         self.terminals
             .iter()
-            .filter(|session| session.worktree_path.as_path() == worktree_path)
+            .filter(|session| {
+                session.worktree_path.as_path() == worktree_path
+                    && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
+                        matches!(rt, TerminalRuntime::Outpost(_))
+                    })
+            })
             .collect()
     }
 
@@ -1698,6 +1913,12 @@ impl ArborWindow {
     }
 
     fn ensure_selected_worktree_terminal(&mut self) -> bool {
+        // Don't auto-spawn local terminals when an outpost is selected;
+        // outpost terminals are created explicitly via spawn_outpost_terminal.
+        if self.active_outpost_index.is_some() {
+            return false;
+        }
+
         let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
             return false;
         };
@@ -1731,6 +1952,9 @@ impl ArborWindow {
             match &session.runtime {
                 Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(mosh))) => {
                     mosh.close();
+                },
+                Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ssh))) => {
+                    ssh.close();
                 },
                 runtime => {
                     let daemon_to_use = match runtime {
@@ -3140,7 +3364,7 @@ impl ArborWindow {
         self.active_terminal_by_worktree
             .insert(worktree_path.clone(), session_id);
 
-        let title = format!("mosh-{}", outpost.label);
+        let title = format!("ssh-{}", outpost.label);
         let mut session = TerminalSession {
             id: session_id,
             daemon_session_id: session_id.to_string(),
@@ -3209,8 +3433,50 @@ impl ArborWindow {
         }
 
         if !launched {
-            session.command = "ssh shell (not yet wired)".to_owned();
-            session.runtime = Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell));
+            let pool = self.ssh_connection_pool.clone();
+            match pool.get_or_connect(&host) {
+                Ok(conn_slot) => {
+                    let ssh_result: Result<SshTerminalShell, String> = (|| {
+                        let guard = conn_slot
+                            .lock()
+                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                        let connection = guard
+                            .as_ref()
+                            .ok_or_else(|| "SSH connection not available".to_owned())?;
+                        SshTerminalShell::open(
+                            connection,
+                            120,
+                            35,
+                            &outpost.remote_path,
+                        )
+                    })();
+
+                    match ssh_result {
+                        Ok(ssh_shell) => {
+                            session.command = "ssh".to_owned();
+                            session.generation = ssh_shell.generation();
+                            session.runtime = Some(TerminalRuntime::Outpost(
+                                OutpostTerminalRuntime::SshShell(ssh_shell),
+                            ));
+                            launched = true;
+                        },
+                        Err(error) => {
+                            self.notice = Some(format!("SSH shell failed: {error}"));
+                        },
+                    }
+                },
+                Err(error) => {
+                    self.notice = Some(format!("SSH connection failed: {error}"));
+                },
+            }
+        }
+
+        if !launched {
+            // Don't push a terminal session with no runtime
+            self.notice
+                .get_or_insert_with(|| "failed to open SSH shell".to_owned());
+            cx.notify();
+            return;
         }
 
         self.terminals.push(session);
@@ -3487,8 +3753,9 @@ impl ArborWindow {
                 self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
                 Ok(())
             },
-            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell)) => {
-                // SSH shell write handled via arbor_ssh::SshShell -- not yet wired
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ref ssh))) => {
+                ssh.write_input(input)?;
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
                 Ok(())
             },
             Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh))) => {
