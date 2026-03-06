@@ -47,7 +47,7 @@ impl RemoteProvisioner for SshProvisioner<'_> {
 
         if !already_cloned {
             let clone_cmd = format!(
-                "GIT_SSH_COMMAND='ssh -o IdentitiesOnly=no -o IdentityFile=none' \
+                "GIT_SSH_COMMAND='ssh -F /dev/null' \
                  git clone --branch {branch} --single-branch {clone_url} {remote_path}"
             );
             let clone_output = run_ssh_command_with_agent(self.host, &clone_cmd)?;
