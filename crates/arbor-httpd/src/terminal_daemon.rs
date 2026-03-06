@@ -410,8 +410,10 @@ impl LocalTerminalDaemon {
             .collect()
     }
 
-    fn persist_current_sessions(&self) -> Result<(), LocalTerminalDaemonError> {
-        let live_records = self.collect_live_records();
+    fn merge_live_and_stored(
+        &self,
+        live_records: Vec<DaemonSessionRecord>,
+    ) -> Result<Vec<DaemonSessionRecord>, LocalTerminalDaemonError> {
         let live_ids: HashSet<String> = live_records
             .iter()
             .map(|record| record.session_id.clone())
@@ -419,15 +421,16 @@ impl LocalTerminalDaemon {
 
         let mut stored = self.session_store.load()?;
         stored.retain(|record| {
-            if live_ids.contains(&record.session_id) {
-                return false;
-            }
-
-            !is_generated_daemon_session_id(&record.session_id)
+            !live_ids.contains(&record.session_id)
+                && !is_generated_daemon_session_id(&record.session_id)
         });
         stored.extend(live_records);
+        Ok(stored)
+    }
 
-        self.session_store.save(&stored)?;
+    fn persist_current_sessions(&self) -> Result<(), LocalTerminalDaemonError> {
+        let merged = self.merge_live_and_stored(self.collect_live_records())?;
+        self.session_store.save(&merged)?;
         Ok(())
     }
 
@@ -528,23 +531,7 @@ impl TerminalDaemon for LocalTerminalDaemon {
     }
 
     fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, Self::Error> {
-        let live_records = self.collect_live_records();
-        let live_ids: HashSet<String> = live_records
-            .iter()
-            .map(|record| record.session_id.clone())
-            .collect();
-
-        let mut stored = self.session_store.load()?;
-        stored.retain(|record| {
-            if live_ids.contains(&record.session_id) {
-                return false;
-            }
-
-            !is_generated_daemon_session_id(&record.session_id)
-        });
-        stored.extend(live_records);
-
-        Ok(stored)
+        self.merge_live_and_stored(self.collect_live_records())
     }
 }
 

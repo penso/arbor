@@ -589,15 +589,7 @@ async fn process_ws_client_message(
                 })
                 .map_err(|error| error.to_string())?;
         },
-        Message::Ping(payload) => {
-            let mut daemon = state.daemon.lock().await;
-            daemon
-                .write(WriteRequest {
-                    session_id: session_id.to_owned(),
-                    bytes: payload.to_vec(),
-                })
-                .map_err(|error| error.to_string())?;
-        },
+        Message::Ping(_) => {},
         Message::Pong(_) => {},
         Message::Close(_) => {
             return Ok(false);

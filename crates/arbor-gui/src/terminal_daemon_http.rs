@@ -361,7 +361,7 @@ impl HttpEndpoint {
     }
 
     fn connect(&self) -> Result<TcpStream, HttpTerminalDaemonError> {
-        let address = self.connect_address();
+        let address = self.host_header();
         let mut addrs = address.to_socket_addrs().map_err(|error| {
             HttpTerminalDaemonError::new(format!(
                 "failed to resolve daemon host `{}`: {error}",
@@ -413,14 +413,6 @@ impl HttpEndpoint {
     }
 
     fn host_header(&self) -> String {
-        if self.host.contains(':') {
-            return format!("[{}]:{}", self.host, self.port);
-        }
-
-        format!("{}:{}", self.host, self.port)
-    }
-
-    fn connect_address(&self) -> String {
         if self.host.contains(':') {
             return format!("[{}]:{}", self.host, self.port);
         }
