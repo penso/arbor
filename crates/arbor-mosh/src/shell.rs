@@ -1,8 +1,8 @@
 use {
+    crate::{MoshError, MoshHandshakeResult},
     arbor_terminal_emulator::{
         TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator, TerminalSnapshot, process_terminal_bytes,
     },
-    crate::{MoshError, MoshHandshakeResult},
     portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
     std::{
         io::{Read, Write},
@@ -27,8 +27,16 @@ pub struct MoshShell {
 
 impl MoshShell {
     pub fn spawn(handshake: MoshHandshakeResult, cols: u16, rows: u16) -> Result<Self, MoshError> {
-        let cols = if cols == 0 { TERMINAL_COLS } else { cols };
-        let rows = if rows == 0 { TERMINAL_ROWS } else { rows };
+        let cols = if cols == 0 {
+            TERMINAL_COLS
+        } else {
+            cols
+        };
+        let rows = if rows == 0 {
+            TERMINAL_ROWS
+        } else {
+            rows
+        };
 
         let pty_system = native_pty_system();
         let pair = pty_system
