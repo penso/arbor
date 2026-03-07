@@ -5277,8 +5277,6 @@ impl ArborWindow {
                     .gap_2()
                     .children(repositories.into_iter().enumerate().map(
                         |(repository_index, repository)| {
-                            let is_active_repository =
-                                self.active_repository_index == Some(repository_index);
                             let is_collapsed =
                                 self.collapsed_repositories.contains(&repository_index);
                             let repository_avatar_url = repository.avatar_url.clone();
@@ -5322,106 +5320,102 @@ impl ArborWindow {
                                     div()
                                         .id(("repository-row", repository_index))
                                         .cursor_pointer()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(rgb(if is_active_repository {
-                                            theme.accent
-                                        } else {
-                                            theme.border
-                                        }))
-                                        .bg(rgb(if is_active_repository {
-                                            theme.panel_active_bg
-                                        } else {
-                                            theme.panel_bg
-                                        }))
-                                        .px_2()
-                                        .py_1()
-                                        .h(px(32.))
                                         .flex()
                                         .items_center()
-                                        .justify_between()
+                                        .gap_1()
+                                        .h(px(32.))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_repository(repository_index, cx);
                                         }))
+                                        // GitHub icon or avatar outside the cell
+                                        .child(
+                                            if let Some(url) =
+                                                repository_avatar_url.clone()
+                                            {
+                                                div()
+                                                    .flex_none()
+                                                    .size(px(20.))
+                                                    .rounded_sm()
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        img(url)
+                                                            .size_full()
+                                                            .rounded_sm()
+                                                            .with_fallback(move || {
+                                                                div()
+                                                                    .size_full()
+                                                                    .font_family(FONT_MONO)
+                                                                    .text_size(px(12.))
+                                                                    .text_color(rgb(
+                                                                        theme.text_muted,
+                                                                    ))
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .child("\u{f09b}")
+                                                                    .into_any_element()
+                                                            }),
+                                                    )
+                                                    .into_any_element()
+                                            } else {
+                                                div()
+                                                    .flex_none()
+                                                    .font_family(FONT_MONO)
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child("\u{f09b}")
+                                                    .into_any_element()
+                                            },
+                                        )
+                                        // Cell with chevron, name, count, etc.
                                         .child(
                                             div()
-                                                .min_w_0()
                                                 .flex_1()
+                                                .min_w_0()
                                                 .flex()
                                                 .items_center()
-                                                .gap_1()
-                                                // Chevron toggle
+                                                .justify_between()
                                                 .child(
                                                     div()
-                                                        .id(("repo-chevron", repository_index))
-                                                        .cursor_pointer()
-                                                        .text_size(px(16.))
-                                                        .text_color(rgb(theme.text_muted))
-                                                        .w(px(14.))
+                                                        .min_w_0()
+                                                        .flex_1()
                                                         .flex()
                                                         .items_center()
-                                                        .justify_center()
-                                                        .child(if is_collapsed {
-                                                            "\u{25B8}"
-                                                        } else {
-                                                            "\u{25BE}"
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                if this
-                                                                    .collapsed_repositories
-                                                                    .contains(&repository_index)
-                                                                {
-                                                                    this.collapsed_repositories
-                                                                        .remove(&repository_index);
+                                                        .gap_1()
+                                                        // Chevron toggle
+                                                        .child(
+                                                            div()
+                                                                .id(("repo-chevron", repository_index))
+                                                                .cursor_pointer()
+                                                                .text_size(px(16.))
+                                                                .text_color(rgb(theme.text_muted))
+                                                                .w(px(14.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .child(if is_collapsed {
+                                                                    "\u{25B8}"
                                                                 } else {
-                                                                    this.collapsed_repositories
-                                                                        .insert(repository_index);
-                                                                }
-                                                                cx.stop_propagation();
-                                                                cx.notify();
-                                                            },
-                                                        )),
-                                                )
-                                                // GitHub icon or avatar
-                                                .child(
-                                                    if let Some(url) =
-                                                        repository_avatar_url.clone()
-                                                    {
-                                                        div()
-                                                            .size(px(20.))
-                                                            .rounded_sm()
-                                                            .overflow_hidden()
-                                                            .child(
-                                                                img(url)
-                                                                    .size_full()
-                                                                    .rounded_sm()
-                                                                    .with_fallback(move || {
-                                                                        div()
-                                                                            .size_full()
-                                                                            .font_family(FONT_MONO)
-                                                                            .text_size(px(12.))
-                                                                            .text_color(rgb(
-                                                                                theme.text_muted,
-                                                                            ))
-                                                                            .flex()
-                                                                            .items_center()
-                                                                            .justify_center()
-                                                                            .child("\u{f09b}")
-                                                                            .into_any_element()
-                                                                    }),
-                                                            )
-                                                            .into_any_element()
-                                                    } else {
-                                                        div()
-                                                            .font_family(FONT_MONO)
-                                                            .text_size(px(12.))
-                                                            .text_color(rgb(theme.text_muted))
-                                                            .child("\u{f09b}")
-                                                            .into_any_element()
-                                                    },
-                                                )
-                                                // Repository name
+                                                                    "\u{25BE}"
+                                                                })
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        if this
+                                                                            .collapsed_repositories
+                                                                            .contains(&repository_index)
+                                                                        {
+                                                                            this.collapsed_repositories
+                                                                                .remove(&repository_index);
+                                                                        } else {
+                                                                            this.collapsed_repositories
+                                                                                .insert(repository_index);
+                                                                        }
+                                                                        cx.stop_propagation();
+                                                                        cx.notify();
+                                                                    },
+                                                                )),
+                                                        )
+                                                        // Repository name
                                                 .child(
                                                     div()
                                                         .min_w_0()
@@ -5481,14 +5475,14 @@ impl ArborWindow {
                                                     cx.stop_propagation();
                                                 })),
                                         ),
+                                        )
                                 )
                                 .when(!is_collapsed, |this| {
                                     this.child(
                                     div()
-                                        .pl(px(8.))
                                         .flex()
                                         .flex_col()
-                                        .gap_1()
+                                        .gap(px(6.))
                                         .children(
                                             repo_worktrees.into_iter().map(|(index, worktree)| {
                                                 let is_active =
@@ -5502,97 +5496,86 @@ impl ArborWindow {
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
                                                     None => None,
                                                 };
-                                                let checkout_icon = if worktree.is_primary_checkout
-                                                {
-                                                    "◦"
-                                                } else {
-                                                    "⎇"
-                                                };
                                                 div()
                                                     .id(("worktree-row", index))
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
-                                                    .rounded_sm()
-                                                    .border_1()
-                                                    .border_color(rgb(if is_active {
-                                                        theme.accent
-                                                    } else {
-                                                        theme.border
-                                                    }))
-                                                    .bg(rgb(theme.panel_bg))
-                                                    .px_2()
-                                                    .py_1()
-                                                    .h(px(40.))
                                                     .flex()
-                                                    .flex_col()
-                                                    .justify_center()
-                                                    .when(is_active, |this| {
-                                                        this.bg(rgb(theme.panel_active_bg))
-                                                    })
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .h(px(40.))
                                                     .on_click(
                                                         cx.listener(move |this, _, window, cx| {
                                                             this.select_worktree(index, window, cx)
                                                         }),
                                                     )
+                                                    // Activity dot outside the cell
                                                     .child(
                                                         div()
+                                                            .flex_none()
+                                                            .w(px(20.))
                                                             .flex()
                                                             .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .flex_1()
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .gap_1()
-                                                                    .child(
-                                                                        div()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(
-                                                                                theme.text_muted,
-                                                                            ))
-                                                                            .child(checkout_icon),
-                                                                    )
-                                                                    .when_some(agent_dot_color, |this, color| {
-                                                                        this.child(
-                                                                            div()
-                                                                                .flex_none()
-                                                                                .size(px(6.))
-                                                                                .rounded_full()
-                                                                                .bg(rgb(color)),
+                                                            .justify_center()
+                                                            .when_some(agent_dot_color, |this, color| {
+                                                                this.child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .size(px(6.))
+                                                                        .rounded_full()
+                                                                        .bg(rgb(color)),
+                                                                )
+                                                            }),
+                                                    )
+                                                    // Bordered cell
+                                                    .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(rgb(if is_active {
+                                                            theme.accent
+                                                        } else {
+                                                            theme.border
+                                                        }))
+                                                        .bg(rgb(theme.panel_bg))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .justify_center()
+                                                        .when(is_active, |this| {
+                                                            this.bg(rgb(theme.panel_active_bg))
+                                                        })
+                                                    .child(
+                                                        div().min_w_0().flex_1().when(
+                                                            show_name,
+                                                            |this| {
+                                                                this.child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
+                                                                        .text_xs()
+                                                                        .font_weight(
+                                                                            FontWeight::SEMIBOLD,
                                                                         )
-                                                                    })
-                                                                    .child(
-                                                                        div().min_w_0().flex_1().when(
-                                                                            show_name,
-                                                                            |this| {
-                                                                                this.child(
-                                                                                    div()
-                                                                                        .min_w_0()
-                                                                                        .overflow_hidden()
-                                                                                        .whitespace_nowrap()
-                                                                                        .text_ellipsis()
-                                                                                        .text_xs()
-                                                                                        .font_weight(
-                                                                                            FontWeight::SEMIBOLD,
-                                                                                        )
-                                                                                        .text_color(rgb(
-                                                                                            theme.text_primary,
-                                                                                        ))
-                                                                                        .child(
-                                                                                            worktree
-                                                                                                .label
-                                                                                                .clone(),
-                                                                                        ),
-                                                                                )
-                                                                            },
+                                                                        .text_color(rgb(
+                                                                            theme.text_primary,
+                                                                        ))
+                                                                        .child(
+                                                                            worktree
+                                                                                .label
+                                                                                .clone(),
                                                                         ),
-                                                                    ),
+                                                                )
+                                                            },
+                                                        ),
                                                     )
                                                     .child(
                                                         div()
-                                                            .pl(px(14.))
                                                             .min_w_0()
                                                             .flex()
                                                             .items_center()
