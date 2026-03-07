@@ -4393,8 +4393,19 @@ impl ArborWindow {
             return;
         }
 
-        // Find the session we just spawned and send the editor command
+        // Find the session we just spawned, set its title, and send the editor command
         let session_id = self.next_terminal_id - 1;
+        let editor_basename = Path::new(editor)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(editor);
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        if let Some(session) = self.terminals.iter_mut().find(|s| s.id == session_id) {
+            session.title = format!("{editor_basename}: {file_name}");
+        }
         let cmd = format!(
             "{} {}; exit\n",
             shell_escape(editor),
