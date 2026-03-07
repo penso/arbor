@@ -1,0 +1,14 @@
+[package]
+name = "arbor-ssh"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+libssh-rs = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

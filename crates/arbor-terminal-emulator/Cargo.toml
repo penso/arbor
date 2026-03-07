@@ -1,0 +1,12 @@
+[package]
+name = "arbor-terminal-emulator"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+alacritty_terminal = { workspace = true }
+
+[lints]
+workspace = true

@@ -12,7 +12,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 arbor-core = { path = "../arbor-core" }
-alacritty_terminal = { workspace = true }
+arbor-mosh = { path = "../arbor-mosh" }
+arbor-ssh = { path = "../arbor-ssh" }
+arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 config = { workspace = true }
 futures = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }
@@ -25,9 +27,10 @@ serde = { workspace = true }
 smol = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
+toml_edit = { workspace = true }
 tracing = { workspace = true }
-ureq = { workspace = true }
 tracing-subscriber = { workspace = true }
+ureq = { workspace = true }
 
 [lints]
 workspace = true

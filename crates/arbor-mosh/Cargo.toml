@@ -1,0 +1,16 @@
+[package]
+name = "arbor-mosh"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+arbor-ssh = { path = "../arbor-ssh" }
+arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
+portable-pty = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

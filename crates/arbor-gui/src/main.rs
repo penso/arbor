@@ -36,7 +36,7 @@ use {
         env, fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
-        sync::Arc,
+        sync::{Arc, Mutex},
         time::{Duration, Instant, SystemTime},
     },
     terminal_backend::{
@@ -191,9 +191,148 @@ enum TerminalState {
 }
 
 #[derive(Clone)]
+enum OutpostTerminalRuntime {
+    RemoteDaemon {
+        daemon: HttpTerminalDaemon,
+    },
+    SshShell(SshTerminalShell),
+    MoshShell(arbor_mosh::MoshShell),
+}
+
+/// SSH terminal shell wrapper that provides Clone (via Arc<Mutex>) and
+/// a terminal emulator for rendering. Polling is done from the GUI timer
+/// since libssh's Channel is not Send/Sync.
+#[derive(Clone)]
+struct SshTerminalShell {
+    shell: Arc<Mutex<arbor_ssh::shell::SshShell>>,
+    emulator: Arc<Mutex<arbor_terminal_emulator::TerminalEmulator>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl SshTerminalShell {
+    fn open(
+        connection: &arbor_ssh::connection::SshConnection,
+        cols: u16,
+        rows: u16,
+        remote_path: &str,
+    ) -> Result<Self, String> {
+        let shell =
+            arbor_ssh::shell::SshShell::open(connection.session(), u32::from(cols), u32::from(rows))
+                .map_err(|e| format!("failed to open SSH shell: {e}"))?;
+
+        // Send cd command to navigate to the outpost directory
+        shell
+            .write_input(format!("cd {remote_path} && clear\n").as_bytes())
+            .map_err(|e| format!("failed to send cd command: {e}"))?;
+
+        Ok(Self {
+            shell: Arc::new(Mutex::new(shell)),
+            emulator: Arc::new(Mutex::new(
+                arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols),
+            )),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        })
+    }
+
+    fn write_input(&self, bytes: &[u8]) -> Result<(), String> {
+        let shell = self
+            .shell
+            .lock()
+            .map_err(|_| "SSH shell lock poisoned".to_owned())?;
+        shell
+            .write_input(bytes)
+            .map_err(|e| format!("failed to write to SSH shell: {e}"))
+    }
+
+    /// Poll the shell for new output and feed it to the terminal emulator.
+    /// Called from the GUI polling timer. Returns true if new data was processed.
+    fn poll(&self) -> bool {
+        let shell = match self.shell.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        match shell.read_available() {
+            Ok(data) if !data.is_empty() => {
+                drop(shell);
+                let mut emulator = match self.emulator.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                emulator.process(&data);
+                self.generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                true
+            },
+            _ => false,
+        }
+    }
+
+    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+        let (output, styled_lines, cursor) = match self.emulator.lock() {
+            Ok(emulator) => (
+                emulator.snapshot_output(),
+                emulator.collect_styled_lines(),
+                emulator.snapshot_cursor(),
+            ),
+            Err(poisoned) => {
+                let emulator = poisoned.into_inner();
+                (
+                    emulator.snapshot_output(),
+                    emulator.collect_styled_lines(),
+                    emulator.snapshot_cursor(),
+                )
+            },
+        };
+
+        let is_closed = self
+            .shell
+            .lock()
+            .map(|s| s.is_closed() || s.is_eof())
+            .unwrap_or(true);
+
+        arbor_terminal_emulator::TerminalSnapshot {
+            output,
+            styled_lines,
+            cursor,
+            exit_code: if is_closed { Some(0) } else { None },
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
+        let shell = self
+            .shell
+            .lock()
+            .map_err(|_| "SSH shell lock poisoned".to_owned())?;
+        shell
+            .resize(u32::from(cols), u32::from(rows))
+            .map_err(|e| format!("failed to resize SSH shell: {e}"))?;
+        drop(shell);
+
+        if let Ok(mut emulator) = self.emulator.lock() {
+            emulator.resize(rows, cols);
+        }
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn close(&self) {
+        if let Ok(shell) = self.shell.lock() {
+            let _ = shell.close();
+        }
+    }
+}
+
+#[derive(Clone)]
 enum TerminalRuntime {
     Embedded(EmbeddedTerminal),
     Daemon,
+    Outpost(OutpostTerminalRuntime),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +412,32 @@ struct TerminalSelection {
     head: TerminalGridPosition,
 }
 
+#[derive(Debug, Clone)]
+struct OutpostSummary {
+    outpost_id: String,
+    repo_root: PathBuf,
+    remote_path: String,
+    label: String,
+    branch: String,
+    host_name: String,
+    hostname: String,
+    status: arbor_core::outpost::OutpostStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateModalTab {
+    LocalWorktree,
+    RemoteOutpost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateOutpostField {
+    HostSelector,
+    CloneUrl,
+    Branch,
+    OutpostName,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CreateWorktreeField {
     RepositoryPath,
@@ -280,10 +445,19 @@ enum CreateWorktreeField {
 }
 
 #[derive(Debug, Clone)]
-struct CreateWorktreeModal {
+struct CreateModal {
+    tab: CreateModalTab,
+    // Worktree fields
     repository_path: String,
     worktree_name: String,
-    active_field: CreateWorktreeField,
+    worktree_active_field: CreateWorktreeField,
+    // Outpost fields
+    host_index: usize,
+    clone_url: String,
+    branch: String,
+    outpost_name: String,
+    outpost_active_field: CreateOutpostField,
+    // Shared
     is_creating: bool,
     error: Option<String>,
 }
@@ -291,6 +465,40 @@ struct CreateWorktreeModal {
 enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
     MoveActiveField,
+    Backspace,
+    Append(String),
+    ClearError,
+}
+
+enum OutpostModalInputEvent {
+    SetActiveField(CreateOutpostField),
+    MoveActiveField(bool),
+    CycleHost(bool),
+    Backspace,
+    Append(String),
+    ClearError,
+}
+
+#[derive(Clone)]
+struct ManageHostsModal {
+    adding: bool,
+    name: String,
+    hostname: String,
+    user: String,
+    active_field: ManageHostsField,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManageHostsField {
+    Name,
+    Hostname,
+    User,
+}
+
+enum HostsModalInputEvent {
+    SetActiveField(ManageHostsField),
+    MoveActiveField(bool),
     Backspace,
     Append(String),
     ClearError,
@@ -335,7 +543,13 @@ struct ArborWindow {
     diff_scroll_handle: UniformListScrollHandle,
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
-    create_worktree_modal: Option<CreateWorktreeModal>,
+    create_modal: Option<CreateModal>,
+    outposts: Vec<OutpostSummary>,
+    outpost_store: Box<dyn arbor_core::outpost_store::OutpostStore>,
+    active_outpost_index: Option<usize>,
+    remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
+    ssh_connection_pool: Arc<arbor_ssh::connection::SshConnectionPool>,
+    manage_hosts_modal: Option<ManageHostsModal>,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     last_persisted_ui_state: ui_state_store::UiState,
@@ -420,7 +634,13 @@ impl ArborWindow {
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
-                    create_worktree_modal: None,
+                    create_modal: None,
+                    outposts: Vec::new(),
+                    outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
+                    active_outpost_index: None,
+                    remote_hosts: Vec::new(),
+                    ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+                    manage_hosts_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     last_persisted_ui_state: startup_ui_state,
@@ -487,7 +707,13 @@ impl ArborWindow {
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
-                    create_worktree_modal: None,
+                    create_modal: None,
+                    outposts: Vec::new(),
+                    outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
+                    active_outpost_index: None,
+                    remote_hosts: Vec::new(),
+                    ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+                    manage_hosts_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     last_persisted_ui_state: startup_ui_state,
@@ -589,6 +815,26 @@ impl ArborWindow {
             }
         }
 
+        let remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded_config
+            .config
+            .remote_hosts
+            .iter()
+            .map(|host_config| arbor_core::outpost::RemoteHost {
+                name: host_config.name.clone(),
+                hostname: host_config.hostname.clone(),
+                port: host_config.port,
+                user: host_config.user.clone(),
+                identity_file: host_config.identity_file.clone(),
+                remote_base_path: host_config.remote_base_path.clone(),
+                daemon_port: host_config.daemon_port,
+                mosh: host_config.mosh,
+                mosh_server_path: host_config.mosh_server_path.clone(),
+            })
+            .collect();
+
+        let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
+        let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
+
         let active_backend_kind =
             match parse_terminal_backend_kind(loaded_config.config.terminal_backend.as_deref()) {
                 Ok(kind) => kind,
@@ -645,7 +891,13 @@ impl ArborWindow {
             diff_scroll_handle: UniformListScrollHandle::new(),
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
-            create_worktree_modal: None,
+            create_modal: None,
+            outposts,
+            outpost_store,
+            active_outpost_index: None,
+            remote_hosts,
+            ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+            manage_hosts_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
@@ -740,7 +992,9 @@ impl ArborWindow {
                     }
 
                     this.refresh_worktree_diff_summaries(cx);
-                    if this.reload_changed_files() {
+                    if this.active_outpost_index.is_some() {
+                        this.refresh_remote_changed_files(cx);
+                    } else if this.reload_changed_files() {
                         cx.notify();
                     }
                 });
@@ -850,6 +1104,29 @@ impl ArborWindow {
                     }
                 },
             }
+        }
+
+        let next_remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded
+            .config
+            .remote_hosts
+            .iter()
+            .map(|host_config| arbor_core::outpost::RemoteHost {
+                name: host_config.name.clone(),
+                hostname: host_config.hostname.clone(),
+                port: host_config.port,
+                user: host_config.user.clone(),
+                identity_file: host_config.identity_file.clone(),
+                remote_base_path: host_config.remote_base_path.clone(),
+                daemon_port: host_config.daemon_port,
+                mosh: host_config.mosh,
+                mosh_server_path: host_config.mosh_server_path.clone(),
+            })
+            .collect();
+        if self.remote_hosts != next_remote_hosts {
+            self.remote_hosts = next_remote_hosts;
+            self.outposts =
+                load_outpost_summaries(self.outpost_store.as_ref(), &self.remote_hosts);
+            changed = true;
         }
 
         if !notices.is_empty() {
@@ -1198,6 +1475,176 @@ impl ArborWindow {
                         },
                     }
                 },
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon { ref daemon }) => {
+                    let (session_id, daemon_session_id, previous_cols, previous_rows, title) = {
+                        let session = &self.terminals[index];
+                        (
+                            session.id,
+                            session.daemon_session_id.clone(),
+                            session.cols,
+                            session.rows,
+                            session.title.clone(),
+                        )
+                    };
+
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, ..)) = target_grid_size
+                        && (cols != previous_cols || rows != previous_rows)
+                    {
+                        match daemon.resize(ResizeRequest {
+                            session_id: daemon_session_id.clone(),
+                            cols,
+                            rows,
+                        }) {
+                            Ok(()) => {
+                                let session = &mut self.terminals[index];
+                                session.cols = cols;
+                                session.rows = rows;
+                                changed = true;
+                            },
+                            Err(error) => {
+                                self.notice = Some(format!("failed to resize outpost terminal: {error}"));
+                            },
+                        }
+                    }
+
+                    match daemon.snapshot(SnapshotRequest {
+                        session_id: daemon_session_id,
+                        max_lines: 220,
+                    }) {
+                        Ok(Some(snapshot)) => {
+                            let session = &mut self.terminals[index];
+                            let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
+                            if session.output != snapshot.output_tail {
+                                session.output = snapshot.output_tail;
+                                session.styled_output.clear();
+                                session.cursor = None;
+                                changed = true;
+                            }
+                            if session.state != snapshot_state {
+                                session.state = snapshot_state;
+                                changed = true;
+                            }
+                            if session.exit_code != snapshot.exit_code {
+                                session.exit_code = snapshot.exit_code;
+                                changed = true;
+                            }
+                            if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
+                                session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
+                                changed = true;
+                            }
+                        },
+                        Ok(None) => {
+                            sessions_to_close.push(session_id);
+                        },
+                        Err(error) => {
+                            self.notice = Some(format!(
+                                "failed to load outpost daemon snapshot for terminal `{title}`: {error}"
+                            ));
+                        },
+                    }
+                },
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ref ssh)) => {
+                    let session_id = self.terminals[index].id;
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, _pixel_width, _pixel_height)) = target_grid_size
+                        && let Err(error) = ssh.resize(rows, cols)
+                    {
+                        self.notice = Some(format!("failed to resize SSH terminal: {error}"));
+                    }
+
+                    // Poll for new data from the SSH channel
+                    ssh.poll();
+
+                    let generation = ssh.generation();
+                    if generation == self.terminals[index].generation {
+                        continue;
+                    }
+
+                    let snapshot = ssh.snapshot();
+                    let session = &mut self.terminals[index];
+                    let output = snapshot.output;
+                    let styled_output = snapshot.styled_lines;
+                    let cursor = snapshot.cursor;
+                    if output != session.output
+                        || styled_output != session.styled_output
+                        || cursor != session.cursor
+                    {
+                        session.output = output;
+                        session.styled_output = styled_output;
+                        session.cursor = cursor;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        changed = true;
+                    }
+                    session.generation = generation;
+
+                    if let Some(exit_code) = snapshot.exit_code
+                        && session.state == TerminalState::Running
+                    {
+                        session.exit_code = Some(exit_code);
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        if exit_code == 0 {
+                            sessions_to_close.push(session.id);
+                        } else {
+                            session.state = TerminalState::Failed;
+                            session.runtime = None;
+                            changed = true;
+                            self.notice = Some(format!(
+                                "SSH terminal tab `{}` exited with code {exit_code}",
+                                session.title,
+                            ));
+                        }
+                    }
+                },
+                TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh)) => {
+                    let session_id = self.terminals[index].id;
+                    if active_terminal_id == Some(session_id)
+                        && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
+                        && let Err(error) = mosh.resize(rows, cols, pixel_width, pixel_height)
+                    {
+                        self.notice = Some(format!("failed to resize mosh terminal: {error}"));
+                    }
+
+                    let generation = mosh.generation();
+                    if generation == self.terminals[index].generation {
+                        continue;
+                    }
+
+                    let snapshot = mosh.snapshot();
+                    let session = &mut self.terminals[index];
+                    let output = snapshot.output;
+                    let styled_output = snapshot.styled_lines;
+                    let cursor = snapshot.cursor;
+                    if output != session.output
+                        || styled_output != session.styled_output
+                        || cursor != session.cursor
+                    {
+                        session.output = output;
+                        session.styled_output = styled_output;
+                        session.cursor = cursor;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        changed = true;
+                    }
+                    session.generation = generation;
+
+                    if let Some(exit_code) = snapshot.exit_code
+                        && session.state == TerminalState::Running
+                    {
+                        session.exit_code = Some(exit_code);
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        if exit_code == 0 {
+                            sessions_to_close.push(session.id);
+                        } else {
+                            session.state = TerminalState::Failed;
+                            session.runtime = None;
+                            changed = true;
+                            self.notice = Some(format!(
+                                "mosh terminal tab `{}` exited with code {exit_code}",
+                                session.title,
+                            ));
+                        }
+                    }
+                },
             };
         }
 
@@ -1486,6 +1933,12 @@ impl ArborWindow {
     }
 
     fn selected_worktree_path(&self) -> Option<&Path> {
+        if let Some(outpost_index) = self.active_outpost_index {
+            return self
+                .outposts
+                .get(outpost_index)
+                .map(|outpost| outpost.repo_root.as_path());
+        }
         self.active_worktree_index
             .and_then(|index| self.worktrees.get(index))
             .map(|worktree| worktree.path.as_path())
@@ -1515,7 +1968,31 @@ impl ArborWindow {
 
     fn active_terminal_id_for_selected_worktree(&self) -> Option<u64> {
         let worktree_path = self.selected_worktree_path()?;
-        self.active_terminal_id_for_worktree(worktree_path)
+        let is_outpost = self.active_outpost_index.is_some();
+
+        self.active_terminal_by_worktree
+            .get(worktree_path)
+            .copied()
+            .filter(|session_id| {
+                self.terminals.iter().any(|session| {
+                    session.id == *session_id
+                        && session.worktree_path.as_path() == worktree_path
+                        && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
+                            matches!(rt, TerminalRuntime::Outpost(_))
+                        })
+                })
+            })
+            .or_else(|| {
+                self.terminals
+                    .iter()
+                    .find(|session| {
+                        session.worktree_path.as_path() == worktree_path
+                            && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
+                                matches!(rt, TerminalRuntime::Outpost(_))
+                            })
+                    })
+                    .map(|session| session.id)
+            })
     }
 
     fn selected_worktree_terminals(&self) -> Vec<&TerminalSession> {
@@ -1523,9 +2000,16 @@ impl ArborWindow {
             return Vec::new();
         };
 
+        let is_outpost = self.active_outpost_index.is_some();
+
         self.terminals
             .iter()
-            .filter(|session| session.worktree_path.as_path() == worktree_path)
+            .filter(|session| {
+                session.worktree_path.as_path() == worktree_path
+                    && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
+                        matches!(rt, TerminalRuntime::Outpost(_))
+                    })
+            })
             .collect()
     }
 
@@ -1559,6 +2043,12 @@ impl ArborWindow {
     }
 
     fn ensure_selected_worktree_terminal(&mut self) -> bool {
+        // Don't auto-spawn local terminals when an outpost is selected;
+        // outpost terminals are created explicitly via spawn_outpost_terminal.
+        if self.active_outpost_index.is_some() {
+            return false;
+        }
+
         let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
             return false;
         };
@@ -1589,22 +2079,40 @@ impl ArborWindow {
             return false;
         };
 
-        if let Some(session) = self.terminals.get(index)
-            && matches!(session.runtime, Some(TerminalRuntime::Daemon))
-            && let Some(daemon) = self.terminal_daemon.as_ref()
-        {
-            let result = if session.state == TerminalState::Running {
-                daemon.kill(KillRequest {
-                    session_id: session.daemon_session_id.clone(),
-                })
-            } else {
-                daemon.detach(DetachRequest {
-                    session_id: session.daemon_session_id.clone(),
-                })
-            };
+        if let Some(session) = self.terminals.get(index) {
+            match &session.runtime {
+                Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(mosh))) => {
+                    mosh.close();
+                },
+                Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ssh))) => {
+                    ssh.close();
+                },
+                runtime => {
+                    let daemon_to_use = match runtime {
+                        Some(TerminalRuntime::Daemon) => self.terminal_daemon.as_ref(),
+                        Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon {
+                            daemon,
+                        })) => Some(daemon),
+                        _ => None,
+                    };
 
-            if let Err(error) = result {
-                self.notice = Some(format!("failed to close terminal session: {error}"));
+                    if let Some(daemon) = daemon_to_use {
+                        let result = if session.state == TerminalState::Running {
+                            daemon.kill(KillRequest {
+                                session_id: session.daemon_session_id.clone(),
+                            })
+                        } else {
+                            daemon.detach(DetachRequest {
+                                session_id: session.daemon_session_id.clone(),
+                            })
+                        };
+
+                        if let Err(error) = result {
+                            self.notice =
+                                Some(format!("failed to close terminal session: {error}"));
+                        }
+                    }
+                },
             }
         }
 
@@ -1846,6 +2354,7 @@ impl ArborWindow {
             self.worktree_nav_forward.clear();
         }
         self.active_worktree_index = Some(index);
+        self.active_outpost_index = None;
         self.active_diff_session_id = None;
         self.sync_active_repository_from_selected_worktree();
         let _ = self.reload_changed_files();
@@ -1864,9 +2373,54 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn select_outpost(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_outpost_index = Some(index);
+        self.active_worktree_index = None;
+        self.changed_files.clear();
+        self.selected_changed_file = None;
+        self.refresh_remote_changed_files(cx);
+        cx.notify();
+    }
+
+    fn remove_outpost(&mut self, outpost_index: usize, cx: &mut Context<Self>) {
+        let Some(outpost) = self.outposts.get(outpost_index) else {
+            return;
+        };
+
+        let outpost_id = outpost.outpost_id.clone();
+        if let Err(error) = self.outpost_store.remove(&outpost_id) {
+            self.notice = Some(format!("failed to remove outpost: {error}"));
+            cx.notify();
+            return;
+        }
+
+        self.outposts.remove(outpost_index);
+
+        if self.active_outpost_index == Some(outpost_index) {
+            self.active_outpost_index = None;
+        } else if let Some(active) = self.active_outpost_index {
+            if active > outpost_index {
+                self.active_outpost_index = Some(active - 1);
+            }
+        }
+
+        cx.notify();
+    }
+
     fn reload_changed_files(&mut self) -> bool {
         let previous_files = self.changed_files.clone();
         let previous_notice = self.notice.clone();
+        // Remote outposts don't have a local working tree to diff against.
+        if self.active_outpost_index.is_some() {
+            self.changed_files.clear();
+            self.selected_changed_file = None;
+            return self.changed_files != previous_files;
+        }
         let Some(path) = self.selected_worktree_path() else {
             self.changed_files.clear();
             self.selected_changed_file = None;
@@ -1886,6 +2440,99 @@ impl ArborWindow {
 
         self.sync_selected_changed_file();
         self.changed_files != previous_files || self.notice != previous_notice
+    }
+
+    fn refresh_remote_changed_files(&mut self, cx: &mut Context<Self>) {
+        let Some(outpost_index) = self.active_outpost_index else {
+            return;
+        };
+        let Some(outpost) = self.outposts.get(outpost_index) else {
+            return;
+        };
+        let Some(host) = self
+            .remote_hosts
+            .iter()
+            .find(|h| h.name == outpost.host_name)
+            .cloned()
+        else {
+            return;
+        };
+
+        let remote_path = outpost.remote_path.clone();
+        let pool = self.ssh_connection_pool.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let conn_slot = pool
+                        .get_or_connect(&host)
+                        .map_err(|e| format!("SSH connection failed: {e}"))?;
+                    let guard = conn_slot
+                        .lock()
+                        .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                    let connection = guard
+                        .as_ref()
+                        .ok_or_else(|| "SSH connection not available".to_owned())?;
+
+                    use arbor_core::remote::RemoteTransport;
+
+                    let status_output = connection
+                        .run_command(&format!("cd {remote_path} && git status --porcelain"))
+                        .map_err(|e| format!("{e}"))?;
+                    if status_output.exit_code != Some(0) {
+                        return Err(format!("git status failed: {}", status_output.stderr));
+                    }
+
+                    let numstat_output = connection
+                        .run_command(&format!(
+                            "cd {remote_path} && git diff --numstat HEAD 2>/dev/null"
+                        ))
+                        .map_err(|e| format!("{e}"))?;
+                    let numstat_map =
+                        parse_remote_numstat_output(&numstat_output.stdout);
+
+                    let mut files = Vec::new();
+                    for line in status_output.stdout.lines() {
+                        if line.len() < 3 {
+                            continue;
+                        }
+                        let xy = &line[..2];
+                        let path_str = line[3..].trim();
+                        if path_str.is_empty() {
+                            continue;
+                        }
+                        let path = PathBuf::from(path_str);
+                        let kind = porcelain_status_to_change_kind(xy);
+                        let (additions, deletions) = numstat_map
+                            .get(&path)
+                            .copied()
+                            .unwrap_or((0, 0));
+                        files.push(ChangedFile {
+                            path,
+                            kind,
+                            additions,
+                            deletions,
+                        });
+                    }
+                    files.sort_by(|a, b| a.path.cmp(&b.path));
+                    Ok::<Vec<ChangedFile>, String>(files)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if this.active_outpost_index.is_some() {
+                    match result {
+                        Ok(files) => {
+                            this.changed_files = files;
+                            this.sync_selected_changed_file();
+                        },
+                        Err(_) => {},
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn sync_selected_changed_file(&mut self) {
@@ -2044,31 +2691,41 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn open_create_worktree_modal(&mut self, cx: &mut Context<Self>) {
-        let repository_root = self
-            .selected_repository()
-            .map(|repository| repository.root.clone())
-            .unwrap_or_else(|| self.repo_root.clone());
-        self.open_create_worktree_modal_for_repository_root(repository_root, cx);
-    }
-
-    fn open_create_worktree_modal_for_repository_root(
+    fn open_create_modal(
         &mut self,
-        repository_root: PathBuf,
+        repo_index: usize,
+        tab: CreateModalTab,
         cx: &mut Context<Self>,
     ) {
-        self.create_worktree_modal = Some(CreateWorktreeModal {
-            repository_path: repository_root.display().to_string(),
+        let repository_path = self
+            .repositories
+            .get(repo_index)
+            .map(|r| r.root.display().to_string())
+            .unwrap_or_else(|| self.repo_root.display().to_string());
+        let clone_url = self
+            .repositories
+            .get(repo_index)
+            .and_then(|r| r.github_repo_slug.as_ref())
+            .map(|slug| format!("git@github.com:{slug}.git"))
+            .unwrap_or_default();
+        self.create_modal = Some(CreateModal {
+            tab,
+            repository_path,
             worktree_name: String::new(),
-            active_field: CreateWorktreeField::WorktreeName,
+            worktree_active_field: CreateWorktreeField::WorktreeName,
+            host_index: 0,
+            clone_url,
+            branch: "main".to_owned(),
+            outpost_name: String::new(),
+            outpost_active_field: CreateOutpostField::CloneUrl,
             is_creating: false,
             error: None,
         });
         cx.notify();
     }
 
-    fn close_create_worktree_modal(&mut self, cx: &mut Context<Self>) {
-        self.create_worktree_modal = None;
+    fn close_create_modal(&mut self, cx: &mut Context<Self>) {
+        self.create_modal = None;
         cx.notify();
     }
 
@@ -2077,7 +2734,7 @@ impl ArborWindow {
         input: ModalInputEvent,
         cx: &mut Context<Self>,
     ) {
-        let Some(modal) = self.create_worktree_modal.as_mut() else {
+        let Some(modal) = self.create_modal.as_mut() else {
             return;
         };
 
@@ -2087,23 +2744,23 @@ impl ArborWindow {
 
         match input {
             ModalInputEvent::SetActiveField(field) => {
-                modal.active_field = field;
+                modal.worktree_active_field = field;
             },
             ModalInputEvent::MoveActiveField => {
-                modal.active_field = match modal.active_field {
+                modal.worktree_active_field = match modal.worktree_active_field {
                     CreateWorktreeField::RepositoryPath => CreateWorktreeField::WorktreeName,
                     CreateWorktreeField::WorktreeName => CreateWorktreeField::RepositoryPath,
                 };
             },
             ModalInputEvent::Backspace => {
-                let field_value = match modal.active_field {
+                let field_value = match modal.worktree_active_field {
                     CreateWorktreeField::RepositoryPath => &mut modal.repository_path,
                     CreateWorktreeField::WorktreeName => &mut modal.worktree_name,
                 };
                 let _ = field_value.pop();
             },
             ModalInputEvent::Append(text) => {
-                let field_value = match modal.active_field {
+                let field_value = match modal.worktree_active_field {
                     CreateWorktreeField::RepositoryPath => &mut modal.repository_path,
                     CreateWorktreeField::WorktreeName => &mut modal.worktree_name,
                 };
@@ -2118,7 +2775,7 @@ impl ArborWindow {
     }
 
     fn submit_create_worktree_modal(&mut self, cx: &mut Context<Self>) {
-        let Some(modal) = self.create_worktree_modal.as_mut() else {
+        let Some(modal) = self.create_modal.as_mut() else {
             return;
         };
         if modal.is_creating {
@@ -2158,7 +2815,7 @@ impl ArborWindow {
                             "created worktree `{}` on branch `{}`",
                             created.worktree_name, created.branch_name
                         ));
-                        this.create_worktree_modal = None;
+                        this.create_modal = None;
                         this.refresh_worktrees(cx);
                         if let Some(index) = this
                             .worktrees
@@ -2175,7 +2832,314 @@ impl ArborWindow {
                         }
                     },
                     Err(error) => {
-                        if let Some(modal) = this.create_worktree_modal.as_mut() {
+                        if let Some(modal) = this.create_modal.as_mut() {
+                            modal.is_creating = false;
+                            modal.error = Some(error);
+                        } else {
+                            this.notice = Some(error);
+                        }
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_manage_hosts_modal(&mut self, cx: &mut Context<Self>) {
+        self.manage_hosts_modal = Some(ManageHostsModal {
+            adding: false,
+            name: String::new(),
+            hostname: String::new(),
+            user: String::new(),
+            active_field: ManageHostsField::Name,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn close_manage_hosts_modal(&mut self, cx: &mut Context<Self>) {
+        self.manage_hosts_modal = None;
+        cx.notify();
+    }
+
+    fn update_manage_hosts_modal_input(
+        &mut self,
+        input: HostsModalInputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.manage_hosts_modal.as_mut() else {
+            return;
+        };
+
+        match input {
+            HostsModalInputEvent::SetActiveField(field) => {
+                modal.active_field = field;
+            },
+            HostsModalInputEvent::MoveActiveField(reverse) => {
+                modal.active_field = match (modal.active_field, reverse) {
+                    (ManageHostsField::Name, false) => ManageHostsField::Hostname,
+                    (ManageHostsField::Hostname, false) => ManageHostsField::User,
+                    (ManageHostsField::User, false) => ManageHostsField::Name,
+                    (ManageHostsField::Name, true) => ManageHostsField::User,
+                    (ManageHostsField::Hostname, true) => ManageHostsField::Name,
+                    (ManageHostsField::User, true) => ManageHostsField::Hostname,
+                };
+            },
+            HostsModalInputEvent::Backspace => {
+                let field_value = match modal.active_field {
+                    ManageHostsField::Name => &mut modal.name,
+                    ManageHostsField::Hostname => &mut modal.hostname,
+                    ManageHostsField::User => &mut modal.user,
+                };
+                let _ = field_value.pop();
+            },
+            HostsModalInputEvent::Append(text) => {
+                let field_value = match modal.active_field {
+                    ManageHostsField::Name => &mut modal.name,
+                    ManageHostsField::Hostname => &mut modal.hostname,
+                    ManageHostsField::User => &mut modal.user,
+                };
+                field_value.push_str(&text);
+            },
+            HostsModalInputEvent::ClearError => {
+                modal.error = None;
+            },
+        }
+
+        cx.notify();
+    }
+
+    fn submit_add_host(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.manage_hosts_modal.as_mut() else {
+            return;
+        };
+        let name = modal.name.trim().to_owned();
+        let hostname = modal.hostname.trim().to_owned();
+        let user = modal.user.trim().to_owned();
+
+        if name.is_empty() || hostname.is_empty() || user.is_empty() {
+            modal.error = Some("All fields are required.".to_owned());
+            cx.notify();
+            return;
+        }
+
+        if self.remote_hosts.iter().any(|h| h.name == name) {
+            modal.error = Some(format!("Host \"{name}\" already exists."));
+            cx.notify();
+            return;
+        }
+
+        let host_config = app_config::RemoteHostConfig {
+            name: name.clone(),
+            hostname,
+            user,
+            port: 22,
+            identity_file: None,
+            remote_base_path: "~/arbor-outposts".to_owned(),
+            daemon_port: None,
+            mosh: None,
+            mosh_server_path: None,
+        };
+
+        if let Err(error) = app_config::append_remote_host(&host_config) {
+            modal.error = Some(error);
+            cx.notify();
+            return;
+        }
+
+        self.config_last_modified = None;
+        self.refresh_config_if_changed(cx);
+        self.notice = Some(format!("Host \"{name}\" added."));
+        if let Some(modal) = self.manage_hosts_modal.as_mut() {
+            modal.adding = false;
+            modal.name.clear();
+            modal.hostname.clear();
+            modal.user.clear();
+            modal.error = None;
+        }
+        cx.notify();
+    }
+
+    fn remove_host_at(&mut self, host_name: String, cx: &mut Context<Self>) {
+        if let Err(error) = app_config::remove_remote_host(&host_name) {
+            self.notice = Some(error);
+            cx.notify();
+            return;
+        }
+        self.config_last_modified = None;
+        self.refresh_config_if_changed(cx);
+        self.notice = Some(format!("Host \"{host_name}\" removed."));
+        cx.notify();
+    }
+
+    fn update_create_outpost_modal_input(
+        &mut self,
+        input: OutpostModalInputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.create_modal.as_mut() else {
+            return;
+        };
+        if modal.is_creating {
+            return;
+        }
+
+        match input {
+            OutpostModalInputEvent::SetActiveField(field) => {
+                modal.outpost_active_field = field;
+            },
+            OutpostModalInputEvent::MoveActiveField(reverse) => {
+                modal.outpost_active_field = match (modal.outpost_active_field, reverse) {
+                    (CreateOutpostField::HostSelector, false) => CreateOutpostField::CloneUrl,
+                    (CreateOutpostField::CloneUrl, false) => CreateOutpostField::Branch,
+                    (CreateOutpostField::Branch, false) => CreateOutpostField::OutpostName,
+                    (CreateOutpostField::OutpostName, false) => CreateOutpostField::HostSelector,
+                    (CreateOutpostField::HostSelector, true) => CreateOutpostField::OutpostName,
+                    (CreateOutpostField::CloneUrl, true) => CreateOutpostField::HostSelector,
+                    (CreateOutpostField::Branch, true) => CreateOutpostField::CloneUrl,
+                    (CreateOutpostField::OutpostName, true) => CreateOutpostField::Branch,
+                };
+            },
+            OutpostModalInputEvent::CycleHost(reverse) => {
+                let count = self.remote_hosts.len();
+                if count > 0 {
+                    if reverse {
+                        modal.host_index = (modal.host_index + count - 1) % count;
+                    } else {
+                        modal.host_index = (modal.host_index + 1) % count;
+                    }
+                }
+            },
+            OutpostModalInputEvent::Backspace => {
+                if modal.outpost_active_field == CreateOutpostField::HostSelector {
+                    return;
+                }
+                let field_value = match modal.outpost_active_field {
+                    CreateOutpostField::HostSelector => return,
+                    CreateOutpostField::CloneUrl => &mut modal.clone_url,
+                    CreateOutpostField::Branch => &mut modal.branch,
+                    CreateOutpostField::OutpostName => &mut modal.outpost_name,
+                };
+                let _ = field_value.pop();
+            },
+            OutpostModalInputEvent::Append(text) => {
+                if modal.outpost_active_field == CreateOutpostField::HostSelector {
+                    return;
+                }
+                let field_value = match modal.outpost_active_field {
+                    CreateOutpostField::HostSelector => return,
+                    CreateOutpostField::CloneUrl => &mut modal.clone_url,
+                    CreateOutpostField::Branch => &mut modal.branch,
+                    CreateOutpostField::OutpostName => &mut modal.outpost_name,
+                };
+                field_value.push_str(&text);
+            },
+            OutpostModalInputEvent::ClearError => {
+                modal.error = None;
+            },
+        }
+
+        cx.notify();
+    }
+
+    fn submit_create_outpost_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.create_modal.as_mut() else {
+            return;
+        };
+        if modal.is_creating {
+            return;
+        }
+
+        modal.error = None;
+        let clone_url = modal.clone_url.trim().to_owned();
+        let branch = modal.branch.trim().to_owned();
+        let outpost_name = modal.outpost_name.trim().to_owned();
+        let host_index = modal.host_index;
+
+        if clone_url.is_empty() {
+            modal.error = Some("Clone URL is required.".to_owned());
+            cx.notify();
+            return;
+        }
+        if branch.is_empty() {
+            modal.error = Some("Branch is required.".to_owned());
+            cx.notify();
+            return;
+        }
+        if outpost_name.is_empty() {
+            modal.error = Some("Outpost name is required.".to_owned());
+            cx.notify();
+            return;
+        }
+        let Some(host) = self.remote_hosts.get(host_index).cloned() else {
+            modal.error = Some("No remote host selected.".to_owned());
+            cx.notify();
+            return;
+        };
+
+        modal.is_creating = true;
+        cx.notify();
+
+        let local_repo_root = self
+            .selected_repository()
+            .map(|r| r.root.display().to_string())
+            .unwrap_or_default();
+        let pool = self.ssh_connection_pool.clone();
+        let host_name = host.name.clone();
+        let bg_clone_url = clone_url.clone();
+        let bg_outpost_name = outpost_name.clone();
+        let bg_branch = branch.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let conn_slot = pool
+                        .get_or_connect(&host)
+                        .map_err(|e| format!("SSH connection failed: {e}"))?;
+                    let guard = conn_slot
+                        .lock()
+                        .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                    let connection = guard
+                        .as_ref()
+                        .ok_or_else(|| "SSH connection not available".to_owned())?;
+                    let provisioner =
+                        arbor_ssh::provisioner::SshProvisioner::new(connection, &host);
+                    use arbor_core::remote::RemoteProvisioner;
+                    provisioner
+                        .provision(&bg_clone_url, &bg_outpost_name, &bg_branch)
+                        .map_err(|e| format!("{e}"))
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(provision_result) => {
+                        let timestamp = current_unix_timestamp_millis().unwrap_or(0);
+                        let record = arbor_core::outpost::OutpostRecord {
+                            id: format!("outpost-{timestamp}"),
+                            host_name: host_name.clone(),
+                            local_repo_root,
+                            remote_path: provision_result.remote_path,
+                            clone_url,
+                            branch,
+                            label: outpost_name.clone(),
+                            has_remote_daemon: provision_result.has_remote_daemon,
+                        };
+                        if let Err(e) = this.outpost_store.upsert(record) {
+                            this.notice = Some(format!("outpost created but failed to save: {e}"));
+                        } else {
+                            this.notice =
+                                Some(format!("outpost `{outpost_name}` created on {host_name}"));
+                        }
+                        this.outposts = load_outpost_summaries(
+                            this.outpost_store.as_ref(),
+                            &this.remote_hosts,
+                        );
+                        this.create_modal = None;
+                    },
+                    Err(error) => {
+                        if let Some(modal) = this.create_modal.as_mut() {
                             modal.is_creating = false;
                             modal.error = Some(error);
                         } else {
@@ -2195,34 +3159,164 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.create_worktree_modal.is_none() || event.is_held {
+        if event.is_held {
             return;
         }
+
+        if self.manage_hosts_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+
+            let adding = self
+                .manage_hosts_modal
+                .as_ref()
+                .map(|m| m.adding)
+                .unwrap_or(false);
+
+            if adding {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        if let Some(modal) = self.manage_hosts_modal.as_mut() {
+                            modal.adding = false;
+                            modal.error = None;
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                        return;
+                    },
+                    "tab" => {
+                        self.update_manage_hosts_modal_input(
+                            HostsModalInputEvent::MoveActiveField(
+                                event.keystroke.modifiers.shift,
+                            ),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                        return;
+                    },
+                    "enter" | "return" => {
+                        self.submit_add_host(cx);
+                        cx.stop_propagation();
+                        return;
+                    },
+                    "backspace" => {
+                        self.update_manage_hosts_modal_input(
+                            HostsModalInputEvent::Backspace,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                        return;
+                    },
+                    _ => {},
+                }
+
+                if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+                    return;
+                }
+
+                if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                    self.update_manage_hosts_modal_input(
+                        HostsModalInputEvent::ClearError,
+                        cx,
+                    );
+                    self.update_manage_hosts_modal_input(
+                        HostsModalInputEvent::Append(key_char.to_owned()),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }
+            } else {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        self.close_manage_hosts_modal(cx);
+                        cx.stop_propagation();
+                    },
+                    _ => {},
+                }
+            }
+            return;
+        }
+
+        let Some(modal) = self.create_modal.as_ref() else {
+            return;
+        };
 
         if event.keystroke.modifiers.platform {
             return;
         }
 
+        let active_tab = modal.tab;
+
         match event.keystroke.key.as_str() {
             "escape" => {
-                self.close_create_worktree_modal(cx);
+                self.close_create_modal(cx);
                 cx.stop_propagation();
                 return;
             },
             "tab" => {
-                self.update_create_worktree_modal_input(ModalInputEvent::MoveActiveField, cx);
+                match active_tab {
+                    CreateModalTab::LocalWorktree => {
+                        self.update_create_worktree_modal_input(
+                            ModalInputEvent::MoveActiveField,
+                            cx,
+                        );
+                    },
+                    CreateModalTab::RemoteOutpost => {
+                        self.update_create_outpost_modal_input(
+                            OutpostModalInputEvent::MoveActiveField(
+                                event.keystroke.modifiers.shift,
+                            ),
+                            cx,
+                        );
+                    },
+                }
                 cx.stop_propagation();
                 return;
             },
             "enter" | "return" => {
-                self.submit_create_worktree_modal(cx);
+                match active_tab {
+                    CreateModalTab::LocalWorktree => self.submit_create_worktree_modal(cx),
+                    CreateModalTab::RemoteOutpost => self.submit_create_outpost_modal(cx),
+                }
                 cx.stop_propagation();
                 return;
             },
             "backspace" => {
-                self.update_create_worktree_modal_input(ModalInputEvent::Backspace, cx);
+                match active_tab {
+                    CreateModalTab::LocalWorktree => {
+                        self.update_create_worktree_modal_input(
+                            ModalInputEvent::Backspace,
+                            cx,
+                        );
+                    },
+                    CreateModalTab::RemoteOutpost => {
+                        self.update_create_outpost_modal_input(
+                            OutpostModalInputEvent::Backspace,
+                            cx,
+                        );
+                    },
+                }
                 cx.stop_propagation();
                 return;
+            },
+            "left" | "right" => {
+                if active_tab == CreateModalTab::RemoteOutpost {
+                    if self
+                        .create_modal
+                        .as_ref()
+                        .map(|m| m.outpost_active_field == CreateOutpostField::HostSelector)
+                        .unwrap_or(false)
+                    {
+                        let reverse = event.keystroke.key.as_str() == "left";
+                        self.update_create_outpost_modal_input(
+                            OutpostModalInputEvent::CycleHost(reverse),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
             },
             _ => {},
         }
@@ -2232,11 +3326,25 @@ impl ArborWindow {
         }
 
         if let Some(key_char) = event.keystroke.key_char.as_ref() {
-            self.update_create_worktree_modal_input(ModalInputEvent::ClearError, cx);
-            self.update_create_worktree_modal_input(
-                ModalInputEvent::Append(key_char.to_owned()),
-                cx,
-            );
+            match active_tab {
+                CreateModalTab::LocalWorktree => {
+                    self.update_create_worktree_modal_input(ModalInputEvent::ClearError, cx);
+                    self.update_create_worktree_modal_input(
+                        ModalInputEvent::Append(key_char.to_owned()),
+                        cx,
+                    );
+                },
+                CreateModalTab::RemoteOutpost => {
+                    self.update_create_outpost_modal_input(
+                        OutpostModalInputEvent::ClearError,
+                        cx,
+                    );
+                    self.update_create_outpost_modal_input(
+                        OutpostModalInputEvent::Append(key_char.to_owned()),
+                        cx,
+                    );
+                },
+            }
             cx.stop_propagation();
         }
     }
@@ -2247,7 +3355,8 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_create_worktree_modal(cx);
+        let repo_index = self.active_repository_index.unwrap_or(0);
+        self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
     }
 
     fn action_open_add_repository(
@@ -2588,11 +3697,170 @@ impl ArborWindow {
     }
 
     fn spawn_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(outpost_index) = self.active_outpost_index {
+            self.spawn_outpost_terminal(outpost_index, window, cx);
+            return;
+        }
+
         if !self.spawn_terminal_session_inner(true) {
             cx.notify();
             return;
         }
 
+        self.sync_daemon_session_store(cx);
+        self.active_diff_session_id = None;
+        self.terminal_scroll_handle.scroll_to_bottom();
+        window.focus(&self.terminal_focus);
+        self.focus_terminal_on_next_render = false;
+        cx.notify();
+    }
+
+    fn spawn_outpost_terminal(
+        &mut self,
+        outpost_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(outpost) = self.outposts.get(outpost_index) else {
+            return;
+        };
+
+        let host = self
+            .remote_hosts
+            .iter()
+            .find(|host| host.name == outpost.host_name)
+            .cloned();
+        let Some(host) = host else {
+            self.notice = Some(format!(
+                "no remote host config found for `{}`",
+                outpost.host_name,
+            ));
+            cx.notify();
+            return;
+        };
+
+        let worktree_path = outpost.repo_root.clone();
+        let session_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        self.active_terminal_by_worktree
+            .insert(worktree_path.clone(), session_id);
+
+        let title = format!("ssh-{}", outpost.label);
+        let mut session = TerminalSession {
+            id: session_id,
+            daemon_session_id: session_id.to_string(),
+            worktree_path,
+            title,
+            last_command: None,
+            pending_command: String::new(),
+            command: String::new(),
+            state: TerminalState::Running,
+            exit_code: None,
+            updated_at_unix_ms: current_unix_timestamp_millis(),
+            cols: 120,
+            rows: 35,
+            generation: 0,
+            output: String::new(),
+            styled_output: Vec::new(),
+            cursor: None,
+            runtime: None,
+        };
+
+        let mut launched = false;
+
+        if host.mosh == Some(true) && arbor_mosh::detect::local_mosh_client_available() {
+            let pool = self.ssh_connection_pool.clone();
+            match pool.get_or_connect(&host) {
+                Ok(conn_slot) => {
+                    let mosh_result: Result<arbor_mosh::MoshShell, String> = (|| {
+                        let guard = conn_slot
+                            .lock()
+                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                        let connection = guard
+                            .as_ref()
+                            .ok_or_else(|| "SSH connection not available".to_owned())?;
+                        let handshake = arbor_mosh::handshake::start_mosh_server(connection, &host)
+                            .map_err(|error| {
+                                format!("mosh handshake failed, falling back to SSH: {error}")
+                            })?;
+                        arbor_mosh::MoshShell::spawn(handshake, 120, 35).map_err(|error| {
+                            format!("mosh-client failed, falling back to SSH: {error}")
+                        })
+                    })();
+
+                    match mosh_result {
+                        Ok(mosh) => {
+                            session.command = "mosh".to_owned();
+                            session.generation = mosh.generation();
+                            session.runtime = Some(TerminalRuntime::Outpost(
+                                OutpostTerminalRuntime::MoshShell(mosh),
+                            ));
+                            launched = true;
+                        },
+                        Err(error) => {
+                            self.notice = Some(error);
+                        },
+                    }
+                },
+                Err(error) => {
+                    self.notice = Some(format!(
+                        "SSH connection failed for mosh handshake: {error}",
+                    ));
+                },
+            }
+        } else if host.mosh == Some(true) {
+            self.notice =
+                Some("mosh-client not found locally, falling back to SSH shell".to_owned());
+        }
+
+        if !launched {
+            let pool = self.ssh_connection_pool.clone();
+            match pool.get_or_connect(&host) {
+                Ok(conn_slot) => {
+                    let ssh_result: Result<SshTerminalShell, String> = (|| {
+                        let guard = conn_slot
+                            .lock()
+                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                        let connection = guard
+                            .as_ref()
+                            .ok_or_else(|| "SSH connection not available".to_owned())?;
+                        SshTerminalShell::open(
+                            connection,
+                            120,
+                            35,
+                            &outpost.remote_path,
+                        )
+                    })();
+
+                    match ssh_result {
+                        Ok(ssh_shell) => {
+                            session.command = "ssh".to_owned();
+                            session.generation = ssh_shell.generation();
+                            session.runtime = Some(TerminalRuntime::Outpost(
+                                OutpostTerminalRuntime::SshShell(ssh_shell),
+                            ));
+                            launched = true;
+                        },
+                        Err(error) => {
+                            self.notice = Some(format!("SSH shell failed: {error}"));
+                        },
+                    }
+                },
+                Err(error) => {
+                    self.notice = Some(format!("SSH connection failed: {error}"));
+                },
+            }
+        }
+
+        if !launched {
+            // Don't push a terminal session with no runtime
+            self.notice
+                .get_or_insert_with(|| "failed to open SSH shell".to_owned());
+            cx.notify();
+            return;
+        }
+
+        self.terminals.push(session);
         self.sync_daemon_session_store(cx);
         self.active_diff_session_id = None;
         self.terminal_scroll_handle.scroll_to_bottom();
@@ -2846,6 +4114,36 @@ impl ArborWindow {
                         })
                         .map_err(|error| error.to_string())?;
                 }
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+                Ok(())
+            },
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon { ref daemon })) => {
+                let daemon_session_id = self.terminals[index].daemon_session_id.clone();
+                if input == [0x03] {
+                    daemon
+                        .signal(SignalRequest {
+                            session_id: daemon_session_id,
+                            signal: TerminalSignal::Interrupt,
+                        })
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    daemon
+                        .write(WriteRequest {
+                            session_id: daemon_session_id,
+                            bytes: input.to_vec(),
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+                Ok(())
+            },
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ref ssh))) => {
+                ssh.write_input(input)?;
+                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+                Ok(())
+            },
+            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh))) => {
+                mosh.write_input(input)?;
                 self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
                 Ok(())
             },
@@ -3118,7 +4416,9 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.create_worktree_modal.is_some() {
+        if self.create_modal.is_some()
+            || self.manage_hosts_modal.is_some()
+        {
             return;
         }
 
@@ -3631,12 +4931,18 @@ impl ArborWindow {
                             let is_collapsed =
                                 self.collapsed_repositories.contains(&repository_index);
                             let repository_avatar_url = repository.avatar_url.clone();
-                            let repository_root = repository.root.clone();
                             let repo_worktrees: Vec<(usize, WorktreeSummary)> = worktrees
                                 .iter()
                                 .cloned()
                                 .enumerate()
                                 .filter(|(_, worktree)| worktree.repo_root == repository.root)
+                                .collect();
+                            let repo_outposts: Vec<(usize, OutpostSummary)> = self
+                                .outposts
+                                .iter()
+                                .cloned()
+                                .enumerate()
+                                .filter(|(_, outpost)| outpost.repo_root == repository.root)
                                 .collect();
 
                             div()
@@ -3790,8 +5096,9 @@ impl ArborWindow {
                                                     {
                                                         this.select_repository(repository_index, cx);
                                                     }
-                                                    this.open_create_worktree_modal_for_repository_root(
-                                                        repository_root.clone(),
+                                                    this.open_create_modal(
+                                                        repository_index,
+                                                        CreateModalTab::LocalWorktree,
                                                         cx,
                                                     );
                                                     cx.stop_propagation();
@@ -4012,6 +5319,107 @@ impl ArborWindow {
                                         ),
                                 )
                                 })
+                                .when(!repo_outposts.is_empty(), |group| {
+                                    group.child(
+                                        div()
+                                            .pl(px(8.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .children(
+                                                repo_outposts.into_iter().map(|(outpost_index, outpost)| {
+                                                    let is_active = self.active_outpost_index == Some(outpost_index);
+                                                    let status_color = match outpost.status {
+                                                        arbor_core::outpost::OutpostStatus::Available => theme.accent,
+                                                        arbor_core::outpost::OutpostStatus::Unreachable => 0xeb6f92,
+                                                        arbor_core::outpost::OutpostStatus::NotCloned | arbor_core::outpost::OutpostStatus::Provisioning => theme.text_muted,
+                                                    };
+                                                    div()
+                                                        .id(("outpost-row", outpost_index))
+                                                        .font_family(FONT_MONO)
+                                                        .cursor_pointer()
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(rgb(if is_active { theme.accent } else { theme.border }))
+                                                        .bg(rgb(theme.panel_bg))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .h(px(40.))
+                                                        .flex()
+                                                        .flex_col()
+                                                        .justify_center()
+                                                        .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                                            this.select_outpost(outpost_index, window, cx);
+                                                        }))
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .text_sm()
+                                                                        .text_color(rgb(status_color))
+                                                                        .child("\u{f0ac}"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .flex_1()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
+                                                                        .text_xs()
+                                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                                        .text_color(rgb(theme.text_primary))
+                                                                        .child(outpost.label.clone()),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .pl(px(14.))
+                                                                .min_w_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_between()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(theme.text_disabled))
+                                                                        .child(outpost.branch.clone()),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .child(format!("@{}", outpost.hostname)),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id(("outpost-remove", outpost_index))
+                                                                        .flex_none()
+                                                                        .cursor_pointer()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .hover(|style| style.text_color(rgb(theme.text_primary)))
+                                                                        .ml_1()
+                                                                        .child("\u{f00d}")
+                                                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                                                            this.remove_outpost(outpost_index, cx);
+                                                                        })),
+                                                                ),
+                                                        )
+                                                }),
+                                            ),
+                                    )
+                                })
                         },
                     )),
             )
@@ -4022,11 +5430,19 @@ impl ArborWindow {
                     .px_3()
                     .flex()
                     .items_center()
+                    .gap_2()
                     .child(
                         action_button(theme, "open-add-repository", "+ Add Repo", false, false)
-                            .w_full()
+                            .flex_1()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_add_repository_picker(cx);
+                            })),
+                    )
+                    .child(
+                        action_button(theme, "open-manage-hosts", "Manage Hosts", false, false)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_manage_hosts_modal(cx);
                             })),
                     ),
             )
@@ -4897,22 +6313,61 @@ impl ArborWindow {
             )
     }
 
-    fn render_create_worktree_modal(&mut self, cx: &mut Context<Self>) -> Div {
-        let Some(modal) = self.create_worktree_modal.clone() else {
+    fn render_create_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.create_modal.clone() else {
             return div();
         };
 
         let theme = self.theme();
+        let has_remote_hosts = !self.remote_hosts.is_empty();
+        let is_worktree_tab = modal.tab == CreateModalTab::LocalWorktree;
+        let is_outpost_tab = modal.tab == CreateModalTab::RemoteOutpost;
+
+        // Worktree tab data
         let branch_name = derive_branch_name(&modal.worktree_name);
         let target_path_preview =
             preview_managed_worktree_path(modal.repository_path.trim(), modal.worktree_name.trim())
                 .unwrap_or_else(|_| "-".to_owned());
-
-        let repository_active = modal.active_field == CreateWorktreeField::RepositoryPath;
-        let worktree_active = modal.active_field == CreateWorktreeField::WorktreeName;
-        let create_disabled = modal.is_creating
+        let repository_active =
+            modal.worktree_active_field == CreateWorktreeField::RepositoryPath;
+        let worktree_active = modal.worktree_active_field == CreateWorktreeField::WorktreeName;
+        let worktree_create_disabled = modal.is_creating
             || modal.repository_path.trim().is_empty()
             || modal.worktree_name.trim().is_empty();
+
+        // Outpost tab data
+        let host_name = self
+            .remote_hosts
+            .get(modal.host_index)
+            .map(|h| h.name.clone())
+            .unwrap_or_else(|| "-".to_owned());
+        let remote_preview = self
+            .remote_hosts
+            .get(modal.host_index)
+            .map(|h| format!("{}/{}", h.remote_base_path, modal.outpost_name.trim()))
+            .unwrap_or_else(|| "-".to_owned());
+        let host_active = modal.outpost_active_field == CreateOutpostField::HostSelector;
+        let clone_url_active = modal.outpost_active_field == CreateOutpostField::CloneUrl;
+        let branch_active = modal.outpost_active_field == CreateOutpostField::Branch;
+        let outpost_name_active = modal.outpost_active_field == CreateOutpostField::OutpostName;
+        let outpost_create_disabled = modal.is_creating
+            || modal.clone_url.trim().is_empty()
+            || modal.outpost_name.trim().is_empty()
+            || modal.branch.trim().is_empty()
+            || self.remote_hosts.is_empty();
+
+        let create_disabled = if is_worktree_tab {
+            worktree_create_disabled
+        } else {
+            outpost_create_disabled
+        };
+        let submit_label = if modal.is_creating {
+            "Creating..."
+        } else if is_worktree_tab {
+            "Create Worktree"
+        } else {
+            "Create Outpost"
+        };
 
         div()
             .absolute()
@@ -4933,6 +6388,7 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    // Header
                     .child(
                         div()
                             .flex()
@@ -4943,97 +6399,330 @@ impl ArborWindow {
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(theme.text_primary))
-                                    .child("Create Worktree"),
+                                    .child("Add"),
                             )
                             .child(
-                                action_button(theme, "close-create-worktree", "Close", false, true)
+                                action_button(theme, "close-create-modal", "Close", false, true)
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_create_worktree_modal(cx);
+                                        this.close_create_modal(cx);
                                     })),
                             ),
                     )
+                    // Tab bar
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child("Target base: ~/.arbor/worktrees/<repo>/<worktree>/"),
+                            .flex()
+                            .gap_0()
+                            .border_b_1()
+                            .border_color(rgb(theme.border))
+                            .child(
+                                div()
+                                    .id("tab-local-worktree")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if is_worktree_tab {
+                                        theme.text_primary
+                                    } else {
+                                        theme.text_muted
+                                    }))
+                                    .when(is_worktree_tab, |this| {
+                                        this.border_b_2()
+                                            .border_color(rgb(theme.accent))
+                                    })
+                                    .child("Local Worktree")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(modal) = this.create_modal.as_mut() {
+                                            if !modal.is_creating {
+                                                modal.tab = CreateModalTab::LocalWorktree;
+                                                modal.error = None;
+                                                cx.notify();
+                                            }
+                                        }
+                                    })),
+                            )
+                            .when(has_remote_hosts, |this| {
+                                this.child(
+                                    div()
+                                        .id("tab-remote-outpost")
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_1()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(if is_outpost_tab {
+                                            theme.text_primary
+                                        } else {
+                                            theme.text_muted
+                                        }))
+                                        .when(is_outpost_tab, |this| {
+                                            this.border_b_2()
+                                                .border_color(rgb(theme.accent))
+                                        })
+                                        .child("Remote Outpost")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(modal) = this.create_modal.as_mut() {
+                                                if !modal.is_creating {
+                                                    modal.tab = CreateModalTab::RemoteOutpost;
+                                                    modal.error = None;
+                                                    cx.notify();
+                                                }
+                                            }
+                                        })),
+                                )
+                            }),
                     )
-                    .child(
-                        modal_input_field(
-                            theme,
-                            "create-worktree-repo-input",
-                            "Repository",
-                            &modal.repository_path,
-                            "Path to git repository",
-                            repository_active,
+                    // Local Worktree tab content
+                    .when(is_worktree_tab, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_muted))
+                                .child("Target base: ~/.arbor/worktrees/<repo>/<worktree>/"),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.update_create_worktree_modal_input(
-                                ModalInputEvent::SetActiveField(
-                                    CreateWorktreeField::RepositoryPath,
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "create-worktree-repo-input",
+                                "Repository",
+                                &modal.repository_path,
+                                "Path to git repository",
+                                repository_active,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_create_worktree_modal_input(
+                                    ModalInputEvent::SetActiveField(
+                                        CreateWorktreeField::RepositoryPath,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "create-worktree-name-input",
+                                "Worktree Name",
+                                &modal.worktree_name,
+                                "e.g. remote-ssh",
+                                worktree_active,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_create_worktree_modal_input(
+                                    ModalInputEvent::SetActiveField(
+                                        CreateWorktreeField::WorktreeName,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            div()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .bg(rgb(theme.panel_bg))
+                                .p_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("Branch"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(FONT_MONO)
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(branch_name),
                                 ),
-                                cx,
-                            );
-                        })),
-                    )
-                    .child(
-                        modal_input_field(
-                            theme,
-                            "create-worktree-name-input",
-                            "Worktree Name",
-                            &modal.worktree_name,
-                            "e.g. remote-ssh",
-                            worktree_active,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.update_create_worktree_modal_input(
-                                ModalInputEvent::SetActiveField(CreateWorktreeField::WorktreeName),
-                                cx,
-                            );
-                        })),
-                    )
-                    .child(
-                        div()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.panel_bg))
-                            .p_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Branch"),
+                        .child(
+                            div()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .bg(rgb(theme.panel_bg))
+                                .p_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("Path"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(FONT_MONO)
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(target_path_preview),
+                                ),
+                        )
+                    })
+                    // Remote Outpost tab content
+                    .when(is_outpost_tab, |this| {
+                        this.child(
+                            div()
+                                .id("outpost-host-selector")
+                                .cursor_pointer()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(if host_active {
+                                    theme.accent
+                                } else {
+                                    theme.border
+                                }))
+                                .bg(rgb(theme.panel_bg))
+                                .p_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("Host"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_family(FONT_MONO)
+                                                .text_color(rgb(theme.text_primary))
+                                                .child(host_name),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .id("outpost-host-prev")
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("\u{25c0}")
+                                                        .on_click(cx.listener(
+                                                            |this, _, _, cx| {
+                                                                this.update_create_outpost_modal_input(
+                                                                    OutpostModalInputEvent::CycleHost(
+                                                                        true,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("outpost-host-next")
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("\u{25b6}")
+                                                        .on_click(cx.listener(
+                                                            |this, _, _, cx| {
+                                                                this.update_create_outpost_modal_input(
+                                                                    OutpostModalInputEvent::CycleHost(
+                                                                        false,
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.update_create_outpost_modal_input(
+                                        OutpostModalInputEvent::SetActiveField(
+                                            CreateOutpostField::HostSelector,
+                                        ),
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "outpost-clone-url-input",
+                                "Clone URL",
+                                &modal.clone_url,
+                                "git@github.com:user/repo.git",
+                                clone_url_active,
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family(FONT_MONO)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child(branch_name),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.panel_bg))
-                            .p_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Path"),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_create_outpost_modal_input(
+                                    OutpostModalInputEvent::SetActiveField(
+                                        CreateOutpostField::CloneUrl,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "outpost-branch-input",
+                                "Branch",
+                                &modal.branch,
+                                "main",
+                                branch_active,
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family(FONT_MONO)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child(target_path_preview),
-                            ),
-                    )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_create_outpost_modal_input(
+                                    OutpostModalInputEvent::SetActiveField(
+                                        CreateOutpostField::Branch,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "outpost-name-input",
+                                "Outpost Name",
+                                &modal.outpost_name,
+                                "e.g. my-feature",
+                                outpost_name_active,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_create_outpost_modal_input(
+                                    OutpostModalInputEvent::SetActiveField(
+                                        CreateOutpostField::OutpostName,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            div()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .bg(rgb(theme.panel_bg))
+                                .p_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("Remote Path"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(FONT_MONO)
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(remote_preview),
+                                ),
+                        )
+                    })
+                    // Error
                     .child(div().when_some(modal.error.clone(), |this, error| {
                         this.rounded_sm()
                             .border_1()
@@ -5045,6 +6734,7 @@ impl ArborWindow {
                             .text_color(rgb(0xffd7d7))
                             .child(error)
                     }))
+                    // Buttons
                     .child(
                         div()
                             .flex()
@@ -5054,34 +6744,353 @@ impl ArborWindow {
                             .child(
                                 action_button(
                                     theme,
-                                    "cancel-create-worktree",
+                                    "cancel-create-modal",
                                     "Cancel",
                                     false,
                                     true,
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.close_create_worktree_modal(cx);
-                                    },
-                                )),
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.close_create_modal(cx);
+                                })),
                             )
                             .child(
                                 action_button(
                                     theme,
-                                    "submit-create-worktree",
-                                    if modal.is_creating {
-                                        "Creating..."
-                                    } else {
-                                        "Create Worktree"
-                                    },
+                                    "submit-create-modal",
+                                    submit_label,
                                     !create_disabled,
                                     create_disabled,
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.submit_create_worktree_modal(cx);
-                                    },
-                                )),
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(modal) = this.create_modal.as_ref() {
+                                        match modal.tab {
+                                            CreateModalTab::LocalWorktree => {
+                                                this.submit_create_worktree_modal(cx);
+                                            },
+                                            CreateModalTab::RemoteOutpost => {
+                                                this.submit_create_outpost_modal(cx);
+                                            },
+                                        }
+                                    }
+                                })),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_manage_hosts_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.manage_hosts_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+
+        if modal.adding {
+            let name_active = modal.active_field == ManageHostsField::Name;
+            let hostname_active = modal.active_field == ManageHostsField::Hostname;
+            let user_active = modal.active_field == ManageHostsField::User;
+            let add_disabled = modal.name.trim().is_empty()
+                || modal.hostname.trim().is_empty()
+                || modal.user.trim().is_empty();
+
+            return div()
+                .absolute()
+                .inset_0()
+                .bg(rgb(0x10131a))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(620.))
+                        .max_w(px(620.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.sidebar_bg))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        // Header
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme.text_primary))
+                                        .child("Add Host"),
+                                )
+                                .child(
+                                    action_button(
+                                        theme,
+                                        "back-manage-hosts",
+                                        "Back",
+                                        false,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                                            modal.adding = false;
+                                            modal.error = None;
+                                            cx.notify();
+                                        }
+                                    })),
+                                ),
+                        )
+                        // Name
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "hosts-name-input",
+                                "Name",
+                                &modal.name,
+                                "e.g. build-server",
+                                name_active,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_manage_hosts_modal_input(
+                                    HostsModalInputEvent::SetActiveField(ManageHostsField::Name),
+                                    cx,
+                                );
+                            })),
+                        )
+                        // Hostname
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "hosts-hostname-input",
+                                "Hostname",
+                                &modal.hostname,
+                                "e.g. build.example.com",
+                                hostname_active,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_manage_hosts_modal_input(
+                                    HostsModalInputEvent::SetActiveField(
+                                        ManageHostsField::Hostname,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        // User
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "hosts-user-input",
+                                "User",
+                                &modal.user,
+                                "e.g. dev",
+                                user_active,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_manage_hosts_modal_input(
+                                    HostsModalInputEvent::SetActiveField(ManageHostsField::User),
+                                    cx,
+                                );
+                            })),
+                        )
+                        // Error
+                        .child(div().when_some(modal.error.clone(), |this, error| {
+                            this.rounded_sm()
+                                .border_1()
+                                .border_color(rgb(0xa44949))
+                                .bg(rgb(0x4d2a2a))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(0xffd7d7))
+                                .child(error)
+                        }))
+                        // Buttons
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    action_button(
+                                        theme,
+                                        "cancel-add-host",
+                                        "Cancel",
+                                        false,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                                            modal.adding = false;
+                                            modal.error = None;
+                                            cx.notify();
+                                        }
+                                    })),
+                                )
+                                .child(
+                                    action_button(
+                                        theme,
+                                        "submit-add-host",
+                                        "Add Host",
+                                        !add_disabled,
+                                        add_disabled,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_add_host(cx);
+                                    })),
+                                ),
+                        ),
+                );
+        }
+
+        // List view
+        let hosts = self.remote_hosts.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(620.))
+                    .max_w(px(620.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // Header
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Manage Hosts"),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "close-manage-hosts",
+                                    "Close",
+                                    false,
+                                    true,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.close_manage_hosts_modal(cx);
+                                })),
+                            ),
+                    )
+                    // Host list
+                    .child(if hosts.is_empty() {
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_3()
+                            .text_sm()
+                            .text_color(rgb(theme.text_muted))
+                            .child("No remote hosts configured.")
+                            .into_any_element()
+                    } else {
+                        let mut list = div()
+                            .id("manage-hosts-list")
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .max_h(px(300.))
+                            .overflow_y_scroll();
+                        for (i, host) in hosts.iter().enumerate() {
+                            let host_name = host.name.clone();
+                            let display = format!("{}@{}", host.user, host.hostname);
+                            list = list.child(
+                                div()
+                                    .id(ElementId::NamedInteger("host-row".into(), i as u64))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .bg(rgb(theme.panel_bg))
+                                    .px_2()
+                                    .py_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(theme.text_primary))
+                                                    .child(host.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_family(FONT_MONO)
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child(display),
+                                            ),
+                                    )
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            ElementId::NamedInteger(
+                                                "remove-host".into(),
+                                                i as u64,
+                                            ),
+                                            "Remove",
+                                            false,
+                                            true,
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_host_at(host_name.clone(), cx);
+                                        })),
+                                    ),
+                            );
+                        }
+                        list.into_any_element()
+                    })
+                    // Add Host button
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .child(
+                                action_button(
+                                    theme,
+                                    "open-add-host-form",
+                                    "+ Add Host",
+                                    true,
+                                    false,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                                        modal.adding = true;
+                                        modal.name.clear();
+                                        modal.hostname.clear();
+                                        modal.user.clear();
+                                        modal.active_field = ManageHostsField::Name;
+                                        modal.error = None;
+                                        cx.notify();
+                                    }
+                                })),
                             ),
                     ),
             )
@@ -5159,11 +7168,83 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
     worktree::paths_equivalent(left, right)
 }
 
+fn porcelain_status_to_change_kind(xy: &str) -> ChangeKind {
+    let bytes = xy.as_bytes();
+    let x = bytes.first().copied().unwrap_or(b' ');
+    let y = bytes.get(1).copied().unwrap_or(b' ');
+
+    match (x, y) {
+        (b'?', b'?') => ChangeKind::Added,
+        (b'A', _) | (_, b'A') => ChangeKind::Added,
+        (b'D', _) | (_, b'D') => ChangeKind::Removed,
+        (b'R', _) | (_, b'R') => ChangeKind::Renamed,
+        (b'C', _) | (_, b'C') => ChangeKind::Copied,
+        (b'T', _) | (_, b'T') => ChangeKind::TypeChange,
+        (b'U', _) | (_, b'U') => ChangeKind::Conflict,
+        (b'M', _) | (_, b'M') => ChangeKind::Modified,
+        _ => ChangeKind::Modified,
+    }
+}
+
+fn parse_remote_numstat_output(output: &str) -> HashMap<PathBuf, (usize, usize)> {
+    let mut map = HashMap::new();
+    for line in output.lines() {
+        let mut columns = line.split('\t');
+        let Some(added) = columns.next() else {
+            continue;
+        };
+        let Some(removed) = columns.next() else {
+            continue;
+        };
+        let Some(path_str) = columns.next() else {
+            continue;
+        };
+        let additions = added.parse::<usize>().unwrap_or(0);
+        let deletions = removed.parse::<usize>().unwrap_or(0);
+        if additions > 0 || deletions > 0 {
+            map.insert(PathBuf::from(path_str), (additions, deletions));
+        }
+    }
+    map
+}
+
 fn daemon_error_is_connection_refused(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("connection refused")
         || lower.contains("failed to connect")
         || lower.contains("actively refused")
+}
+
+fn load_outpost_summaries(
+    store: &dyn arbor_core::outpost_store::OutpostStore,
+    remote_hosts: &[arbor_core::outpost::RemoteHost],
+) -> Vec<OutpostSummary> {
+    let records = match store.load() {
+        Ok(records) => records,
+        Err(_) => return Vec::new(),
+    };
+
+    records
+        .into_iter()
+        .map(|record| {
+            let hostname = remote_hosts
+                .iter()
+                .find(|host| host.name == record.host_name)
+                .map(|host| host.hostname.clone())
+                .unwrap_or_else(|| record.host_name.clone());
+
+            OutpostSummary {
+                outpost_id: record.id,
+                repo_root: PathBuf::from(&record.local_repo_root),
+                remote_path: record.remote_path,
+                label: record.label,
+                branch: record.branch,
+                host_name: record.host_name,
+                hostname,
+                status: arbor_core::outpost::OutpostStatus::default(),
+            }
+        })
+        .collect()
 }
 
 impl WorktreeSummary {
@@ -5285,7 +7366,8 @@ impl Render for ArborWindow {
                     .child(self.render_right_pane(cx)),
             )
             .child(self.render_status_bar())
-            .child(self.render_create_worktree_modal(cx))
+            .child(self.render_create_modal(cx))
+            .child(self.render_manage_hosts_modal(cx))
             .when(
                 self.quit_overlay_until
                     .is_some_and(|until| Instant::now() < until),

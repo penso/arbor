@@ -137,9 +137,11 @@ dependencies = [
 name = "arbor-gui"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "arbor-core",
+ "arbor-mosh",
+ "arbor-ssh",
+ "arbor-terminal-emulator",
  "config",
  "futures",
  "gix-diff",
@@ -152,6 +154,7 @@ dependencies = [
  "serde_json",
  "smol",
  "syntect",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "ureq",
@@ -172,6 +175,33 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower-http",
+]
+
+[[package]]
+name = "arbor-mosh"
+version = "0.1.0"
+dependencies = [
+ "arbor-core",
+ "arbor-ssh",
+ "arbor-terminal-emulator",
+ "portable-pty",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arbor-ssh"
+version = "0.1.0"
+dependencies = [
+ "arbor-core",
+ "libssh-rs",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "arbor-terminal-emulator"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
 ]
 
 [[package]]
@@ -4505,6 +4535,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "libssh-rs"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3066e110d6bb95a5addbd9c2ee595efdaeecaddd4793f3803dfee2968a74c685"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+ "libssh-rs-sys",
+ "openssl-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "libssh-rs-sys"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01d528ea9ac190fa364ff12193da82222dfc645e7ab28666ae91493bd288a1a0"
+dependencies = [
+ "cc",
+ "openssl-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5291,6 +5345,18 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.111"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "option-ext"
@@ -7008,12 +7074,12 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
+checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8148,9 +8214,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.21.0"
+version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b672338555252d43fd2240c714dc444b8c6fb0a5c5335e65a07bba7742735ddb"
+checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -8211,6 +8277,12 @@ dependencies = [
  "sval_ref",
  "sval_serde",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -8409,9 +8481,9 @@ dependencies = [
 
 [[package]]
 name = "wayland-backend"
-version = "0.3.13"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaa6143502b9a87f759cb6a649ca801a226f77740eb54f3951cba2227790afeb"
+checksum = "aa75f400b7f719bcd68b3f47cd939ba654cedeef690f486db71331eec4c6a406"
 dependencies = [
  "cc",
  "downcast-rs",
@@ -8494,9 +8566,9 @@ dependencies = [
 
 [[package]]
 name = "wayland-sys"
-version = "0.31.9"
+version = "0.31.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81d2bd69b1dadd601d0e98ef2fc9339a1b1e00cec5ee7545a77b5a0f52a90394"
+checksum = "374f6b70e8e0d6bf9461a32988fd553b59ff630964924dad6e4a4eb6bd538d17"
 dependencies = [
  "dlib",
  "log",
@@ -9061,9 +9133,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
