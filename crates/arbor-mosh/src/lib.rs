@@ -2,10 +2,8 @@ pub mod detect;
 pub mod handshake;
 pub mod shell;
 
-pub use handshake::MoshHandshakeResult;
-pub use shell::MoshShell;
-
 use thiserror::Error;
+pub use {handshake::MoshHandshakeResult, shell::MoshShell};
 
 #[derive(Debug, Error)]
 pub enum MoshError {

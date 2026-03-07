@@ -1,7 +1,4 @@
-use {
-    arbor_core::remote::RemoteTransport,
-    std::process::Command,
-};
+use {arbor_core::remote::RemoteTransport, std::process::Command};
 
 pub fn local_mosh_client_available() -> bool {
     Command::new("which")

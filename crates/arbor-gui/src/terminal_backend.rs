@@ -1,3 +1,6 @@
+pub use arbor_terminal_emulator::{
+    TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+};
 use {
     arbor_terminal_emulator::{
         self, TERMINAL_COLS, TERMINAL_DEFAULT_BG, TERMINAL_DEFAULT_FG, TERMINAL_ROWS,
@@ -15,10 +18,6 @@ use {
         },
         thread,
     },
-};
-
-pub use arbor_terminal_emulator::{
-    TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
 };
 
 pub const EMBEDDED_TERMINAL_DEFAULT_FG: u32 = TERMINAL_DEFAULT_FG;
@@ -481,9 +480,7 @@ fn external_launch_result(backend_label: &str, command: String) -> TerminalRunRe
 
 #[cfg(test)]
 mod tests {
-    use arbor_terminal_emulator::TerminalEmulator;
-
-    use super::*;
+    use {super::*, arbor_terminal_emulator::TerminalEmulator};
 
     #[test]
     fn styled_lines_include_scrollback_content() {

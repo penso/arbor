@@ -126,8 +126,8 @@ fn default_config_path() -> PathBuf {
 
 pub fn append_remote_host(host: &RemoteHostConfig) -> Result<(), String> {
     let path = config_path();
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut doc: DocumentMut = content
         .parse()
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
@@ -163,13 +163,16 @@ pub fn append_remote_host(host: &RemoteHostConfig) -> Result<(), String> {
 
 pub fn remove_remote_host(name: &str) -> Result<(), String> {
     let path = config_path();
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut doc: DocumentMut = content
         .parse()
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
 
-    if let Some(arr) = doc.get_mut("remote_hosts").and_then(|v| v.as_array_of_tables_mut()) {
+    if let Some(arr) = doc
+        .get_mut("remote_hosts")
+        .and_then(|v| v.as_array_of_tables_mut())
+    {
         let mut index_to_remove = None;
         for (i, table) in arr.iter().enumerate() {
             if table.get("name").and_then(|v| v.as_str()) == Some(name) {

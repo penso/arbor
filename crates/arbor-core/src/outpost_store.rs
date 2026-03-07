@@ -30,7 +30,10 @@ pub trait OutpostStore {
         self.save(&outposts)
     }
 
-    fn outposts_for_repo(&self, local_repo_root: &str) -> Result<Vec<OutpostRecord>, OutpostStoreError> {
+    fn outposts_for_repo(
+        &self,
+        local_repo_root: &str,
+    ) -> Result<Vec<OutpostRecord>, OutpostStoreError> {
         let outposts = self.load()?;
         Ok(outposts
             .into_iter()
@@ -152,9 +155,9 @@ pub fn normalize_outpost_store_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use {
-        crate::outpost::OutpostRecord,
-        crate::outpost_store::{JsonOutpostStore, OutpostStore, normalize_outpost_store_path},
+    use crate::{
+        outpost::OutpostRecord,
+        outpost_store::{JsonOutpostStore, OutpostStore, normalize_outpost_store_path},
     };
 
     fn sample_outpost(id: &str, repo_root: &str) -> OutpostRecord {
@@ -237,7 +240,11 @@ mod tests {
 
         let filtered = store.outposts_for_repo("/home/dev/project-a")?;
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|o| o.local_repo_root == "/home/dev/project-a"));
+        assert!(
+            filtered
+                .iter()
+                .all(|o| o.local_repo_root == "/home/dev/project-a")
+        );
         Ok(())
     }
 

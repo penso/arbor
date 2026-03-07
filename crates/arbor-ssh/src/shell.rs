@@ -118,7 +118,6 @@ impl RemoteShell for SshShell {
     }
 
     fn close(&self) -> Result<(), RemoteError> {
-        self.close()
-            .map_err(|e| RemoteError::Shell(e.to_string()))
+        self.close().map_err(|e| RemoteError::Shell(e.to_string()))
     }
 }

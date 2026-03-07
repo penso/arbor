@@ -1,9 +1,4 @@
-use {
-    crate::connection::SshError,
-    libssh_rs::Session,
-    std::io::Read,
-    thiserror::Error,
-};
+use {crate::connection::SshError, libssh_rs::Session, std::io::Read, thiserror::Error};
 
 #[derive(Debug)]
 pub struct CommandOutput {

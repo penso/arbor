@@ -1,9 +1,9 @@
 use {
+    crate::connection::SshConnection,
     arbor_core::{
         outpost::RemoteHost,
         remote::{ProvisionResult, RemoteError, RemoteProvisioner, RemoteTransport},
     },
-    crate::connection::SshConnection,
 };
 
 pub struct SshProvisioner<'a> {
@@ -47,7 +47,9 @@ impl RemoteProvisioner for SshProvisioner<'_> {
                 "GIT_SSH_COMMAND='ssh -F /dev/null' \
                  git clone --branch {branch} --single-branch {clone_url} {remote_path}"
             );
-            let clone_output = self.connection.run_command_with_agent_forwarding(&clone_cmd)?;
+            let clone_output = self
+                .connection
+                .run_command_with_agent_forwarding(&clone_cmd)?;
             if clone_output.exit_code != Some(0) {
                 return Err(RemoteError::Command(format!(
                     "git clone failed: {}",
@@ -70,9 +72,8 @@ fn detect_remote_daemon(connection: &SshConnection, host: &RemoteHost) -> bool {
         return false;
     };
 
-    let check_cmd = format!(
-        "curl -sf http://127.0.0.1:{daemon_port}/api/sessions > /dev/null 2>&1 && echo ok"
-    );
+    let check_cmd =
+        format!("curl -sf http://127.0.0.1:{daemon_port}/api/sessions > /dev/null 2>&1 && echo ok");
     match connection.run_command(&check_cmd) {
         Ok(output) => output.stdout.trim() == "ok",
         Err(_) => false,
