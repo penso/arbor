@@ -371,7 +371,6 @@ enum CenterTab {
 enum RightPaneTab {
     Changes,
     FileTree,
-    Presets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -5886,7 +5885,8 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.create_modal.is_some()
+        if self.right_pane_search_active
+            || self.create_modal.is_some()
             || self.manage_hosts_modal.is_some()
             || self.manage_presets_modal.is_some()
         {
@@ -8371,7 +8371,6 @@ impl ArborWindow {
         let content: Div = match self.right_pane_tab {
             RightPaneTab::Changes => self.render_changes_content(cx),
             RightPaneTab::FileTree => self.render_file_tree(cx),
-            RightPaneTab::Presets => self.render_presets_content(cx),
         };
         let search_active = self.right_pane_search_active;
         let search_text = self.right_pane_search.clone();
@@ -8476,7 +8475,6 @@ impl ArborWindow {
             .border_color(rgb(theme.border))
             .child(tab_button("Changes", RightPaneTab::Changes))
             .child(tab_button("Files", RightPaneTab::FileTree))
-            .child(tab_button("Presets", RightPaneTab::Presets))
     }
 
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
@@ -8791,116 +8789,6 @@ impl ArborWindow {
                         )
                 })),
         )
-    }
-
-    fn render_presets_content(&mut self, cx: &mut Context<Self>) -> Div {
-        let theme = self.theme();
-        let active_preset = self.active_preset_tab;
-        let command = active_preset.map(|preset| self.preset_command_for_kind(preset));
-        let tab_button = |kind: AgentPresetKind| {
-            let is_active = active_preset == Some(kind);
-            let text_color = if is_active {
-                theme.text_primary
-            } else {
-                theme.text_muted
-            };
-            div()
-                .id(ElementId::Name(format!("preset-tab-{}", kind.key()).into()))
-                .flex_1()
-                .h(px(34.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .font_family(FONT_UI)
-                .bg(rgb(if is_active {
-                    theme.tab_active_bg
-                } else {
-                    theme.tab_bg
-                }))
-                .text_color(rgb(text_color))
-                .when(is_active, |this| {
-                    this.border_b_2().border_color(rgb(theme.accent))
-                })
-                .hover(|s| {
-                    s.bg(rgb(theme.panel_active_bg))
-                        .text_color(rgb(theme.text_primary))
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        this.active_preset_tab = Some(kind);
-                        this.launch_agent_preset(kind, window, cx);
-                    }),
-                )
-                .child(agent_preset_button_content(kind, text_color))
-        };
-
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(34.))
-                    .flex()
-                    .border_b_1()
-                    .border_color(rgb(theme.border))
-                    .child(tab_button(AgentPresetKind::Codex))
-                    .child(tab_button(AgentPresetKind::Claude))
-                    .child(tab_button(AgentPresetKind::OpenCode)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.panel_bg))
-                            .p_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Command"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family(FONT_MONO)
-                                    .text_color(rgb(if command.is_some() {
-                                        theme.text_primary
-                                    } else {
-                                        theme.text_muted
-                                    }))
-                                    .child(
-                                        command.unwrap_or_else(|| {
-                                            "No preset selected yet.".to_owned()
-                                        }),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child("Clicking a preset tab starts it in a new terminal tab."),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child("Edit commands from macOS menu: Terminal -> Edit Presets..."),
-                    ),
-            )
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
