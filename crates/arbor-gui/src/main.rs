@@ -6542,11 +6542,13 @@ impl ArborWindow {
                     .justify_between()
                     .child(
                         div()
+                            .id("center-tabs-scroll")
                             .h_full()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .items_center()
-                            .overflow_hidden()
+                            .overflow_x_scroll()
                             .when(tabs.is_empty(), |this| {
                                 this.child(
                                     div()
@@ -6595,7 +6597,6 @@ impl ArborWindow {
                                         true,
                                     ),
                                 };
-                                let tab_label = truncate_with_ellipsis(&tab_label, 11);
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                     CenterTab::Diff(id) => ("center-tab-diff", id),
@@ -6609,7 +6610,10 @@ impl ArborWindow {
                                     .relative()
                                     .h_full()
                                     .cursor_pointer()
-                                    .w(px(160.))
+                                    .flex_shrink_0()
+                                    .min_w(px(80.))
+                                    .max_w(px(180.))
+                                    .overflow_hidden()
                                     .pl_4()
                                     .pr(px(28.))
                                     .flex()
@@ -6623,6 +6627,7 @@ impl ArborWindow {
                                     }))
                                     .child(
                                         div()
+                                            .flex_shrink_0()
                                             .font_family(FONT_MONO)
                                             .when(terminal_icon, |this| this.text_size(px(24.)))
                                             .when(!terminal_icon, |this| this.text_xs())
@@ -6635,6 +6640,11 @@ impl ArborWindow {
                                     )
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .text_sm()
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
