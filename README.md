@@ -61,6 +61,18 @@ Arbor is a desktop Git worktree manager built with Rust and [GPUI](https://gpui.
 - Configurable: terminal backend, theme, daemon URL, notifications, remote hosts
 - Hot reload on config file changes
 
+## Install
+
+### Homebrew (macOS)
+
+```
+brew install penso/arbor/arbor
+```
+
+### GitHub Releases
+
+Download the latest build from [Releases](https://github.com/penso/arbor/releases).
+
 ## Crates
 
 | Crate | Description |

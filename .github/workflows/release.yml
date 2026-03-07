@@ -191,3 +191,44 @@ jobs:
           else
             gh release create "${tag}" dist/* --title "${tag}" --generate-notes
           fi
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: publish-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-macos
+          path: dist
+      - name: Update Homebrew cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          macos_zip="dist/Arbor-${tag}-universal2-apple-darwin.app.zip"
+          sha256=$(sha256sum "${macos_zip}" | awk '{print $1}')
+
+          cask_content=$(./scripts/ci/update-homebrew-cask.sh "${tag}" "${sha256}")
+
+          # Clone the tap repo and update the cask
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/penso/homebrew-arbor.git" tap
+          mkdir -p tap/Casks
+          echo "${cask_content}" > tap/Casks/arbor.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/arbor.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update arbor to ${tag}"
+            git push
+          fi
