@@ -159,6 +159,7 @@ struct WorktreeSummary {
     pr_url: Option<String>,
     diff_summary: Option<changes::DiffLineSummary>,
     agent_state: Option<AgentState>,
+    agent_task: Option<String>,
     last_activity_unix_ms: Option<u64>,
 }
 
@@ -1809,6 +1810,16 @@ impl ArborWindow {
                     .map(|state| (worktree.path.clone(), state))
             })
             .collect();
+        let previous_agent_tasks: HashMap<PathBuf, String> = self
+            .worktrees
+            .iter()
+            .filter_map(|worktree| {
+                worktree
+                    .agent_task
+                    .as_ref()
+                    .map(|task| (worktree.path.clone(), task.clone()))
+            })
+            .collect();
         let previous_activity: HashMap<PathBuf, u64> = self
             .worktrees
             .iter()
@@ -1842,6 +1853,7 @@ impl ArborWindow {
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
             worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
+            worktree.agent_task = previous_agent_tasks.get(&worktree.path).cloned();
             // Take the max of fresh git-based timestamp and previous value
             // (which may include agent activity).
             let prev = previous_activity.get(&worktree.path).copied();
@@ -1915,6 +1927,7 @@ impl ArborWindow {
         }
 
         self.refresh_worktree_diff_summaries(cx);
+        self.refresh_agent_tasks(cx);
         self.refresh_worktree_pull_requests(cx);
         let changed_files_changed = self.reload_changed_files();
         let created_terminal = self.ensure_selected_worktree_terminal();
@@ -1966,6 +1979,52 @@ impl ArborWindow {
                 if this.worktree_stats_loading {
                     this.worktree_stats_loading = false;
                     changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_agent_tasks(&mut self, cx: &mut Context<Self>) {
+        let worktree_paths: Vec<PathBuf> = self
+            .worktrees
+            .iter()
+            .filter(|wt| wt.agent_task.is_none())
+            .map(|wt| wt.path.clone())
+            .collect();
+        if worktree_paths.is_empty() {
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_spawn(async move {
+                    worktree_paths
+                        .into_iter()
+                        .map(|path| {
+                            let task = arbor_core::session::extract_agent_task(&path);
+                            (path, task)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
+                for (path, task) in results {
+                    if let Some(task) = task {
+                        if let Some(wt) = this
+                            .worktrees
+                            .iter_mut()
+                            .find(|wt| wt.path == path)
+                        {
+                            wt.agent_task = Some(task);
+                            changed = true;
+                        }
+                    }
                 }
                 if changed {
                     cx.notify();
@@ -5424,7 +5483,7 @@ impl ArborWindow {
                 for (wt_index, worktree) in repo_worktrees {
                     let is_active = self.active_worktree_index == Some(wt_index);
                     let first_char: String = worktree
-                        .label
+                        .branch
                         .chars()
                         .next()
                         .unwrap_or('?')
@@ -5832,7 +5891,7 @@ impl ArborWindow {
                                                                     .text_xs()
                                                                     .font_weight(FontWeight::SEMIBOLD)
                                                                     .text_color(rgb(theme.text_primary))
-                                                                    .child(worktree.label.clone()),
+                                                                    .child(worktree.branch.clone()),
                                                             )
                                                             // Right side: [+- lines] [time ago]
                                                             .child({
@@ -5900,7 +5959,7 @@ impl ArborWindow {
                                                                 right
                                                             }),
                                                     )
-                                                    // Line 2: [branch name] ... [PR number]
+                                                    // Line 2: [agent task or dir name] ... [PR number]
                                                     .child(
                                                         div()
                                                             .pl(px(22.))
@@ -5916,7 +5975,12 @@ impl ArborWindow {
                                                                     .text_ellipsis()
                                                                     .text_xs()
                                                                     .text_color(rgb(theme.text_disabled))
-                                                                    .child(worktree.branch.clone()),
+                                                                    .child(
+                                                                        worktree
+                                                                            .agent_task
+                                                                            .clone()
+                                                                            .unwrap_or_else(|| worktree.label.clone()),
+                                                                    ),
                                                             )
                                                             .when_some(pr_number, |this, pr_num| {
                                                                 let pr_text = format!("#{pr_num}");
@@ -8203,6 +8267,7 @@ impl WorktreeSummary {
             pr_url: None,
             diff_summary: None,
             agent_state: None,
+            agent_task: None,
             last_activity_unix_ms,
         }
     }
