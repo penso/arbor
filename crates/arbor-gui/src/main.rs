@@ -3717,7 +3717,7 @@ impl ArborWindow {
         {
             let full_path = worktree_path.join(&path);
             if is_gui_editor(&editor) {
-                if let Err(error) = Command::new(&editor)
+                if let Err(error) = create_command(&editor)
                     .arg(&full_path)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -11499,7 +11499,7 @@ fn read_head_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8
     let relative = git_relative_path(file_path)?;
     let object_spec = format!("HEAD:{relative}");
 
-    let exists_status = Command::new("git")
+    let exists_status = create_command("git")
         .arg("-C")
         .arg(worktree_path)
         .args(["cat-file", "-e", object_spec.as_str()])
@@ -11517,7 +11517,7 @@ fn read_head_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8
         return Ok(Vec::new());
     }
 
-    let output = Command::new("git")
+    let output = create_command("git")
         .arg("-C")
         .arg(worktree_path)
         .args(["show", object_spec.as_str()])
@@ -13320,7 +13320,7 @@ fn run_launch_command(command: &mut Command, operation: &str) -> Result<(), Stri
 fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let mut command = Command::new("open");
+        let mut command = create_command("open");
         command.arg(worktree_path);
         run_launch_command(&mut command, "open worktree in Finder")?;
         return Ok("opened worktree in Finder".to_owned());
@@ -13328,7 +13328,7 @@ fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String>
 
     #[cfg(target_os = "linux")]
     {
-        let mut command = Command::new("xdg-open");
+        let mut command = create_command("xdg-open");
         command.arg(worktree_path);
         run_launch_command(&mut command, "open worktree in file manager")?;
         return Ok("opened worktree in file manager".to_owned());
@@ -13336,7 +13336,7 @@ fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String>
 
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("explorer");
+        let mut command = create_command("explorer");
         command.arg(worktree_path);
         run_launch_command(&mut command, "open worktree in File Explorer")?;
         return Ok("opened worktree in File Explorer".to_owned());
@@ -13352,7 +13352,7 @@ fn open_worktree_with_external_launcher(
 ) -> Result<String, String> {
     match launcher.kind {
         ExternalLauncherKind::Command(command_name) => {
-            let mut command = Command::new(command_name);
+            let mut command = create_command(command_name);
             command.arg(worktree_path);
             run_launch_command(
                 &mut command,
@@ -13360,7 +13360,7 @@ fn open_worktree_with_external_launcher(
             )?;
         },
         ExternalLauncherKind::MacApp(app_name) => {
-            let mut command = Command::new("open");
+            let mut command = create_command("open");
             command.arg("-a").arg(app_name).arg(worktree_path);
             run_launch_command(
                 &mut command,
@@ -13373,7 +13373,12 @@ fn open_worktree_with_external_launcher(
 }
 
 fn command_exists_on_path(command_name: &str) -> bool {
-    let Some(path_env) = env::var_os("PATH") else {
+    let path_env = AUGMENTED_PATH
+        .get()
+        .map(|p| std::ffi::OsString::from(p.as_str()))
+        .or_else(|| env::var_os("PATH"));
+
+    let Some(path_env) = path_env else {
         return false;
     };
 
@@ -13382,7 +13387,7 @@ fn command_exists_on_path(command_name: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn mac_app_bundle_exists(app_name: &str) -> bool {
-    let launch_services_status = Command::new("open")
+    let launch_services_status = create_command("open")
         .arg("-Ra")
         .arg(app_name)
         .stdout(Stdio::null())
@@ -13598,7 +13603,7 @@ fn run_git_commit_for_worktree(
         return Err("nothing to commit".to_owned());
     }
 
-    let mut add_command = Command::new("git");
+    let mut add_command = create_command("git");
     add_command.arg("-C").arg(worktree_path).args(["add", "-A"]);
     let add_output = run_command_output(&mut add_command, "git add")?;
     if !add_output.status.success() {
@@ -13607,7 +13612,7 @@ fn run_git_commit_for_worktree(
 
     let subject = auto_commit_subject(changed_files);
     let body = auto_commit_body(changed_files);
-    let mut commit_command = Command::new("git");
+    let mut commit_command = create_command("git");
     commit_command
         .arg("-C")
         .arg(worktree_path)
@@ -13633,7 +13638,7 @@ fn run_git_commit_for_worktree(
 }
 
 fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, String> {
-    let mut push_command = Command::new("git");
+    let mut push_command = create_command("git");
     push_command
         .arg("-C")
         .arg(worktree_path)
@@ -13650,7 +13655,7 @@ fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, String> {
 }
 
 fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, String> {
-    let mut command = Command::new("git");
+    let mut command = create_command("git");
     command
         .arg("-C")
         .arg(worktree_path)
@@ -13669,7 +13674,7 @@ fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, String> 
 }
 
 fn git_has_tracking_branch(worktree_path: &Path) -> bool {
-    let output = Command::new("git")
+    let output = create_command("git")
         .arg("-C")
         .arg(worktree_path)
         .args([
@@ -13684,7 +13689,7 @@ fn git_has_tracking_branch(worktree_path: &Path) -> bool {
 }
 
 fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = create_command("git")
         .arg("-C")
         .arg(worktree_path)
         .args([
@@ -13723,7 +13728,7 @@ fn run_create_pr_for_worktree(
     }
 
     let branch = git_branch_name_for_worktree(worktree_path)?;
-    let mut command = Command::new("gh");
+    let mut command = create_command("gh");
     command
         .current_dir(worktree_path)
         .arg("pr")
@@ -13779,7 +13784,7 @@ fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
 }
 
 fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = create_command("git")
         .arg("-C")
         .arg(repo_root)
         .args(["remote", "get-url", "origin"])
@@ -13857,7 +13862,7 @@ fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
 }
 
 fn github_pr_number_by_tracking_branch(worktree_path: &Path) -> Option<u64> {
-    let output = Command::new("gh")
+    let output = create_command("gh")
         .current_dir(worktree_path)
         .args(["pr", "view", "--json", "number", "--jq", ".number // empty"])
         .output()
@@ -13867,7 +13872,7 @@ fn github_pr_number_by_tracking_branch(worktree_path: &Path) -> Option<u64> {
 }
 
 fn github_pr_number_by_head_branch(worktree_path: &Path, branch: &str) -> Option<u64> {
-    let output = Command::new("gh")
+    let output = create_command("gh")
         .current_dir(worktree_path)
         .args([
             "pr",
@@ -15020,7 +15025,94 @@ fn bounds_from_window_geometry(
     ))
 }
 
+/// The augmented PATH computed at startup, merging the user's login-shell PATH
+/// with the process PATH.  Stored once, read by [`create_command`].
+static AUGMENTED_PATH: OnceLock<String> = OnceLock::new();
+
+/// When launched as a macOS `.app` bundle the process inherits a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`).  This function sources the user's login
+/// shell to obtain their real PATH and merges it with the current one so that
+/// tools like `gh` and `git` installed via Homebrew are found.
+///
+/// The result is stored in [`AUGMENTED_PATH`] and applied per-command via
+/// [`create_command`] rather than mutating the global environment.
+fn augment_path_from_login_shell() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let current_path = env::var("PATH").unwrap_or_default();
+
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+    let marker_start = "__PATH_START__";
+    let marker_end = "__PATH_END__";
+
+    let shell_path = match Command::new(&shell)
+        .args(["-lic", &format!("echo {marker_start}${{PATH}}{marker_end}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .find_map(|line| {
+                    let start = line.find(marker_start)?;
+                    let after_start = start + marker_start.len();
+                    let end = line[after_start..].find(marker_end)?;
+                    Some(line[after_start..after_start + end].to_owned())
+                })
+                .unwrap_or_default()
+        },
+        _ => String::new(),
+    };
+
+    // Merge: login-shell paths first, then current PATH, deduplicated.
+    let mut seen = HashSet::new();
+    let mut merged: Vec<&str> = Vec::new();
+
+    let paths_to_add = if shell_path.is_empty() {
+        let home = env::var("HOME").unwrap_or_default();
+        vec![
+            "/opt/homebrew/bin".to_owned(),
+            "/opt/homebrew/sbin".to_owned(),
+            "/usr/local/bin".to_owned(),
+            format!("{home}/.local/bin"),
+        ]
+    } else {
+        shell_path.split(':').map(|s| s.to_owned()).collect()
+    };
+
+    for dir in &paths_to_add {
+        if !dir.is_empty() && seen.insert(dir.as_str()) {
+            merged.push(dir.as_str());
+        }
+    }
+    for dir in current_path.split(':') {
+        if !dir.is_empty() && seen.insert(dir) {
+            merged.push(dir);
+        }
+    }
+
+    AUGMENTED_PATH.set(merged.join(":")).ok();
+}
+
+/// Create a [`Command`] with the augmented PATH applied.  Use this instead of
+/// [`Command::new`] so that Homebrew-installed tools are found when running as
+/// a macOS `.app` bundle.
+fn create_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(path) = AUGMENTED_PATH.get() {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
 fn main() {
+    augment_path_from_login_shell();
+
     let log_buffer = log_layer::LogBuffer::new();
 
     {
