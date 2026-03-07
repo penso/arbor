@@ -9,8 +9,6 @@ mod terminal_keys;
 mod theme;
 mod ui_state_store;
 
-use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
-
 use {
     arbor_core::{
         agent::AgentState,
@@ -43,6 +41,7 @@ use {
         sync::{Arc, Mutex},
         time::{Duration, Instant, SystemTime},
     },
+    syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet},
     terminal_backend::{
         EMBEDDED_TERMINAL_DEFAULT_BG, EMBEDDED_TERMINAL_DEFAULT_FG, EmbeddedTerminal,
         TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalStyledCell,
@@ -2714,21 +2713,17 @@ impl ArborWindow {
                     let default_color: u32 = 0xc8ccd4;
                     match fs::read_to_string(&full_path) {
                         Ok(content) => {
-                            let raw: Vec<String> =
-                                content.lines().map(String::from).collect();
+                            let raw: Vec<String> = content.lines().map(String::from).collect();
                             let highlighted =
                                 highlight_lines_with_syntect(&raw, &ext, default_color);
                             (raw, highlighted)
                         },
                         Err(error) => {
                             let msg = format!("Error reading file: {error}");
-                            (
-                                vec![msg.clone()],
-                                vec![vec![FileViewSpan {
-                                    text: msg,
-                                    color: default_color,
-                                }]],
-                            )
+                            (vec![msg.clone()], vec![vec![FileViewSpan {
+                                text: msg,
+                                color: default_color,
+                            }]])
                         },
                     }
                 })
@@ -3505,31 +3500,26 @@ impl ArborWindow {
             "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg" | "tiff" | "tif"
         );
 
-        if !is_image {
-            if let Ok(editor) = env::var("EDITOR") {
-                if let Some(worktree_path) =
-                    self.selected_worktree_path().map(Path::to_path_buf)
+        if !is_image
+            && let Ok(editor) = env::var("EDITOR")
+            && let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf)
+        {
+            let full_path = worktree_path.join(&path);
+            if is_gui_editor(&editor) {
+                if let Err(error) = Command::new(&editor)
+                    .arg(&full_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
                 {
-                    let full_path = worktree_path.join(&path);
-                    if is_gui_editor(&editor) {
-                        if let Err(error) =
-                            Command::new(&editor)
-                                .arg(&full_path)
-                                .stdin(Stdio::null())
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .spawn()
-                        {
-                            self.notice =
-                                Some(format!("Failed to open $EDITOR ({editor}): {error}"));
-                        }
-                    } else {
-                        self.open_editor_in_terminal(&editor, &full_path, cx);
-                    }
-                    cx.notify();
-                    return;
+                    self.notice = Some(format!("Failed to open $EDITOR ({editor}): {error}"));
                 }
+            } else {
+                self.open_editor_in_terminal(&editor, &full_path, cx);
             }
+            cx.notify();
+            return;
         }
 
         self.open_file_view_tab(path, cx);
@@ -4762,12 +4752,7 @@ impl ArborWindow {
         true
     }
 
-    fn open_editor_in_terminal(
-        &mut self,
-        editor: &str,
-        file_path: &Path,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_editor_in_terminal(&mut self, editor: &str, file_path: &Path, cx: &mut Context<Self>) {
         if !self.spawn_terminal_session_inner(true) {
             cx.notify();
             return;
@@ -5584,11 +5569,7 @@ impl ArborWindow {
         self.focus_terminal_on_next_render = false;
     }
 
-    fn handle_file_view_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn handle_file_view_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         // Always handle Cmd+S for save, even when not in editing mode
         if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "s" {
             self.save_active_file_view(cx);
@@ -5785,16 +5766,14 @@ impl ArborWindow {
                     .file_view_sessions
                     .iter_mut()
                     .find(|s| s.id == session_id)
-                {
-                    if let FileViewContent::Text {
+                    && let FileViewContent::Text {
                         highlighted: h,
                         dirty: d,
                         ..
                     } = &mut s.content
-                    {
-                        *h = Arc::from(highlighted);
-                        *d = false;
-                    }
+                {
+                    *h = Arc::from(highlighted);
+                    *d = false;
                 }
             },
             Err(error) => {
@@ -8282,7 +8261,11 @@ impl ArborWindow {
                 if entry.is_dir {
                     return false;
                 }
-                entry.path.to_string_lossy().to_lowercase().contains(&search_lower)
+                entry
+                    .path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&search_lower)
             })
             .collect();
 
@@ -10433,18 +10416,13 @@ fn render_file_view_session(
                     .flex()
                     .justify_center()
                     .p_4()
-                    .child(
-                        img(path)
-                            .max_w_full()
-                            .h_auto()
-                            .with_fallback(move || {
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Failed to load image")
-                                    .into_any_element()
-                            }),
-                    ),
+                    .child(img(path).max_w_full().h_auto().with_fallback(move || {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Failed to load image")
+                            .into_any_element()
+                    })),
             )
         },
         FileViewContent::Text {
@@ -10464,8 +10442,7 @@ fn render_file_view_session(
             let click_line_count = line_count;
             let click_scroll_handle = scroll_handle.clone();
             let line_number_width = line_count.to_string().len().max(3);
-            let gutter_px =
-                (line_number_width + 2) as f32 * DIFF_FONT_SIZE_PX * 0.6 + 8.0; // +8 for pl_2
+            let gutter_px = (line_number_width + 2) as f32 * DIFF_FONT_SIZE_PX * 0.6 + 8.0; // +8 for pl_2
             let body = div()
                 .id(("file-view-scroll", session_id))
                 .flex_1()
@@ -10484,16 +10461,13 @@ fn render_file_view_session(
                         let offset = state.base_handle.offset();
                         drop(state);
 
-                        let local_y =
-                            f32::from(event.position.y - bounds.top()).max(0.);
+                        let local_y = f32::from(event.position.y - bounds.top()).max(0.);
                         let content_y = (local_y - f32::from(offset.y)).max(0.);
-                        let clicked_line = ((content_y / DIFF_ROW_HEIGHT_PX).floor()
-                            as usize)
+                        let clicked_line = ((content_y / DIFF_ROW_HEIGHT_PX).floor() as usize)
                             .min(click_line_count.saturating_sub(1));
 
                         let local_x =
-                            (f32::from(event.position.x - bounds.left()) - gutter_px)
-                                .max(0.);
+                            (f32::from(event.position.x - bounds.left()) - gutter_px).max(0.);
                         let char_width = DIFF_FONT_SIZE_PX * 0.6;
                         let clicked_col = (local_x / char_width).floor() as usize;
 
@@ -10532,148 +10506,116 @@ fn render_file_view_session(
                     let line_number_width = line_count.to_string().len().max(3);
                     let show_cursor = editing;
                     this.child(
-                        div()
-                            .size_full()
-                            .min_w_0()
-                            .flex()
-                            .child(
-                                uniform_list(
-                                    ("file-view-list", session_id),
-                                    line_count,
-                                    move |range, _, _| {
-                                        range
-                                            .map(|index| {
-                                                let line_num = index + 1;
-                                                let is_cursor_line =
-                                                    show_cursor && cursor.line == index;
+                        div().size_full().min_w_0().flex().child(
+                            uniform_list(
+                                ("file-view-list", session_id),
+                                line_count,
+                                move |range, _, _| {
+                                    range
+                                        .map(|index| {
+                                            let line_num = index + 1;
+                                            let is_cursor_line =
+                                                show_cursor && cursor.line == index;
 
-                                                let mut content_div = div()
-                                                    .pl_2()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .overflow_hidden()
-                                                    .flex();
+                                            let mut content_div = div()
+                                                .pl_2()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .flex();
 
-                                                if show_cursor {
-                                                    // When editing, show raw text with cursor
-                                                    let raw =
-                                                        raw_lines_clone.get(index).cloned().unwrap_or_default();
-                                                    if is_cursor_line {
-                                                        let byte_pos = char_to_byte_offset(
-                                                            &raw, cursor.col,
-                                                        );
-                                                        let before = &raw[..byte_pos];
-                                                        let after = &raw[byte_pos..];
-                                                        let cursor_char =
-                                                            after.chars().next().unwrap_or(' ');
-                                                        let after_cursor = if after.is_empty() {
-                                                            String::new()
-                                                        } else {
-                                                            after.chars().skip(1).collect()
-                                                        };
-                                                        content_div = content_div
-                                                            .child(
-                                                                div()
-                                                                    .text_color(rgb(
-                                                                        theme.text_primary,
-                                                                    ))
-                                                                    .child(
-                                                                        before.to_owned(),
-                                                                    ),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .bg(rgb(theme.accent))
-                                                                    .text_color(rgb(
-                                                                        theme.terminal_bg,
-                                                                    ))
-                                                                    .child(
-                                                                        cursor_char.to_string(),
-                                                                    ),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_color(rgb(
-                                                                        theme.text_primary,
-                                                                    ))
-                                                                    .child(after_cursor),
-                                                            );
+                                            if show_cursor {
+                                                // When editing, show raw text with cursor
+                                                let raw = raw_lines_clone
+                                                    .get(index)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                if is_cursor_line {
+                                                    let byte_pos =
+                                                        char_to_byte_offset(&raw, cursor.col);
+                                                    let before = &raw[..byte_pos];
+                                                    let after = &raw[byte_pos..];
+                                                    let cursor_char =
+                                                        after.chars().next().unwrap_or(' ');
+                                                    let after_cursor = if after.is_empty() {
+                                                        String::new()
                                                     } else {
+                                                        after.chars().skip(1).collect()
+                                                    };
+                                                    content_div = content_div
+                                                        .child(
+                                                            div()
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child(before.to_owned()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .bg(rgb(theme.accent))
+                                                                .text_color(rgb(theme.terminal_bg))
+                                                                .child(cursor_char.to_string()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child(after_cursor),
+                                                        );
+                                                } else {
+                                                    content_div = content_div.child(
+                                                        div()
+                                                            .text_color(rgb(theme.text_primary))
+                                                            .child(if raw.is_empty() {
+                                                                " ".to_owned()
+                                                            } else {
+                                                                raw
+                                                            }),
+                                                    );
+                                                }
+                                            } else {
+                                                // Not editing: show highlighted spans
+                                                if let Some(spans) = highlighted.get(index) {
+                                                    for span in spans {
                                                         content_div = content_div.child(
                                                             div()
-                                                                .text_color(rgb(
-                                                                    theme.text_primary,
-                                                                ))
-                                                                .child(if raw.is_empty() {
-                                                                    " ".to_owned()
-                                                                } else {
-                                                                    raw
-                                                                }),
+                                                                .text_color(rgb(span.color))
+                                                                .child(span.text.clone()),
                                                         );
                                                     }
-                                                } else {
-                                                    // Not editing: show highlighted spans
-                                                    if let Some(spans) =
-                                                        highlighted.get(index)
-                                                    {
-                                                        for span in spans {
-                                                            content_div =
-                                                                content_div.child(
-                                                                    div()
-                                                                        .text_color(rgb(
-                                                                            span.color,
-                                                                        ))
-                                                                        .child(
-                                                                            span.text
-                                                                                .clone(),
-                                                                        ),
-                                                                );
-                                                        }
-                                                    }
                                                 }
+                                            }
 
-                                                div()
-                                                    .id(("fv-row", index))
-                                                    .h(px(DIFF_ROW_HEIGHT_PX))
-                                                    .w_full()
-                                                    .min_w_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .font(mono_font.clone())
-                                                    .text_size(px(DIFF_FONT_SIZE_PX))
-                                                    .child(
-                                                        div()
-                                                            .w(px(
-                                                                (line_number_width + 2)
-                                                                    as f32
-                                                                    * DIFF_FONT_SIZE_PX
-                                                                    * 0.6,
-                                                            ))
-                                                            .flex_none()
-                                                            .text_color(rgb(
-                                                                theme.text_disabled,
-                                                            ))
-                                                            .text_size(px(
-                                                                DIFF_FONT_SIZE_PX,
-                                                            ))
-                                                            .px_1()
-                                                            .flex()
-                                                            .justify_end()
-                                                            .child(format!(
-                                                                "{line_num}"
-                                                            )),
-                                                    )
-                                                    .child(content_div)
-                                                    .into_any_element()
-                                            })
-                                            .collect::<Vec<_>>()
-                                    },
-                                )
-                                .h_full()
-                                .flex_1()
-                                .min_w_0()
-                                .track_scroll(scroll_handle.clone()),
-                            ),
+                                            div()
+                                                .id(("fv-row", index))
+                                                .h(px(DIFF_ROW_HEIGHT_PX))
+                                                .w_full()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .font(mono_font.clone())
+                                                .text_size(px(DIFF_FONT_SIZE_PX))
+                                                .child(
+                                                    div()
+                                                        .w(px((line_number_width + 2) as f32
+                                                            * DIFF_FONT_SIZE_PX
+                                                            * 0.6))
+                                                        .flex_none()
+                                                        .text_color(rgb(theme.text_disabled))
+                                                        .text_size(px(DIFF_FONT_SIZE_PX))
+                                                        .px_1()
+                                                        .flex()
+                                                        .justify_end()
+                                                        .child(format!("{line_num}")),
+                                                )
+                                                .child(content_div)
+                                                .into_any_element()
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            )
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .track_scroll(scroll_handle.clone()),
+                        ),
                     )
                 });
             (status, *dirty, body)
@@ -11528,7 +11470,9 @@ fn is_gui_editor(editor: &str) -> bool {
 }
 
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_') {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_')
+    {
         s.to_owned()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
