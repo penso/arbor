@@ -6636,6 +6636,7 @@ impl ArborWindow {
                                             .flex_1()
                                             .min_w_0()
                                             .overflow_x_hidden()
+                                            .text_ellipsis()
                                             .text_sm()
                                             .whitespace_nowrap()
                                             .text_color(rgb(if is_active {
