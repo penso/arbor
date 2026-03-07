@@ -24,7 +24,16 @@ zizmor:
 
 ci: format-check lint test
 
-run:
+run port="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "{{port}}" ]; then
+      DAEMON_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
+    else
+      DAEMON_PORT="{{port}}"
+    fi
+    echo "daemon port: $DAEMON_PORT"
+    export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
     cargo +{{nightly_toolchain}} run -p arbor-gui
 
 web-ui-build-if-needed:

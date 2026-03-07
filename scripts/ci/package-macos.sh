@@ -21,6 +21,16 @@ ICONSET_DIR="${OUTPUT_DIR}/AppIcon.iconset"
 
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${ICONSET_DIR}"
 install -m 0755 "${BINARY_PATH}" "${MACOS_DIR}/${APP_NAME}"
+
+# Bundle arbor-httpd alongside the main binary so the GUI can auto-start it.
+HTTPD_PATH="$(dirname "${BINARY_PATH}")/arbor-httpd"
+if [[ -f "${HTTPD_PATH}" ]]; then
+  install -m 0755 "${HTTPD_PATH}" "${MACOS_DIR}/arbor-httpd"
+  echo "bundled arbor-httpd from ${HTTPD_PATH}"
+else
+  echo "note: arbor-httpd not found at ${HTTPD_PATH}, skipping bundle"
+fi
+
 cp "${ROOT_DIR}/packaging/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 printf 'APPL????' > "${CONTENTS_DIR}/PkgInfo"
 

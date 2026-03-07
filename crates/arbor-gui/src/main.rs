@@ -1057,9 +1057,17 @@ impl ArborWindow {
                     Err(error) => {
                         let error_text = error.to_string();
                         if daemon_error_is_connection_refused(&error_text) {
-                            tracing::debug!("daemon not running (connection refused)");
-                            terminal_daemon = None;
-                            (Vec::new(), false)
+                            tracing::debug!("daemon not running, attempting auto-start");
+                            if let Some(started) = try_auto_start_daemon(&daemon_base_url) {
+                                let records = started.list_sessions().unwrap_or_default();
+                                terminal_daemon = Some(started);
+                                (records, true)
+                            } else {
+                                tracing::debug!("auto-start failed, falling back to cold restore");
+                                terminal_daemon = None;
+                                let cold_records = daemon_session_store.load().unwrap_or_default();
+                                (cold_records, false)
+                            }
                         } else {
                             notice_parts.push(format!(
                                 "failed to list terminal sessions from daemon at {}: {error}",
@@ -5368,6 +5376,7 @@ impl ArborWindow {
     fn action_request_quit(&mut self, _: &RequestQuit, _: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         if self.quit_overlay_until.is_some_and(|until| now < until) {
+            self.sync_daemon_session_store(cx);
             cx.quit();
             return;
         }
@@ -5390,6 +5399,7 @@ impl ArborWindow {
     }
 
     fn action_immediate_quit(&mut self, _: &ImmediateQuit, _: &mut Window, cx: &mut Context<Self>) {
+        self.sync_daemon_session_store(cx);
         cx.quit();
     }
 
@@ -10945,6 +10955,12 @@ fn current_unix_timestamp_millis() -> Option<u64> {
 }
 
 fn daemon_base_url_from_config(raw: Option<&str>) -> String {
+    if let Ok(env_url) = env::var("ARBOR_DAEMON_URL") {
+        let trimmed = env_url.trim().to_owned();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_DAEMON_BASE_URL)
@@ -11000,6 +11016,93 @@ fn daemon_error_is_connection_refused(message: &str) -> bool {
     lower.contains("connection refused")
         || lower.contains("failed to connect")
         || lower.contains("actively refused")
+}
+
+/// Attempt to locate and spawn `arbor-httpd` as a detached background process,
+/// then poll until it becomes reachable. Returns `Some(daemon)` on success.
+fn try_auto_start_daemon(daemon_base_url: &str) -> Option<HttpTerminalDaemon> {
+    let binary = find_arbor_httpd_binary()?;
+    tracing::info!(path = %binary.display(), "auto-starting arbor-httpd");
+
+    let home = env::var("HOME").ok().map(PathBuf::from)?;
+    let log_dir = home.join(".arbor/daemon");
+    if let Err(error) = fs::create_dir_all(&log_dir) {
+        tracing::warn!(%error, "failed to create daemon log directory");
+    }
+    let log_file = log_dir.join("daemon.log");
+
+    let log_out = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file);
+    let (stdout_file, stderr_file) = match log_out {
+        Ok(file) => {
+            let dup = file.try_clone().ok()?;
+            (Stdio::from(file), Stdio::from(dup))
+        },
+        Err(error) => {
+            tracing::warn!(%error, path = %log_file.display(), "cannot open daemon log file");
+            (Stdio::null(), Stdio::null())
+        },
+    };
+
+    let bind_addr = daemon_base_url
+        .strip_prefix("http://")
+        .unwrap_or("127.0.0.1:8787");
+
+    let mut cmd = Command::new(&binary);
+    cmd.env("ARBOR_HTTPD_BIND", bind_addr)
+        .stdin(Stdio::null())
+        .stdout(stdout_file)
+        .stderr(stderr_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    if let Err(error) = cmd.spawn() {
+        tracing::warn!(%error, path = %binary.display(), "failed to spawn arbor-httpd");
+        return None;
+    }
+
+    let daemon = HttpTerminalDaemon::new(daemon_base_url).ok()?;
+
+    const MAX_ATTEMPTS: u32 = 20;
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        std::thread::sleep(POLL_INTERVAL);
+        match daemon.list_sessions() {
+            Ok(_) => {
+                tracing::info!(attempt, "daemon is ready");
+                return Some(daemon);
+            },
+            Err(_) if attempt < MAX_ATTEMPTS => continue,
+            Err(error) => {
+                tracing::warn!(%error, "daemon did not become ready after auto-start");
+            },
+        }
+    }
+    None
+}
+
+/// Search for the `arbor-httpd` binary next to the current executable,
+/// then fall back to `PATH` lookup.
+fn find_arbor_httpd_binary() -> Option<PathBuf> {
+    if let Ok(exe) = env::current_exe() {
+        let sibling = exe.with_file_name("arbor-httpd");
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|dir| dir.join("arbor-httpd"))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 fn load_outpost_summaries(
