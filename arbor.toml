@@ -1,0 +1,4 @@
+[[presets]]
+name = "just run"
+icon = "🚀"
+command = "just run"

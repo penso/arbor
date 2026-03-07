@@ -48,6 +48,7 @@ pub fn terminal_bytes_from_keystroke(keystroke: &Keystroke) -> Option<Vec<u8>> {
 
     match key {
         "enter" | "return" => Some(vec![b'\r']),
+        "tab" if keystroke.modifiers.shift => Some(b"\x1b[Z".to_vec()),
         "tab" => Some(vec![b'\t']),
         "backspace" => Some(vec![0x7f]),
         "escape" => Some(vec![0x1b]),
@@ -124,6 +125,15 @@ mod tests {
     fn maps_plain_text_to_input_bytes() {
         let plain_a = parse_keystroke("a");
         assert_eq!(terminal_bytes_from_keystroke(&plain_a), Some(vec![b'a']));
+    }
+
+    #[test]
+    fn maps_shift_tab_to_backtab_escape_sequence() {
+        let shift_tab = parse_keystroke("shift-tab");
+        assert_eq!(
+            terminal_bytes_from_keystroke(&shift_tab),
+            Some(b"\x1b[Z".to_vec())
+        );
     }
 
     #[test]

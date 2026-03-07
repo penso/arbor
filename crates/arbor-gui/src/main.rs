@@ -455,6 +455,52 @@ enum PresetsModalInputEvent {
     ClearError,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoPreset {
+    name: String,
+    icon: String,
+    command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoPresetModalField {
+    Icon,
+    Name,
+    Command,
+}
+
+impl RepoPresetModalField {
+    const ORDER: [Self; 3] = [Self::Icon, Self::Name, Self::Command];
+
+    fn next(self) -> Self {
+        let index = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(index + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let index = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(index + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManageRepoPresetsModal {
+    editing_index: Option<usize>,
+    icon: String,
+    name: String,
+    command: String,
+    active_field: RepoPresetModalField,
+    error: Option<String>,
+}
+
+enum RepoPresetsModalInputEvent {
+    SetActiveField(RepoPresetModalField),
+    MoveActiveField(bool),
+    Backspace,
+    Append(String),
+    ClearError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GitActionKind {
     Commit,
@@ -681,6 +727,7 @@ enum HostsModalInputEvent {
 enum DeleteTarget {
     Worktree(usize),
     Outpost(usize),
+    Repository(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -692,6 +739,16 @@ struct DeleteModal {
     delete_branch: bool,
     is_deleting: bool,
     error: Option<String>,
+}
+
+struct RepositoryContextMenu {
+    repository_index: usize,
+    position: gpui::Point<gpui::Pixels>,
+}
+
+struct WorktreeContextMenu {
+    worktree_index: usize,
+    position: gpui::Point<gpui::Pixels>,
 }
 
 struct CreatedWorktree {
@@ -750,6 +807,8 @@ struct ArborWindow {
     manage_presets_modal: Option<ManagePresetsModal>,
     agent_presets: Vec<AgentPreset>,
     active_preset_tab: Option<AgentPresetKind>,
+    repo_presets: Vec<RepoPreset>,
+    manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
@@ -772,6 +831,8 @@ struct ArborWindow {
     selected_file_tree_entry: Option<PathBuf>,
     left_pane_visible: bool,
     collapsed_repositories: HashSet<usize>,
+    repository_context_menu: Option<RepositoryContextMenu>,
+    worktree_context_menu: Option<WorktreeContextMenu>,
     worktree_nav_back: Vec<usize>,
     worktree_nav_forward: Vec<usize>,
     log_buffer: log_layer::LogBuffer,
@@ -926,6 +987,8 @@ impl ArborWindow {
                     manage_presets_modal: None,
                     agent_presets,
                     active_preset_tab: None,
+                    repo_presets: Vec::new(),
+                    manage_repo_presets_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -948,6 +1011,8 @@ impl ArborWindow {
                     selected_file_tree_entry: None,
                     left_pane_visible: true,
                     collapsed_repositories: HashSet::new(),
+                    repository_context_menu: None,
+                    worktree_context_menu: None,
                     worktree_nav_back: Vec::new(),
                     worktree_nav_forward: Vec::new(),
                     log_buffer: log_buffer.clone(),
@@ -992,9 +1057,17 @@ impl ArborWindow {
                     Err(error) => {
                         let error_text = error.to_string();
                         if daemon_error_is_connection_refused(&error_text) {
-                            tracing::debug!("daemon not running (connection refused)");
-                            terminal_daemon = None;
-                            (Vec::new(), false)
+                            tracing::debug!("daemon not running, attempting auto-start");
+                            if let Some(started) = try_auto_start_daemon(&daemon_base_url) {
+                                let records = started.list_sessions().unwrap_or_default();
+                                terminal_daemon = Some(started);
+                                (records, true)
+                            } else {
+                                tracing::debug!("auto-start failed, falling back to cold restore");
+                                terminal_daemon = None;
+                                let cold_records = daemon_session_store.load().unwrap_or_default();
+                                (cold_records, false)
+                            }
                         } else {
                             notice_parts.push(format!(
                                 "failed to list terminal sessions from daemon at {}: {error}",
@@ -1144,6 +1217,8 @@ impl ArborWindow {
             manage_presets_modal: None,
             agent_presets,
             active_preset_tab: None,
+            repo_presets: Vec::new(),
+            manage_repo_presets_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
@@ -1153,6 +1228,8 @@ impl ArborWindow {
             terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
+            repository_context_menu: None,
+            worktree_context_menu: None,
             worktree_nav_back: Vec::new(),
             worktree_nav_forward: Vec::new(),
             last_persisted_ui_state: startup_ui_state,
@@ -1180,6 +1257,7 @@ impl ArborWindow {
         };
 
         app.refresh_worktrees(cx);
+        app.refresh_repo_config_if_changed(cx);
         app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
         let _ = app.ensure_selected_worktree_terminal();
         app.sync_daemon_session_store(cx);
@@ -1292,7 +1370,10 @@ impl ArborWindow {
                 })
                 .await;
 
-                let updated = this.update(cx, |this, cx| this.refresh_config_if_changed(cx));
+                let updated = this.update(cx, |this, cx| {
+                    this.refresh_config_if_changed(cx);
+                    this.refresh_repo_config_if_changed(cx);
+                });
                 if updated.is_err() {
                     break;
                 }
@@ -1413,6 +1494,36 @@ impl ArborWindow {
         if changed {
             cx.notify();
         }
+    }
+
+    fn refresh_repo_config_if_changed(&mut self, cx: &mut Context<Self>) {
+        let next_presets = self.load_all_repo_presets();
+        if self.repo_presets != next_presets {
+            self.repo_presets = next_presets;
+            cx.notify();
+        }
+    }
+
+    fn load_all_repo_presets(&self) -> Vec<RepoPreset> {
+        let mut presets = load_repo_presets(&self.repo_root);
+        if let Some(wt_path) = self.selected_worktree_path()
+            && wt_path != self.repo_root.as_path()
+        {
+            for wt_preset in load_repo_presets(wt_path) {
+                if !presets.iter().any(|p| p.name == wt_preset.name) {
+                    presets.push(wt_preset);
+                }
+            }
+        }
+        presets
+    }
+
+    /// Returns the directory where repo preset edits should be saved.
+    /// Prefers the selected worktree path, falls back to repo_root.
+    fn active_arbor_toml_dir(&self) -> PathBuf {
+        self.selected_worktree_path()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.repo_root.clone())
     }
 
     fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
@@ -2956,6 +3067,8 @@ impl ArborWindow {
     }
 
     fn select_repository(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.repository_context_menu = None;
+        self.worktree_context_menu = None;
         let Some(repository) = self.repositories.get(index).cloned() else {
             return;
         };
@@ -2975,6 +3088,7 @@ impl ArborWindow {
             .iter()
             .position(|worktree| worktree.repo_root == repository.root);
         self.refresh_worktrees(cx);
+        self.refresh_repo_config_if_changed(cx);
         self.focus_terminal_on_next_render = true;
         cx.notify();
     }
@@ -3167,6 +3281,8 @@ impl ArborWindow {
     }
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_context_menu = None;
+        self.worktree_context_menu = None;
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
         }
@@ -3198,6 +3314,8 @@ impl ArborWindow {
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_context_menu = None;
+        self.worktree_context_menu = None;
         self.close_top_bar_worktree_quick_actions();
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
@@ -3607,7 +3725,7 @@ impl ArborWindow {
         {
             let full_path = worktree_path.join(&path);
             if is_gui_editor(&editor) {
-                if let Err(error) = Command::new(&editor)
+                if let Err(error) = create_command(&editor)
                     .arg(&full_path)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -3857,6 +3975,46 @@ impl ArborWindow {
                     self.active_outpost_index = Some(active - 1);
                 }
                 self.delete_modal = None;
+                cx.notify();
+            },
+            DeleteTarget::Repository(index) => {
+                if index >= self.repositories.len() {
+                    self.close_delete_modal(cx);
+                    return;
+                }
+
+                self.repositories.remove(index);
+
+                // Adjust active_repository_index
+                if self.repositories.is_empty() {
+                    self.active_repository_index = None;
+                } else if self.active_repository_index == Some(index) {
+                    self.active_repository_index = Some(index.min(self.repositories.len() - 1));
+                } else if let Some(active) = self.active_repository_index
+                    && active > index
+                {
+                    self.active_repository_index = Some(active - 1);
+                }
+
+                // Rebuild collapsed_repositories: shift indices above the removed one down by 1
+                let new_collapsed: HashSet<usize> = self
+                    .collapsed_repositories
+                    .iter()
+                    .filter_map(|&i| {
+                        if i == index {
+                            None
+                        } else if i > index {
+                            Some(i - 1)
+                        } else {
+                            Some(i)
+                        }
+                    })
+                    .collect();
+                self.collapsed_repositories = new_collapsed;
+
+                self.delete_modal = None;
+                self.persist_repositories(cx);
+                self.refresh_worktrees(cx);
                 cx.notify();
             },
         }
@@ -4271,6 +4429,226 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn launch_repo_preset(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preset) = self.repo_presets.get(index) else {
+            return;
+        };
+        let command = preset.command.trim().to_owned();
+        let name = preset.name.clone();
+        if command.is_empty() {
+            self.notice = Some(format!("{name} preset command is empty"));
+            cx.notify();
+            return;
+        }
+
+        let terminal_count_before = self.terminals.len();
+        self.spawn_terminal_session(window, cx);
+        if self.terminals.len() <= terminal_count_before {
+            return;
+        }
+
+        let Some(session_id) = self.terminals.last().map(|session| session.id) else {
+            return;
+        };
+
+        let input = format!("{command}\n");
+        if let Err(error) = self.write_input_to_terminal(session_id, input.as_bytes()) {
+            self.notice = Some(format!("failed to run {name} preset: {error}"));
+            cx.notify();
+            return;
+        }
+
+        if let Some(session) = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.last_command = Some(command);
+            session.pending_command.clear();
+            session.updated_at_unix_ms = current_unix_timestamp_millis();
+        }
+
+        self.sync_daemon_session_store(cx);
+        cx.notify();
+    }
+
+    fn open_manage_repo_presets_modal(
+        &mut self,
+        editing_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let (icon, name, command) = if let Some(index) = editing_index {
+            if let Some(preset) = self.repo_presets.get(index) {
+                (
+                    preset.icon.clone(),
+                    preset.name.clone(),
+                    preset.command.clone(),
+                )
+            } else {
+                return;
+            }
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+
+        self.manage_repo_presets_modal = Some(ManageRepoPresetsModal {
+            editing_index,
+            icon,
+            name,
+            command,
+            active_field: RepoPresetModalField::Icon,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn close_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
+        self.manage_repo_presets_modal = None;
+        cx.notify();
+    }
+
+    fn update_manage_repo_presets_modal_input(
+        &mut self,
+        input: RepoPresetsModalInputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut modal) = self.manage_repo_presets_modal.clone() else {
+            return;
+        };
+
+        match input {
+            RepoPresetsModalInputEvent::SetActiveField(field) => {
+                modal.active_field = field;
+            },
+            RepoPresetsModalInputEvent::MoveActiveField(reverse) => {
+                modal.active_field = if reverse {
+                    modal.active_field.prev()
+                } else {
+                    modal.active_field.next()
+                };
+            },
+            RepoPresetsModalInputEvent::Backspace => {
+                let field = match modal.active_field {
+                    RepoPresetModalField::Icon => &mut modal.icon,
+                    RepoPresetModalField::Name => &mut modal.name,
+                    RepoPresetModalField::Command => &mut modal.command,
+                };
+                let _ = field.pop();
+            },
+            RepoPresetsModalInputEvent::Append(text) => {
+                let field = match modal.active_field {
+                    RepoPresetModalField::Icon => &mut modal.icon,
+                    RepoPresetModalField::Name => &mut modal.name,
+                    RepoPresetModalField::Command => &mut modal.command,
+                };
+                field.push_str(&text);
+            },
+            RepoPresetsModalInputEvent::ClearError => {
+                modal.error = None;
+            },
+        }
+
+        self.manage_repo_presets_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn submit_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.manage_repo_presets_modal.clone() else {
+            return;
+        };
+
+        let name = modal.name.trim().to_owned();
+        let command = modal.command.trim().to_owned();
+        let icon = modal.icon.trim().to_owned();
+
+        if name.is_empty() {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some("Name is required.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+        if command.is_empty() {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some("Command is required.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+
+        let new_preset = RepoPreset {
+            name: name.clone(),
+            icon,
+            command,
+        };
+
+        if let Some(index) = modal.editing_index {
+            if let Some(preset) = self.repo_presets.get_mut(index) {
+                *preset = new_preset;
+            }
+        } else {
+            self.repo_presets.push(new_preset);
+        }
+
+        if let Err(error) = self.save_repo_presets() {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.manage_repo_presets_modal = None;
+        let action = if modal.editing_index.is_some() {
+            "updated"
+        } else {
+            "added"
+        };
+        self.notice = Some(format!("Preset \"{name}\" {action}."));
+        cx.notify();
+    }
+
+    fn delete_repo_preset(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.manage_repo_presets_modal.as_ref() else {
+            return;
+        };
+        let Some(index) = modal.editing_index else {
+            return;
+        };
+        let Some(preset) = self.repo_presets.get(index) else {
+            return;
+        };
+        let name = preset.name.clone();
+        let save_dir = self.active_arbor_toml_dir();
+
+        if let Err(error) = app_config::remove_repo_preset(&save_dir, &name) {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.repo_presets.remove(index);
+        self.manage_repo_presets_modal = None;
+        self.notice = Some(format!("Preset \"{name}\" removed."));
+        cx.notify();
+    }
+
+    fn save_repo_presets(&self) -> Result<(), String> {
+        let save_dir = self.active_arbor_toml_dir();
+        let presets: Vec<app_config::RepoPresetConfig> = self
+            .repo_presets
+            .iter()
+            .map(|p| app_config::RepoPresetConfig {
+                name: p.name.clone(),
+                icon: p.icon.clone(),
+                command: p.command.clone(),
+            })
+            .collect();
+        app_config::save_repo_presets(&save_dir, &presets)
+    }
+
     fn update_create_outpost_modal_input(
         &mut self,
         input: OutpostModalInputEvent,
@@ -4642,6 +5020,61 @@ impl ArborWindow {
             return;
         }
 
+        if self.manage_repo_presets_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_manage_repo_presets_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "tab" => {
+                    self.update_manage_repo_presets_modal_input(
+                        RepoPresetsModalInputEvent::MoveActiveField(
+                            event.keystroke.modifiers.shift,
+                        ),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_manage_repo_presets_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "backspace" => {
+                    self.update_manage_repo_presets_modal_input(
+                        RepoPresetsModalInputEvent::Backspace,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+
+            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+                return;
+            }
+
+            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                self.update_manage_repo_presets_modal_input(
+                    RepoPresetsModalInputEvent::ClearError,
+                    cx,
+                );
+                self.update_manage_repo_presets_modal_input(
+                    RepoPresetsModalInputEvent::Append(key_char.to_owned()),
+                    cx,
+                );
+                cx.stop_propagation();
+            }
+            return;
+        }
+
         let Some(modal) = self.create_modal.as_ref() else {
             return;
         };
@@ -4943,6 +5376,7 @@ impl ArborWindow {
     fn action_request_quit(&mut self, _: &RequestQuit, _: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         if self.quit_overlay_until.is_some_and(|until| now < until) {
+            self.sync_daemon_session_store(cx);
             cx.quit();
             return;
         }
@@ -4965,6 +5399,7 @@ impl ArborWindow {
     }
 
     fn action_immediate_quit(&mut self, _: &ImmediateQuit, _: &mut Window, cx: &mut Context<Self>) {
+        self.sync_daemon_session_store(cx);
         cx.quit();
     }
 
@@ -5867,6 +6302,7 @@ impl ArborWindow {
             || self.create_modal.is_some()
             || self.manage_hosts_modal.is_some()
             || self.manage_presets_modal.is_some()
+            || self.manage_repo_presets_modal.is_some()
         {
             return;
         }
@@ -7105,6 +7541,14 @@ impl ArborWindow {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_repository(repository_index, cx);
                                         }))
+                                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.repository_context_menu = Some(RepositoryContextMenu {
+                                                repository_index,
+                                                position: event.position,
+                                            });
+                                            cx.notify();
+                                        }))
                                         // GitHub icon or avatar outside the cell
                                         .child(
                                             if let Some(url) =
@@ -7269,8 +7713,6 @@ impl ArborWindow {
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
                                                 let is_primary = worktree.is_primary_checkout;
-                                                let wt_label = worktree.label.clone();
-                                                let wt_branch = worktree.branch.clone();
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
@@ -7278,7 +7720,6 @@ impl ArborWindow {
                                                 };
                                                 div()
                                                     .id(("worktree-row", index))
-                                                    .group("wt-row")
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
                                                     .flex()
@@ -7288,49 +7729,16 @@ impl ArborWindow {
                                                             this.select_worktree(index, window, cx)
                                                         }),
                                                     )
-                                                    // X delete button in 24px left column (hidden until row hover)
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .w(px(24.))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .when(!is_primary, |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .id(("worktree-delete", index))
-                                                                        .w(px(18.))
-                                                                        .h(px(18.))
-                                                                        .flex()
-                                                                        .items_center()
-                                                                        .justify_center()
-                                                                        .font_family(FONT_MONO)
-                                                                        .text_size(px(16.))
-                                                                        .text_color(rgb(theme.text_muted))
-                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
-                                                                        .invisible()
-                                                                        .group_hover("wt-row", |s| s.visible())
-                                                                        .child("\u{f00d}")
-                                                                        .on_mouse_down(
-                                                                            MouseButton::Left,
-                                                                            cx.listener({
-                                                                                let wt_label = wt_label.clone();
-                                                                                let wt_branch = wt_branch.clone();
-                                                                                move |this, _: &MouseDownEvent, _, cx| {
-                                                                                    cx.stop_propagation();
-                                                                                    this.open_delete_modal(
-                                                                                        DeleteTarget::Worktree(index),
-                                                                                        wt_label.clone(),
-                                                                                        wt_branch.clone(),
-                                                                                        cx,
-                                                                                    );
-                                                                                }
-                                                                            }),
-                                                                        ),
-                                                                )
-                                                            }),
-                                                    )
+                                                    .when(!is_primary, |this| {
+                                                        this.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.worktree_context_menu = Some(WorktreeContextMenu {
+                                                                worktree_index: index,
+                                                                position: event.position,
+                                                            });
+                                                            cx.notify();
+                                                        }))
+                                                    })
                                                     // Bordered cell
                                                     .child(
                                                     div()
@@ -8082,7 +8490,86 @@ impl ArborWindow {
                             .border_b_1()
                             .child(preset_button(AgentPresetKind::Codex))
                             .child(preset_button(AgentPresetKind::Claude))
-                            .child(preset_button(AgentPresetKind::OpenCode)),
+                            .child(preset_button(AgentPresetKind::OpenCode))
+                            .children(self.repo_presets.iter().enumerate().map(|(index, preset)| {
+                                let icon_text = preset.icon.clone();
+                                let name_text = preset.name.clone();
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("terminal-repo-preset-tab-{index}").into(),
+                                    ))
+                                    .cursor_pointer()
+                                    .h(px(22.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .border_b_1()
+                                    .border_color(rgb(theme.tab_bg))
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme.panel_active_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .line_height(px(14.))
+                                                    .child(if icon_text.is_empty() {
+                                                        "\u{f013}".to_owned()
+                                                    } else {
+                                                        icon_text
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .line_height(px(14.))
+                                                    .child(name_text),
+                                            ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                            this.launch_repo_preset(index, window, cx);
+                                        }),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            this.open_manage_repo_presets_modal(Some(index), cx);
+                                        }),
+                                    )
+                            }))
+                            .child(
+                                div()
+                                    .id("terminal-repo-preset-add")
+                                    .cursor_pointer()
+                                    .h(px(22.))
+                                    .w(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme.panel_active_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .child("+")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.open_manage_repo_presets_modal(None, cx);
+                                        }),
+                                    ),
+                            ),
                     ),
             )
             .child(
@@ -9298,6 +9785,188 @@ impl ArborWindow {
             )
     }
 
+    fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(menu) = self.repository_context_menu.as_ref() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let index = menu.repository_index;
+        let position = menu.position;
+
+        // Full-screen invisible overlay to dismiss on click outside,
+        // with the menu as a child — same pattern as render_top_bar_worktree_quick_actions_overlay
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.repository_context_menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
+                this.repository_context_menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            // Absolutely-positioned menu at cursor position
+            .child(
+                div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .w(px(180.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("repository-context-remove")
+                            .h(px(30.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(0x3a2030)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let label = this
+                                    .repositories
+                                    .get(index)
+                                    .map(|r| r.label.clone())
+                                    .unwrap_or_default();
+                                this.repository_context_menu = None;
+                                this.delete_modal = Some(DeleteModal {
+                                    target: DeleteTarget::Repository(index),
+                                    label,
+                                    branch: String::new(),
+                                    has_unpushed: None,
+                                    delete_branch: false,
+                                    is_deleting: false,
+                                    error: None,
+                                });
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(16.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("\u{f1f8}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("Remove"),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_worktree_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(menu) = self.worktree_context_menu.as_ref() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let index = menu.worktree_index;
+        let position = menu.position;
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.worktree_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.worktree_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .w(px(180.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("worktree-context-delete")
+                            .h(px(30.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(0x3a2030)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.worktree_context_menu = None;
+                                let wt_label = this
+                                    .worktrees
+                                    .get(index)
+                                    .map(|wt| wt.label.clone())
+                                    .unwrap_or_default();
+                                let wt_branch = this
+                                    .worktrees
+                                    .get(index)
+                                    .map(|wt| wt.branch.clone())
+                                    .unwrap_or_default();
+                                this.open_delete_modal(
+                                    DeleteTarget::Worktree(index),
+                                    wt_label,
+                                    wt_branch,
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(16.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("\u{f1f8}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("Delete"),
+                            ),
+                    ),
+            )
+    }
+
     fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.delete_modal.clone() else {
             return div();
@@ -9305,14 +9974,23 @@ impl ArborWindow {
 
         let theme = self.theme();
         let is_worktree = matches!(modal.target, DeleteTarget::Worktree(_));
-        let title = if is_worktree {
-            "Delete Worktree"
-        } else {
-            "Remove Outpost"
+        let title = match &modal.target {
+            DeleteTarget::Worktree(_) => "Delete Worktree",
+            DeleteTarget::Outpost(_) => "Remove Outpost",
+            DeleteTarget::Repository(_) => "Remove Repository",
+        };
+        let label_prefix = match &modal.target {
+            DeleteTarget::Worktree(_) => "Worktree",
+            DeleteTarget::Outpost(_) => "Outpost",
+            DeleteTarget::Repository(_) => "Repository",
         };
         let delete_disabled = modal.is_deleting;
         let delete_label = if modal.is_deleting {
-            "Deleting..."
+            if is_worktree {
+                "Deleting..."
+            } else {
+                "Removing..."
+            }
         } else if is_worktree {
             "Delete"
         } else {
@@ -9363,7 +10041,7 @@ impl ArborWindow {
                         div()
                             .text_xs()
                             .text_color(rgb(theme.text_muted))
-                            .child(format!("{}: {}", if is_worktree { "Worktree" } else { "Outpost" }, modal.label)),
+                            .child(format!("{}: {}", label_prefix, modal.label)),
                     )
                     // Unpushed commits warning (worktrees only)
                     .when(is_worktree, |this| {
@@ -9413,6 +10091,7 @@ impl ArborWindow {
                                             this.bg(rgb(theme.accent))
                                                 .child(
                                                     div()
+                                                        .font_family(FONT_MONO)
                                                         .text_size(px(10.))
                                                         .text_color(rgb(theme.sidebar_bg))
                                                         .child("\u{f00c}"),
@@ -9464,7 +10143,7 @@ impl ArborWindow {
                                         this.opacity(0.5).cursor_default()
                                     })
                                     .when(!delete_disabled, |this| {
-                                        this.hover(|s| s.bg(rgb(0xeb6f92)).text_color(rgb(theme.sidebar_bg)))
+                                        this.hover(|s| s.bg(rgb(0xeb6f92)).text_color(rgb(theme.app_bg)))
                                     })
                                     .child(delete_label)
                                     .when(!delete_disabled, |this| {
@@ -9977,6 +10656,197 @@ impl ArborWindow {
                     ),
             )
     }
+
+    fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.manage_repo_presets_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_editing = modal.editing_index.is_some();
+        let title = if is_editing {
+            "Edit Custom Preset"
+        } else {
+            "Add Custom Preset"
+        };
+        let save_disabled = modal.name.trim().is_empty() || modal.command.trim().is_empty();
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(620.))
+                    .max_w(px(620.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(title),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "close-manage-repo-presets",
+                                    "Close",
+                                    false,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_manage_repo_presets_modal(cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "repo-preset-icon-input",
+                            "Icon (emoji)",
+                            &modal.icon,
+                            "\u{f013}",
+                            modal.active_field == RepoPresetModalField::Icon,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_repo_presets_modal_input(
+                                RepoPresetsModalInputEvent::SetActiveField(
+                                    RepoPresetModalField::Icon,
+                                ),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "repo-preset-name-input",
+                            "Name",
+                            &modal.name,
+                            "my preset",
+                            modal.active_field == RepoPresetModalField::Name,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_repo_presets_modal_input(
+                                RepoPresetsModalInputEvent::SetActiveField(
+                                    RepoPresetModalField::Name,
+                                ),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "repo-preset-command-input",
+                            "Command",
+                            &modal.command,
+                            "just run",
+                            modal.active_field == RepoPresetModalField::Command,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_repo_presets_modal_input(
+                                RepoPresetsModalInputEvent::SetActiveField(
+                                    RepoPresetModalField::Command,
+                                ),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Typing tips"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Tab: next field, Enter: save, Esc: close"),
+                            ),
+                    )
+                    .child(div().when_some(modal.error.clone(), |this, error| {
+                        this.rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0xa44949))
+                            .bg(rgb(0x4d2a2a))
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(0xffd7d7))
+                            .child(error)
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .when(is_editing, |this| {
+                                this.child(
+                                    action_button(
+                                        theme,
+                                        "repo-preset-delete",
+                                        "Delete",
+                                        true,
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.delete_repo_preset(cx);
+                                        },
+                                    )),
+                                )
+                            })
+                            .child(
+                                action_button(theme, "repo-preset-cancel", "Cancel", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_manage_repo_presets_modal(cx);
+                                    })),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "repo-preset-save",
+                                    "Save",
+                                    !save_disabled,
+                                    save_disabled,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.submit_manage_repo_presets_modal(cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+    }
 }
 
 fn default_agent_presets() -> Vec<AgentPreset> {
@@ -10007,6 +10877,22 @@ fn normalize_agent_presets(configured: &[app_config::AgentPresetConfig]) -> Vec<
     }
 
     presets
+}
+
+fn load_repo_presets(repo_root: &Path) -> Vec<RepoPreset> {
+    let Some(config) = app_config::load_repo_config(repo_root) else {
+        return Vec::new();
+    };
+    config
+        .presets
+        .into_iter()
+        .filter(|p| !p.name.trim().is_empty() && !p.command.trim().is_empty())
+        .map(|p| RepoPreset {
+            name: p.name.trim().to_owned(),
+            icon: p.icon.trim().to_owned(),
+            command: p.command.trim().to_owned(),
+        })
+        .collect()
 }
 
 fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
@@ -10070,6 +10956,12 @@ fn current_unix_timestamp_millis() -> Option<u64> {
 }
 
 fn daemon_base_url_from_config(raw: Option<&str>) -> String {
+    if let Ok(env_url) = env::var("ARBOR_DAEMON_URL") {
+        let trimmed = env_url.trim().to_owned();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_DAEMON_BASE_URL)
@@ -10125,6 +11017,93 @@ fn daemon_error_is_connection_refused(message: &str) -> bool {
     lower.contains("connection refused")
         || lower.contains("failed to connect")
         || lower.contains("actively refused")
+}
+
+/// Attempt to locate and spawn `arbor-httpd` as a detached background process,
+/// then poll until it becomes reachable. Returns `Some(daemon)` on success.
+fn try_auto_start_daemon(daemon_base_url: &str) -> Option<HttpTerminalDaemon> {
+    let binary = find_arbor_httpd_binary()?;
+    tracing::info!(path = %binary.display(), "auto-starting arbor-httpd");
+
+    let home = env::var("HOME").ok().map(PathBuf::from)?;
+    let log_dir = home.join(".arbor/daemon");
+    if let Err(error) = fs::create_dir_all(&log_dir) {
+        tracing::warn!(%error, "failed to create daemon log directory");
+    }
+    let log_file = log_dir.join("daemon.log");
+
+    let log_out = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file);
+    let (stdout_file, stderr_file) = match log_out {
+        Ok(file) => {
+            let dup = file.try_clone().ok()?;
+            (Stdio::from(file), Stdio::from(dup))
+        },
+        Err(error) => {
+            tracing::warn!(%error, path = %log_file.display(), "cannot open daemon log file");
+            (Stdio::null(), Stdio::null())
+        },
+    };
+
+    let bind_addr = daemon_base_url
+        .strip_prefix("http://")
+        .unwrap_or("127.0.0.1:8787");
+
+    let mut cmd = Command::new(&binary);
+    cmd.env("ARBOR_HTTPD_BIND", bind_addr)
+        .stdin(Stdio::null())
+        .stdout(stdout_file)
+        .stderr(stderr_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    if let Err(error) = cmd.spawn() {
+        tracing::warn!(%error, path = %binary.display(), "failed to spawn arbor-httpd");
+        return None;
+    }
+
+    let daemon = HttpTerminalDaemon::new(daemon_base_url).ok()?;
+
+    const MAX_ATTEMPTS: u32 = 20;
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        std::thread::sleep(POLL_INTERVAL);
+        match daemon.list_sessions() {
+            Ok(_) => {
+                tracing::info!(attempt, "daemon is ready");
+                return Some(daemon);
+            },
+            Err(_) if attempt < MAX_ATTEMPTS => continue,
+            Err(error) => {
+                tracing::warn!(%error, "daemon did not become ready after auto-start");
+            },
+        }
+    }
+    None
+}
+
+/// Search for the `arbor-httpd` binary next to the current executable,
+/// then fall back to `PATH` lookup.
+fn find_arbor_httpd_binary() -> Option<PathBuf> {
+    if let Ok(exe) = env::current_exe() {
+        let sibling = exe.with_file_name("arbor-httpd");
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|dir| dir.join("arbor-httpd"))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 fn load_outpost_summaries(
@@ -10281,9 +11260,12 @@ impl Render for ArborWindow {
             .child(self.render_top_bar_worktree_quick_actions_menu(cx))
             .child(self.render_notice_toast(cx))
             .child(self.render_create_modal(cx))
+            .child(self.render_repository_context_menu(cx))
+            .child(self.render_worktree_context_menu(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))
+            .child(self.render_manage_repo_presets_modal(cx))
             .child(div().when_some(self.theme_toast.clone(), |this, toast| {
                 this.child(
                     div()
@@ -12423,7 +13405,7 @@ fn run_launch_command(command: &mut Command, operation: &str) -> Result<(), Stri
 fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let mut command = Command::new("open");
+        let mut command = create_command("open");
         command.arg(worktree_path);
         run_launch_command(&mut command, "open worktree in Finder")?;
         return Ok("opened worktree in Finder".to_owned());
@@ -12431,7 +13413,7 @@ fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String>
 
     #[cfg(target_os = "linux")]
     {
-        let mut command = Command::new("xdg-open");
+        let mut command = create_command("xdg-open");
         command.arg(worktree_path);
         run_launch_command(&mut command, "open worktree in file manager")?;
         return Ok("opened worktree in file manager".to_owned());
@@ -12439,7 +13421,7 @@ fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String>
 
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("explorer");
+        let mut command = create_command("explorer");
         command.arg(worktree_path);
         run_launch_command(&mut command, "open worktree in File Explorer")?;
         return Ok("opened worktree in File Explorer".to_owned());
@@ -12455,7 +13437,7 @@ fn open_worktree_with_external_launcher(
 ) -> Result<String, String> {
     match launcher.kind {
         ExternalLauncherKind::Command(command_name) => {
-            let mut command = Command::new(command_name);
+            let mut command = create_command(command_name);
             command.arg(worktree_path);
             run_launch_command(
                 &mut command,
@@ -12463,7 +13445,7 @@ fn open_worktree_with_external_launcher(
             )?;
         },
         ExternalLauncherKind::MacApp(app_name) => {
-            let mut command = Command::new("open");
+            let mut command = create_command("open");
             command.arg("-a").arg(app_name).arg(worktree_path);
             run_launch_command(
                 &mut command,
@@ -12476,7 +13458,12 @@ fn open_worktree_with_external_launcher(
 }
 
 fn command_exists_on_path(command_name: &str) -> bool {
-    let Some(path_env) = env::var_os("PATH") else {
+    let path_env = AUGMENTED_PATH
+        .get()
+        .map(|p| std::ffi::OsString::from(p.as_str()))
+        .or_else(|| env::var_os("PATH"));
+
+    let Some(path_env) = path_env else {
         return false;
     };
 
@@ -14152,7 +15139,94 @@ fn bounds_from_window_geometry(
     ))
 }
 
+/// The augmented PATH computed at startup, merging the user's login-shell PATH
+/// with the process PATH.  Stored once, read by [`create_command`].
+static AUGMENTED_PATH: OnceLock<String> = OnceLock::new();
+
+/// When launched as a macOS `.app` bundle the process inherits a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`).  This function sources the user's login
+/// shell to obtain their real PATH and merges it with the current one so that
+/// tools like `gh` and `git` installed via Homebrew are found.
+///
+/// The result is stored in [`AUGMENTED_PATH`] and applied per-command via
+/// [`create_command`] rather than mutating the global environment.
+fn augment_path_from_login_shell() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let current_path = env::var("PATH").unwrap_or_default();
+
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+    let marker_start = "__PATH_START__";
+    let marker_end = "__PATH_END__";
+
+    let shell_path = match Command::new(&shell)
+        .args(["-lic", &format!("echo {marker_start}${{PATH}}{marker_end}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .find_map(|line| {
+                    let start = line.find(marker_start)?;
+                    let after_start = start + marker_start.len();
+                    let end = line[after_start..].find(marker_end)?;
+                    Some(line[after_start..after_start + end].to_owned())
+                })
+                .unwrap_or_default()
+        },
+        _ => String::new(),
+    };
+
+    // Merge: login-shell paths first, then current PATH, deduplicated.
+    let mut seen = HashSet::new();
+    let mut merged: Vec<&str> = Vec::new();
+
+    let paths_to_add = if shell_path.is_empty() {
+        let home = env::var("HOME").unwrap_or_default();
+        vec![
+            "/opt/homebrew/bin".to_owned(),
+            "/opt/homebrew/sbin".to_owned(),
+            "/usr/local/bin".to_owned(),
+            format!("{home}/.local/bin"),
+        ]
+    } else {
+        shell_path.split(':').map(|s| s.to_owned()).collect()
+    };
+
+    for dir in &paths_to_add {
+        if !dir.is_empty() && seen.insert(dir.as_str()) {
+            merged.push(dir.as_str());
+        }
+    }
+    for dir in current_path.split(':') {
+        if !dir.is_empty() && seen.insert(dir) {
+            merged.push(dir);
+        }
+    }
+
+    AUGMENTED_PATH.set(merged.join(":")).ok();
+}
+
+/// Create a [`Command`] with the augmented PATH applied.  Use this instead of
+/// [`Command::new`] so that Homebrew-installed tools are found when running as
+/// a macOS `.app` bundle.
+fn create_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(path) = AUGMENTED_PATH.get() {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
 fn main() {
+    augment_path_from_login_shell();
+
     let log_buffer = log_layer::LogBuffer::new();
 
     {
