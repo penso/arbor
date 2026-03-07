@@ -14,13 +14,13 @@ const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "opencode"];
 pub fn detect_agent_cwds() -> HashSet<PathBuf> {
     let mut pids = Vec::new();
     for name in AGENT_PROCESS_NAMES {
-        if let Ok(output) = Command::new("pgrep").arg("-x").arg(name).output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Ok(pid) = line.trim().parse::<u32>() {
-                        pids.push(pid);
-                    }
+        if let Ok(output) = Command::new("pgrep").arg("-x").arg(name).output()
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    pids.push(pid);
                 }
             }
         }

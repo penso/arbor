@@ -25,10 +25,10 @@ use {
     },
     gpui::{
         App, Application, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
-        FocusHandle, FontFallbacks, FontFeatures, FontWeight, KeyBinding, KeyDownEvent, Keystroke,
-        Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PathPromptOptions, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
-        TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+        FocusHandle, FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding,
+        KeyDownEvent, Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, PathPromptOptions, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType,
+        TextRun, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
         WindowDecorations, WindowOptions, actions, canvas, div, fill, font, img, point, prelude::*,
         px, rgb, size, uniform_list,
     },
@@ -38,7 +38,7 @@ use {
         env, fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, OnceLock},
         time::{Duration, Instant, SystemTime},
     },
     terminal_backend::{
@@ -95,6 +95,11 @@ const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
 const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
+const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
+const PRESET_ICON_CLAUDE_PNG: &[u8] = include_bytes!("../../../assets/preset-icons/claude.png");
+const PRESET_ICON_CODEX_SVG: &[u8] = include_bytes!("../../../assets/preset-icons/codex-white.svg");
+const PRESET_ICON_OPENCODE_SVG: &[u8] =
+    include_bytes!("../../../assets/preset-icons/opencode-white.svg");
 
 fn terminal_mono_font(cx: &App) -> gpui::Font {
     let fallbacks = FontFallbacks::from_fonts(
@@ -131,6 +136,7 @@ actions!(arbor, [
     NewWindow,
     SpawnTerminal,
     CloseActiveTerminal,
+    OpenManagePresets,
     RefreshWorktrees,
     RefreshChanges,
     OpenAddRepository,
@@ -361,6 +367,89 @@ enum CenterTab {
 enum RightPaneTab {
     Changes,
     FileTree,
+    Presets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AgentPresetKind {
+    Codex,
+    Claude,
+    OpenCode,
+}
+
+impl AgentPresetKind {
+    const ORDER: [Self; 3] = [Self::Codex, Self::Claude, Self::OpenCode];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    fn fallback_icon(self) -> &'static str {
+        match self {
+            Self::Codex => "\u{f121}",
+            Self::Claude => "C",
+            Self::OpenCode => "\u{f085}",
+        }
+    }
+
+    fn default_command(self) -> &'static str {
+        self.key()
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "codex" => Some(Self::Codex),
+            "claude" => Some(Self::Claude),
+            "opencode" => Some(Self::OpenCode),
+            _ => None,
+        }
+    }
+
+    fn cycle(self, reverse: bool) -> Self {
+        let current = Self::ORDER
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0);
+        if reverse {
+            Self::ORDER[(current + Self::ORDER.len() - 1) % Self::ORDER.len()]
+        } else {
+            Self::ORDER[(current + 1) % Self::ORDER.len()]
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentPreset {
+    kind: AgentPresetKind,
+    command: String,
+}
+
+#[derive(Debug, Clone)]
+struct ManagePresetsModal {
+    active_preset: AgentPresetKind,
+    command: String,
+    error: Option<String>,
+}
+
+enum PresetsModalInputEvent {
+    SetActivePreset(AgentPresetKind),
+    CycleActivePreset(bool),
+    Backspace,
+    Append(String),
+    RestoreDefault,
+    ClearError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,6 +679,9 @@ struct ArborWindow {
     remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
     ssh_connection_pool: Arc<arbor_ssh::connection::SshConnectionPool>,
     manage_hosts_modal: Option<ManageHostsModal>,
+    manage_presets_modal: Option<ManagePresetsModal>,
+    agent_presets: Vec<AgentPreset>,
+    active_preset_tab: Option<AgentPresetKind>,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
@@ -598,6 +690,8 @@ struct ArborWindow {
     notifications_enabled: bool,
     window_is_active: bool,
     notice: Option<String>,
+    theme_toast: Option<String>,
+    theme_toast_generation: u64,
     right_pane_tab: RightPaneTab,
     file_tree_entries: Vec<FileTreeEntry>,
     expanded_dirs: HashSet<PathBuf>,
@@ -686,6 +780,9 @@ impl ArborWindow {
                     remote_hosts: Vec::new(),
                     ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
                     manage_hosts_modal: None,
+                    manage_presets_modal: None,
+                    agent_presets: default_agent_presets(),
+                    active_preset_tab: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -694,6 +791,8 @@ impl ArborWindow {
                     notifications_enabled: true,
                     window_is_active: true,
                     notice: Some(format!("failed to read current directory: {error}")),
+                    theme_toast: None,
+                    theme_toast_generation: 0,
                     right_pane_tab: RightPaneTab::Changes,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
@@ -764,6 +863,9 @@ impl ArborWindow {
                     remote_hosts: Vec::new(),
                     ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
                     manage_hosts_modal: None,
+                    manage_presets_modal: None,
+                    agent_presets: default_agent_presets(),
+                    active_preset_tab: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -772,6 +874,8 @@ impl ArborWindow {
                     notifications_enabled: true,
                     window_is_active: true,
                     notice: Some(format!("failed to resolve git repository root: {error}")),
+                    theme_toast: None,
+                    theme_toast_generation: 0,
                     right_pane_tab: RightPaneTab::Changes,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
@@ -885,6 +989,7 @@ impl ArborWindow {
                 mosh_server_path: host_config.mosh_server_path.clone(),
             })
             .collect();
+        let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
 
         let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
         let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
@@ -954,6 +1059,9 @@ impl ArborWindow {
             remote_hosts,
             ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
             manage_hosts_modal: None,
+            manage_presets_modal: None,
+            agent_presets,
+            active_preset_tab: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
@@ -966,6 +1074,8 @@ impl ArborWindow {
             notifications_enabled,
             window_is_active: true,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
+            theme_toast: None,
+            theme_toast_generation: 0,
             right_pane_tab: RightPaneTab::Changes,
             file_tree_entries: Vec::new(),
             expanded_dirs: HashSet::new(),
@@ -1188,6 +1298,20 @@ impl ArborWindow {
         if self.remote_hosts != next_remote_hosts {
             self.remote_hosts = next_remote_hosts;
             self.outposts = load_outpost_summaries(self.outpost_store.as_ref(), &self.remote_hosts);
+            changed = true;
+        }
+
+        let next_agent_presets = normalize_agent_presets(&loaded.config.agent_presets);
+        if self.agent_presets != next_agent_presets {
+            self.agent_presets = next_agent_presets;
+            if let Some(modal) = self.manage_presets_modal.as_mut()
+                && let Some(preset) = self
+                    .agent_presets
+                    .iter()
+                    .find(|preset| preset.kind == modal.active_preset)
+            {
+                modal.command = preset.command.clone();
+            }
             changed = true;
         }
 
@@ -2057,27 +2181,19 @@ impl ArborWindow {
                 .detach();
 
                 let first = rx.recv().await;
-                match first {
-                    Ok(Some(text)) => {
-                        tracing::info!("agent activity WS connected");
-                        backoff_secs = 3;
-                        let _ = this.update(cx, |this, _| {
-                            this.agent_ws_connected = true;
-                        });
-                        // Process the first message
-                        process_agent_ws_message(&this, cx, &text);
+                if let Ok(Some(text)) = first {
+                    tracing::info!("agent activity WS connected");
+                    backoff_secs = 3;
+                    let _ = this.update(cx, |this, _| {
+                        this.agent_ws_connected = true;
+                    });
+                    // Process the first message
+                    process_agent_ws_message(&this, cx, &text);
 
-                        // Process subsequent messages
-                        loop {
-                            match rx.recv().await {
-                                Ok(Some(text)) => {
-                                    process_agent_ws_message(&this, cx, &text);
-                                },
-                                Ok(None) | Err(_) => break,
-                            }
-                        }
-                    },
-                    _ => {},
+                    // Process subsequent messages
+                    while let Ok(Some(text)) = rx.recv().await {
+                        process_agent_ws_message(&this, cx, &text);
+                    }
                 }
 
                 tracing::debug!("agent activity WS disconnected, will retry");
@@ -3076,8 +3192,24 @@ impl ArborWindow {
         }
 
         self.theme_kind = theme_kind;
-        self.notice = Some(format!("theme switched to {}", theme_kind.label()));
+        self.theme_toast = Some(format!("Theme switched to {}", theme_kind.label()));
+        self.theme_toast_generation = self.theme_toast_generation.saturating_add(1);
+        let generation = self.theme_toast_generation;
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(THEME_TOAST_DURATION);
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.theme_toast_generation == generation {
+                    this.theme_toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn open_create_modal(
@@ -3133,7 +3265,11 @@ impl ArborWindow {
             target,
             label,
             branch: worktree::short_branch(&branch),
-            has_unpushed: if worktree_index.is_some() { None } else { Some(false) },
+            has_unpushed: if worktree_index.is_some() {
+                None
+            } else {
+                Some(false)
+            },
             delete_branch: false,
             is_deleting: false,
             error: None,
@@ -3141,24 +3277,22 @@ impl ArborWindow {
         cx.notify();
 
         // For worktrees, spawn async check for unpushed commits.
-        if let Some(worktree_index) = worktree_index {
-            if let Some(wt) = self.worktrees.get(worktree_index) {
-                let wt_path = wt.path.clone();
-                cx.spawn(async move |this, cx| {
-                    let has_unpushed = cx
-                        .background_spawn(async move {
-                            worktree::has_unpushed_commits(&wt_path)
-                        })
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if let Some(modal) = this.delete_modal.as_mut() {
-                            modal.has_unpushed = Some(has_unpushed);
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
+        if let Some(worktree_index) = worktree_index
+            && let Some(wt) = self.worktrees.get(worktree_index)
+        {
+            let wt_path = wt.path.clone();
+            cx.spawn(async move |this, cx| {
+                let has_unpushed = cx
+                    .background_spawn(async move { worktree::has_unpushed_commits(&wt_path) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(modal) = this.delete_modal.as_mut() {
+                        modal.has_unpushed = Some(has_unpushed);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
     }
 
@@ -3504,6 +3638,171 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn preset_command_for_kind(&self, kind: AgentPresetKind) -> String {
+        self.agent_presets
+            .iter()
+            .find(|preset| preset.kind == kind)
+            .map(|preset| preset.command.clone())
+            .unwrap_or_else(|| kind.default_command().to_owned())
+    }
+
+    fn set_preset_command_for_kind(&mut self, kind: AgentPresetKind, command: String) {
+        if let Some(preset) = self
+            .agent_presets
+            .iter_mut()
+            .find(|preset| preset.kind == kind)
+        {
+            preset.command = command;
+            return;
+        }
+
+        self.agent_presets.push(AgentPreset { kind, command });
+        self.agent_presets.sort_by_key(|preset| {
+            AgentPresetKind::ORDER
+                .iter()
+                .position(|kind| *kind == preset.kind)
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    fn save_agent_presets(&self) -> Result<(), String> {
+        let presets = self
+            .agent_presets
+            .iter()
+            .map(|preset| app_config::AgentPresetConfig {
+                key: preset.kind.key().to_owned(),
+                command: preset.command.clone(),
+            })
+            .collect::<Vec<_>>();
+        app_config::save_agent_presets(&presets)
+    }
+
+    fn open_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
+        let active_preset = self.active_preset_tab.unwrap_or(AgentPresetKind::Codex);
+        self.manage_presets_modal = Some(ManagePresetsModal {
+            active_preset,
+            command: self.preset_command_for_kind(active_preset),
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn close_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
+        self.manage_presets_modal = None;
+        cx.notify();
+    }
+
+    fn update_manage_presets_modal_input(
+        &mut self,
+        input: PresetsModalInputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut modal) = self.manage_presets_modal.clone() else {
+            return;
+        };
+
+        match input {
+            PresetsModalInputEvent::SetActivePreset(kind) => {
+                modal.active_preset = kind;
+                modal.command = self.preset_command_for_kind(kind);
+            },
+            PresetsModalInputEvent::CycleActivePreset(reverse) => {
+                modal.active_preset = modal.active_preset.cycle(reverse);
+                modal.command = self.preset_command_for_kind(modal.active_preset);
+            },
+            PresetsModalInputEvent::Backspace => {
+                let _ = modal.command.pop();
+            },
+            PresetsModalInputEvent::Append(text) => {
+                modal.command.push_str(&text);
+            },
+            PresetsModalInputEvent::RestoreDefault => {
+                modal.command = modal.active_preset.default_command().to_owned();
+            },
+            PresetsModalInputEvent::ClearError => {
+                modal.error = None;
+            },
+        }
+
+        self.manage_presets_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn submit_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.manage_presets_modal.clone() else {
+            return;
+        };
+
+        let command = modal.command.trim().to_owned();
+        if command.is_empty() {
+            if let Some(modal_state) = self.manage_presets_modal.as_mut() {
+                modal_state.error = Some("Command is required.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+
+        self.set_preset_command_for_kind(modal.active_preset, command);
+        if let Err(error) = self.save_agent_presets() {
+            if let Some(modal_state) = self.manage_presets_modal.as_mut() {
+                modal_state.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.config_last_modified = None;
+        self.refresh_config_if_changed(cx);
+        self.manage_presets_modal = None;
+        self.notice = Some(format!("{} preset updated", modal.active_preset.label(),));
+        cx.notify();
+    }
+
+    fn launch_agent_preset(
+        &mut self,
+        preset: AgentPresetKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = self.preset_command_for_kind(preset).trim().to_owned();
+        self.active_preset_tab = Some(preset);
+        if command.is_empty() {
+            self.notice = Some(format!("{} preset command is empty", preset.label()));
+            cx.notify();
+            return;
+        }
+
+        let terminal_count_before = self.terminals.len();
+        self.spawn_terminal_session(window, cx);
+        if self.terminals.len() <= terminal_count_before {
+            return;
+        }
+
+        let Some(session_id) = self.terminals.last().map(|session| session.id) else {
+            return;
+        };
+
+        let input = format!("{command}\n");
+        if let Err(error) = self.write_input_to_terminal(session_id, input.as_bytes()) {
+            self.notice = Some(format!("failed to run {} preset: {error}", preset.label()));
+            cx.notify();
+            return;
+        }
+
+        if let Some(session) = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.last_command = Some(command);
+            session.pending_command.clear();
+            session.updated_at_unix_ms = current_unix_timestamp_millis();
+        }
+
+        self.sync_daemon_session_store(cx);
+        cx.notify();
+    }
+
     fn update_create_outpost_modal_input(
         &mut self,
         input: OutpostModalInputEvent,
@@ -3706,11 +4005,11 @@ impl ArborWindow {
                     cx.stop_propagation();
                 },
                 "space" | " " => {
-                    if let Some(modal) = self.delete_modal.as_mut() {
-                        if matches!(modal.target, DeleteTarget::Worktree(_)) {
-                            modal.delete_branch = !modal.delete_branch;
-                            cx.notify();
-                        }
+                    if let Some(modal) = self.delete_modal.as_mut()
+                        && matches!(modal.target, DeleteTarget::Worktree(_))
+                    {
+                        modal.delete_branch = !modal.delete_branch;
+                        cx.notify();
                     }
                     cx.stop_propagation();
                 },
@@ -3776,6 +4075,69 @@ impl ArborWindow {
                 }
             } else if event.keystroke.key.as_str() == "escape" {
                 self.close_manage_hosts_modal(cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.manage_presets_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_manage_presets_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "tab" => {
+                    self.update_manage_presets_modal_input(
+                        PresetsModalInputEvent::CycleActivePreset(event.keystroke.modifiers.shift),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "left" => {
+                    self.update_manage_presets_modal_input(
+                        PresetsModalInputEvent::CycleActivePreset(true),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "right" => {
+                    self.update_manage_presets_modal_input(
+                        PresetsModalInputEvent::CycleActivePreset(false),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_manage_presets_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "backspace" => {
+                    self.update_manage_presets_modal_input(PresetsModalInputEvent::Backspace, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+
+            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+                return;
+            }
+
+            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                self.update_manage_presets_modal_input(PresetsModalInputEvent::ClearError, cx);
+                self.update_manage_presets_modal_input(
+                    PresetsModalInputEvent::Append(key_char.to_owned()),
+                    cx,
+                );
                 cx.stop_propagation();
             }
             return;
@@ -3920,6 +4282,15 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         self.close_active_tab(window, cx);
+    }
+
+    fn action_open_manage_presets(
+        &mut self,
+        _: &OpenManagePresets,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_manage_presets_modal(cx);
     }
 
     fn action_refresh_worktrees(
@@ -4951,7 +5322,10 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.create_modal.is_some() || self.manage_hosts_modal.is_some() {
+        if self.create_modal.is_some()
+            || self.manage_hosts_modal.is_some()
+            || self.manage_presets_modal.is_some()
+        {
             return;
         }
 
@@ -6191,6 +6565,44 @@ impl ArborWindow {
                 .cloned(),
             _ => None,
         };
+        let active_preset_tab = self.active_preset_tab;
+        let preset_button = |kind: AgentPresetKind| {
+            let is_active = active_preset_tab == Some(kind);
+            let text_color = if is_active {
+                theme.text_primary
+            } else {
+                theme.text_muted
+            };
+            div()
+                .id(ElementId::Name(
+                    format!("terminal-preset-tab-{}", kind.key()).into(),
+                ))
+                .cursor_pointer()
+                .h(px(22.))
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .border_b_1()
+                .border_color(rgb(if is_active {
+                    theme.accent
+                } else {
+                    theme.tab_bg
+                }))
+                .text_color(rgb(text_color))
+                .hover(|s| {
+                    s.bg(rgb(theme.panel_active_bg))
+                        .text_color(rgb(theme.text_primary))
+                })
+                .child(agent_preset_button_content(kind, text_color))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.active_preset_tab = Some(kind);
+                        this.launch_agent_preset(kind, window, cx);
+                    }),
+                )
+        };
 
         div()
             .flex_1()
@@ -6219,171 +6631,210 @@ impl ArborWindow {
                             .flex_1()
                             .flex()
                             .items_center()
-                            .overflow_hidden()
-                            .when(tabs.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .px_3()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("No tabs"),
-                                )
-                            })
-                            .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
-                                let is_active = active_tab == Some(tab);
-                                let tab_count = tabs.len();
-                                let relation =
-                                    active_tab_index.map(|active_index| index.cmp(&active_index));
-                                let (tab_icon, tab_label, terminal_icon) = match tab {
-                                    CenterTab::Terminal(session_id) => (
-                                        TAB_ICON_TERMINAL,
-                                        self.terminals
-                                            .iter()
-                                            .find(|session| session.id == session_id)
-                                            .map(terminal_tab_title)
-                                            .unwrap_or_else(|| "terminal".to_owned()),
-                                        true,
-                                    ),
-                                    CenterTab::Diff(diff_id) => (
-                                        TAB_ICON_DIFF,
-                                        self.diff_sessions
-                                            .iter()
-                                            .find(|session| session.id == diff_id)
-                                            .map(diff_tab_title)
-                                            .unwrap_or_else(|| "diff".to_owned()),
-                                        false,
-                                    ),
-                                    CenterTab::Logs => (
-                                        TAB_ICON_LOGS,
-                                        "Logs".to_owned(),
-                                        true,
-                                    ),
-                                };
-                                let tab_id = match tab {
-                                    CenterTab::Terminal(id) => ("center-tab-terminal", id),
-                                    CenterTab::Diff(id) => ("center-tab-diff", id),
-                                    CenterTab::Logs => ("center-tab-logs", 0),
-                                };
-
+                            .child(
                                 div()
-                                    .id(tab_id)
-                                    .group("tab")
-                                    .relative()
                                     .h_full()
-                                    .cursor_pointer()
-                                    .w(px(160.))
-                                    .px_4()
+                                    .flex_1()
                                     .flex()
                                     .items_center()
-                                    .gap_2()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(if is_active {
-                                        theme.tab_active_bg
-                                    } else {
-                                        theme.tab_bg
-                                    }))
-                                    .child(
+                                    .overflow_hidden()
+                                    .when(tabs.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .px_3()
+                                                .text_xs()
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("No tabs"),
+                                        )
+                                    })
+                                    .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
+                                        let is_active = active_tab == Some(tab);
+                                        let tab_count = tabs.len();
+                                        let relation =
+                                            active_tab_index.map(|active_index| index.cmp(&active_index));
+                                        let (tab_icon, tab_label, terminal_icon) = match tab {
+                                            CenterTab::Terminal(session_id) => (
+                                                TAB_ICON_TERMINAL,
+                                                self.terminals
+                                                    .iter()
+                                                    .find(|session| session.id == session_id)
+                                                    .map(terminal_tab_title)
+                                                    .unwrap_or_else(|| "terminal".to_owned()),
+                                                true,
+                                            ),
+                                            CenterTab::Diff(diff_id) => (
+                                                TAB_ICON_DIFF,
+                                                self.diff_sessions
+                                                    .iter()
+                                                    .find(|session| session.id == diff_id)
+                                                    .map(diff_tab_title)
+                                                    .unwrap_or_else(|| "diff".to_owned()),
+                                                false,
+                                            ),
+                                            CenterTab::Logs => (
+                                                TAB_ICON_LOGS,
+                                                "Logs".to_owned(),
+                                                true,
+                                            ),
+                                        };
+                                        let tab_id = match tab {
+                                            CenterTab::Terminal(id) => ("center-tab-terminal", id),
+                                            CenterTab::Diff(id) => ("center-tab-diff", id),
+                                            CenterTab::Logs => ("center-tab-logs", 0),
+                                        };
+
                                         div()
-                                            .font_family(FONT_MONO)
-                                            .when(terminal_icon, |this| this.text_size(px(24.)))
-                                            .when(!terminal_icon, |this| this.text_xs())
-                                            .text_color(rgb(if is_active {
-                                                theme.text_primary
+                                            .id(tab_id)
+                                            .group("tab")
+                                            .relative()
+                                            .h_full()
+                                            .cursor_pointer()
+                                            .w(px(160.))
+                                            .px_4()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .border_color(rgb(theme.border))
+                                            .bg(rgb(if is_active {
+                                                theme.tab_active_bg
                                             } else {
-                                                theme.text_muted
+                                                theme.tab_bg
                                             }))
-                                            .child(tab_icon),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(if is_active {
-                                                theme.text_primary
-                                            } else {
-                                                theme.text_muted
-                                            }))
-                                            .child(tab_label),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(match tab {
-                                                CenterTab::Terminal(id) => ("tab-close-terminal", id),
-                                                CenterTab::Diff(id) => ("tab-close-diff", id),
-                                                CenterTab::Logs => ("tab-close-logs", 0),
+                                            .child(
+                                                div()
+                                                    .font_family(FONT_MONO)
+                                                    .when(terminal_icon, |this| this.text_size(px(24.)))
+                                                    .when(!terminal_icon, |this| this.text_xs())
+                                                    .text_color(rgb(if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    }))
+                                                    .child(tab_icon),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(rgb(if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    }))
+                                                    .child(tab_label),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(match tab {
+                                                        CenterTab::Terminal(id) => ("tab-close-terminal", id),
+                                                        CenterTab::Diff(id) => ("tab-close-diff", id),
+                                                        CenterTab::Logs => ("tab-close-logs", 0),
+                                                    })
+                                                    .absolute()
+                                                    .right(px(4.))
+                                                    .top_0()
+                                                    .bottom_0()
+                                                    .w(px(24.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .font_family(FONT_MONO)
+                                                    .text_size(px(24.))
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .invisible()
+                                                    .group_hover("tab", |s| s.visible())
+                                                    .child("×")
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                                            cx.stop_propagation();
+                                                            match tab {
+                                                                CenterTab::Terminal(session_id) => {
+                                                                    if this.close_terminal_session_by_id(session_id) {
+                                                                        this.sync_daemon_session_store(cx);
+                                                                        this.terminal_scroll_handle.scroll_to_bottom();
+                                                                        window.focus(&this.terminal_focus);
+                                                                        this.focus_terminal_on_next_render = false;
+                                                                        cx.notify();
+                                                                    }
+                                                                },
+                                                                CenterTab::Diff(diff_id) => {
+                                                                    if this.close_diff_session_by_id(diff_id) {
+                                                                        cx.notify();
+                                                                    }
+                                                                },
+                                                                CenterTab::Logs => {
+                                                                    this.logs_tab_open = false;
+                                                                    this.logs_tab_active = false;
+                                                                    cx.notify();
+                                                                },
+                                                            }
+                                                        }),
+                                                    ),
+                                            )
+                                            .when(index + 1 == tab_count, |this| this.border_r_1())
+                                            .map(|this| match relation {
+                                                Some(std::cmp::Ordering::Equal) => {
+                                                    let el = this.border_r_1();
+                                                    if index == 0 { el } else { el.border_l_1() }
+                                                },
+                                                Some(std::cmp::Ordering::Less) => {
+                                                    let el = this.border_b_1();
+                                                    if index == 0 { el } else { el.border_l_1() }
+                                                },
+                                                Some(std::cmp::Ordering::Greater) => {
+                                                    this.border_r_1().border_b_1()
+                                                },
+                                                None => this.border_b_1(),
                                             })
-                                            .absolute()
-                                            .right(px(4.))
-                                            .top_0()
-                                            .bottom_0()
-                                            .w(px(24.))
+                                            .on_click(cx.listener(move |this, _, window, cx| match tab {
+                                                CenterTab::Terminal(session_id) => {
+                                                    this.logs_tab_active = false;
+                                                    this.select_terminal(session_id, window, cx);
+                                                },
+                                                CenterTab::Diff(diff_id) => {
+                                                    this.logs_tab_active = false;
+                                                    this.select_diff_tab(diff_id, cx);
+                                                },
+                                                CenterTab::Logs => {
+                                                    this.logs_tab_active = true;
+                                                    this.active_diff_session_id = None;
+                                                    cx.notify();
+                                                },
+                                            }))
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .h_full()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .px_2()
+                                    .border_l_1()
+                                    .border_color(rgb(theme.border))
+                                    .border_b_1()
+                                    .child(
+                                        div()
+                                            .id("terminal-tab-new")
+                                            .size(px(20.))
+                                            .cursor_pointer()
+                                            .rounded_sm()
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .font_family(FONT_MONO)
-                                            .text_size(px(24.))
+                                            .text_sm()
                                             .text_color(rgb(theme.text_muted))
-                                            .invisible()
-                                            .group_hover("tab", |s| s.visible())
-                                            .child("×")
+                                            .child("+")
                                             .on_mouse_down(
                                                 MouseButton::Left,
-                                                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                                    cx.stop_propagation();
-                                                    match tab {
-                                                        CenterTab::Terminal(session_id) => {
-                                                            if this.close_terminal_session_by_id(session_id) {
-                                                                this.sync_daemon_session_store(cx);
-                                                                this.terminal_scroll_handle.scroll_to_bottom();
-                                                                window.focus(&this.terminal_focus);
-                                                                this.focus_terminal_on_next_render = false;
-                                                                cx.notify();
-                                                            }
-                                                        },
-                                                        CenterTab::Diff(diff_id) => {
-                                                            if this.close_diff_session_by_id(diff_id) {
-                                                                cx.notify();
-                                                            }
-                                                        },
-                                                        CenterTab::Logs => {
-                                                            this.logs_tab_open = false;
-                                                            this.logs_tab_active = false;
-                                                            cx.notify();
-                                                        },
-                                                    }
-                                                }),
+                                                cx.listener(
+                                                    |this, _: &MouseDownEvent, window, cx| {
+                                                        this.spawn_terminal_session(window, cx)
+                                                    },
+                                                ),
                                             ),
-                                    )
-                                    .when(index + 1 == tab_count, |this| this.border_r_1())
-                                    .map(|this| match relation {
-                                        Some(std::cmp::Ordering::Equal) => {
-                                            let el = this.border_r_1();
-                                            if index == 0 { el } else { el.border_l_1() }
-                                        },
-                                        Some(std::cmp::Ordering::Less) => {
-                                            let el = this.border_b_1();
-                                            if index == 0 { el } else { el.border_l_1() }
-                                        },
-                                        Some(std::cmp::Ordering::Greater) => {
-                                            this.border_r_1().border_b_1()
-                                        },
-                                        None => this.border_b_1(),
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| match tab {
-                                        CenterTab::Terminal(session_id) => {
-                                            this.logs_tab_active = false;
-                                            this.select_terminal(session_id, window, cx);
-                                        },
-                                        CenterTab::Diff(diff_id) => {
-                                            this.logs_tab_active = false;
-                                            this.select_diff_tab(diff_id, cx);
-                                        },
-                                        CenterTab::Logs => {
-                                            this.logs_tab_active = true;
-                                            this.active_diff_session_id = None;
-                                            cx.notify();
-                                        },
-                                    }))
-                            })),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
@@ -6396,25 +6847,9 @@ impl ArborWindow {
                             .border_l_1()
                             .border_color(rgb(theme.border))
                             .border_b_1()
-                            .child(
-                                div()
-                                    .id("terminal-tab-new")
-                                    .size(px(20.))
-                                    .cursor_pointer()
-                                    .rounded_sm()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_sm()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("+")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                            this.spawn_terminal_session(window, cx)
-                                        }),
-                                    ),
-                            ),
+                            .child(preset_button(AgentPresetKind::Codex))
+                            .child(preset_button(AgentPresetKind::Claude))
+                            .child(preset_button(AgentPresetKind::OpenCode)),
                     ),
             )
             .child(
@@ -6669,6 +7104,7 @@ impl ArborWindow {
         let content: Div = match self.right_pane_tab {
             RightPaneTab::Changes => self.render_changes_content(cx),
             RightPaneTab::FileTree => self.render_file_tree(cx),
+            RightPaneTab::Presets => self.render_presets_content(cx),
         };
 
         div()
@@ -6730,6 +7166,7 @@ impl ArborWindow {
             .border_color(rgb(theme.border))
             .child(tab_button("Changes", RightPaneTab::Changes))
             .child(tab_button("Files", RightPaneTab::FileTree))
+            .child(tab_button("Presets", RightPaneTab::Presets))
     }
 
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
@@ -7003,6 +7440,116 @@ impl ArborWindow {
                         )
                 })),
         )
+    }
+
+    fn render_presets_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let active_preset = self.active_preset_tab;
+        let command = active_preset.map(|preset| self.preset_command_for_kind(preset));
+        let tab_button = |kind: AgentPresetKind| {
+            let is_active = active_preset == Some(kind);
+            let text_color = if is_active {
+                theme.text_primary
+            } else {
+                theme.text_muted
+            };
+            div()
+                .id(ElementId::Name(format!("preset-tab-{}", kind.key()).into()))
+                .flex_1()
+                .h(px(34.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .font_family(FONT_UI)
+                .bg(rgb(if is_active {
+                    theme.tab_active_bg
+                } else {
+                    theme.tab_bg
+                }))
+                .text_color(rgb(text_color))
+                .when(is_active, |this| {
+                    this.border_b_2().border_color(rgb(theme.accent))
+                })
+                .hover(|s| {
+                    s.bg(rgb(theme.panel_active_bg))
+                        .text_color(rgb(theme.text_primary))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.active_preset_tab = Some(kind);
+                        this.launch_agent_preset(kind, window, cx);
+                    }),
+                )
+                .child(agent_preset_button_content(kind, text_color))
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(34.))
+                    .flex()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .child(tab_button(AgentPresetKind::Codex))
+                    .child(tab_button(AgentPresetKind::Claude))
+                    .child(tab_button(AgentPresetKind::OpenCode)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Command"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_family(FONT_MONO)
+                                    .text_color(rgb(if command.is_some() {
+                                        theme.text_primary
+                                    } else {
+                                        theme.text_muted
+                                    }))
+                                    .child(
+                                        command.unwrap_or_else(|| {
+                                            "No preset selected yet.".to_owned()
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Clicking a preset tab starts it in a new terminal tab."),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Edit commands from macOS menu: Terminal -> Edit Presets..."),
+                    ),
+            )
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
@@ -8030,6 +8577,219 @@ impl ArborWindow {
                     ),
             )
     }
+
+    fn render_manage_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.manage_presets_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let save_disabled = modal.command.trim().is_empty();
+        let tab_button = |kind: AgentPresetKind| {
+            let is_active = modal.active_preset == kind;
+            let text_color = if is_active {
+                theme.text_primary
+            } else {
+                theme.text_muted
+            };
+            div()
+                .id(ElementId::Name(
+                    format!("preset-modal-tab-{}", kind.key()).into(),
+                ))
+                .cursor_pointer()
+                .px_3()
+                .py_1()
+                .flex()
+                .items_center()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(text_color))
+                .when(is_active, |this| {
+                    this.border_b_2().border_color(rgb(theme.accent))
+                })
+                .hover(|s| {
+                    s.bg(rgb(theme.panel_active_bg))
+                        .text_color(rgb(theme.text_primary))
+                })
+                .child(agent_preset_button_content(kind, text_color))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.update_manage_presets_modal_input(
+                        PresetsModalInputEvent::SetActivePreset(kind),
+                        cx,
+                    );
+                }))
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(620.))
+                    .max_w(px(620.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Edit Agent Preset"),
+                            )
+                            .child(
+                                action_button(theme, "close-manage-presets", "Close", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_manage_presets_modal(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_0()
+                            .border_b_1()
+                            .border_color(rgb(theme.border))
+                            .child(tab_button(AgentPresetKind::Codex))
+                            .child(tab_button(AgentPresetKind::Claude))
+                            .child(tab_button(AgentPresetKind::OpenCode)),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "preset-command-input",
+                            "Command",
+                            &modal.command,
+                            modal.active_preset.default_command(),
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_presets_modal_input(
+                                PresetsModalInputEvent::ClearError,
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Typing tips"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Tab: switch presets, Enter: save, Esc: close"),
+                            ),
+                    )
+                    .child(div().when_some(modal.error.clone(), |this, error| {
+                        this.rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0xa44949))
+                            .bg(rgb(0x4d2a2a))
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(0xffd7d7))
+                            .child(error)
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                action_button(
+                                    theme,
+                                    "preset-restore-default",
+                                    "Restore Default",
+                                    false,
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.update_manage_presets_modal_input(
+                                            PresetsModalInputEvent::RestoreDefault,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                            .child(
+                                action_button(theme, "preset-cancel", "Cancel", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_manage_presets_modal(cx);
+                                    })),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "preset-save",
+                                    "Save",
+                                    !save_disabled,
+                                    save_disabled,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.submit_manage_presets_modal(cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+    }
+}
+
+fn default_agent_presets() -> Vec<AgentPreset> {
+    AgentPresetKind::ORDER
+        .iter()
+        .copied()
+        .map(|kind| AgentPreset {
+            kind,
+            command: kind.default_command().to_owned(),
+        })
+        .collect()
+}
+
+fn normalize_agent_presets(configured: &[app_config::AgentPresetConfig]) -> Vec<AgentPreset> {
+    let mut presets = default_agent_presets();
+
+    for configured_preset in configured {
+        let Some(kind) = AgentPresetKind::from_key(&configured_preset.key) else {
+            continue;
+        };
+        let command = configured_preset.command.trim();
+        if command.is_empty() {
+            continue;
+        }
+        if let Some(preset) = presets.iter_mut().find(|preset| preset.kind == kind) {
+            preset.command = command.to_owned();
+        }
+    }
+
+    presets
 }
 
 fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
@@ -8254,6 +9014,7 @@ impl Render for ArborWindow {
             .on_key_down(cx.listener(Self::handle_global_key_down))
             .on_action(cx.listener(Self::action_spawn_terminal))
             .on_action(cx.listener(Self::action_close_active_terminal))
+            .on_action(cx.listener(Self::action_open_manage_presets))
             .on_action(cx.listener(Self::action_refresh_worktrees))
             .on_action(cx.listener(Self::action_refresh_changes))
             .on_action(cx.listener(Self::action_open_add_repository))
@@ -8310,6 +9071,31 @@ impl Render for ArborWindow {
             .child(self.render_create_modal(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
+            .child(self.render_manage_presets_modal(cx))
+            .child(div().when_some(self.theme_toast.clone(), |this, toast| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_end()
+                        .justify_end()
+                        .px_3()
+                        .pb(px(34.))
+                        .child(
+                            div()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(theme.accent))
+                                .bg(rgb(theme.panel_active_bg))
+                                .px_3()
+                                .py_2()
+                                .text_xs()
+                                .text_color(rgb(theme.text_primary))
+                                .child(toast),
+                        ),
+                )
+            }))
             .when(
                 self.quit_overlay_until
                     .is_some_and(|until| Instant::now() < until),
@@ -8386,8 +9172,7 @@ fn process_agent_ws_message(
                         "waiting" => AgentState::Waiting,
                         _ => return,
                     };
-                    let updated_at =
-                        session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+                    let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
                     let entries = vec![(cwd.to_owned(), state, updated_at)];
                     let _ = this.update(cx, |this, cx| {
                         apply_agent_ws_update(this, &entries);
@@ -8420,24 +9205,19 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
             .filter(|wt_path| cwd_path.starts_with(wt_path))
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
-        if let Some(matched_path) = best_match {
-            if let Some(worktree) = app
-                .worktrees
-                .iter_mut()
-                .find(|w| &w.path == matched_path)
-            {
-                tracing::debug!(
-                    cwd = %cwd,
-                    worktree = %worktree.path.display(),
-                    ?state,
-                    "agent activity matched"
-                );
-                worktree.agent_state = Some(*state);
-                if let Some(ts) = updated_at {
-                    worktree.last_activity_unix_ms = Some(
-                        worktree.last_activity_unix_ms.unwrap_or(0).max(*ts),
-                    );
-                }
+        if let Some(matched_path) = best_match
+            && let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path)
+        {
+            tracing::debug!(
+                cwd = %cwd,
+                worktree = %worktree.path.display(),
+                ?state,
+                "agent activity matched"
+            );
+            worktree.agent_state = Some(*state);
+            if let Some(ts) = updated_at {
+                worktree.last_activity_unix_ms =
+                    Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
             }
         }
     }
@@ -9667,6 +10447,181 @@ fn action_button(
         .text_xs()
         .text_color(rgb(text_color))
         .child(label.into())
+}
+
+fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
+    static CLAUDE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
+    static CODEX_ICON: OnceLock<Arc<Image>> = OnceLock::new();
+    static OPENCODE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
+
+    match kind {
+        AgentPresetKind::Codex => CODEX_ICON
+            .get_or_init(|| {
+                tracing::info!(
+                    preset = kind.key(),
+                    asset = preset_icon_asset_path(kind),
+                    bytes = preset_icon_bytes(kind).len(),
+                    "loading preset icon asset"
+                );
+                Arc::new(Image::from_bytes(
+                    preset_icon_format(kind),
+                    preset_icon_bytes(kind).to_vec(),
+                ))
+            })
+            .clone(),
+        AgentPresetKind::Claude => CLAUDE_ICON
+            .get_or_init(|| {
+                tracing::info!(
+                    preset = kind.key(),
+                    asset = preset_icon_asset_path(kind),
+                    bytes = preset_icon_bytes(kind).len(),
+                    "loading preset icon asset"
+                );
+                Arc::new(Image::from_bytes(
+                    preset_icon_format(kind),
+                    preset_icon_bytes(kind).to_vec(),
+                ))
+            })
+            .clone(),
+        AgentPresetKind::OpenCode => OPENCODE_ICON
+            .get_or_init(|| {
+                tracing::info!(
+                    preset = kind.key(),
+                    asset = preset_icon_asset_path(kind),
+                    bytes = preset_icon_bytes(kind).len(),
+                    "loading preset icon asset"
+                );
+                Arc::new(Image::from_bytes(
+                    preset_icon_format(kind),
+                    preset_icon_bytes(kind).to_vec(),
+                ))
+            })
+            .clone(),
+    }
+}
+
+fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
+    match kind {
+        AgentPresetKind::Codex => PRESET_ICON_CODEX_SVG,
+        AgentPresetKind::Claude => PRESET_ICON_CLAUDE_PNG,
+        AgentPresetKind::OpenCode => PRESET_ICON_OPENCODE_SVG,
+    }
+}
+
+fn preset_icon_format(kind: AgentPresetKind) -> ImageFormat {
+    match kind {
+        AgentPresetKind::Codex | AgentPresetKind::OpenCode => ImageFormat::Svg,
+        AgentPresetKind::Claude => ImageFormat::Png,
+    }
+}
+
+fn preset_icon_asset_path(kind: AgentPresetKind) -> &'static str {
+    match kind {
+        AgentPresetKind::Codex => "assets/preset-icons/codex-white.svg",
+        AgentPresetKind::Claude => "assets/preset-icons/claude.png",
+        AgentPresetKind::OpenCode => "assets/preset-icons/opencode-white.svg",
+    }
+}
+
+fn log_preset_icon_fallback_once(kind: AgentPresetKind, fallback_glyph: &'static str) {
+    static CLAUDE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
+    static CODEX_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
+    static OPENCODE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
+
+    let once = match kind {
+        AgentPresetKind::Codex => &CODEX_FALLBACK_LOGGED,
+        AgentPresetKind::Claude => &CLAUDE_FALLBACK_LOGGED,
+        AgentPresetKind::OpenCode => &OPENCODE_FALLBACK_LOGGED,
+    };
+
+    once.get_or_init(|| {
+        tracing::warn!(
+            preset = kind.key(),
+            asset = preset_icon_asset_path(kind),
+            bytes = preset_icon_bytes(kind).len(),
+            fallback = fallback_glyph,
+            "preset icon asset could not be rendered, using fallback glyph"
+        );
+        eprintln!(
+            "WARN preset icon fallback preset={} asset={} bytes={} fallback={}",
+            kind.key(),
+            preset_icon_asset_path(kind),
+            preset_icon_bytes(kind).len(),
+            fallback_glyph
+        );
+    });
+}
+
+fn log_preset_icon_render_once(kind: AgentPresetKind) {
+    static CLAUDE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
+    static CODEX_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
+    static OPENCODE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
+
+    let once = match kind {
+        AgentPresetKind::Codex => &CODEX_RENDER_LOGGED,
+        AgentPresetKind::Claude => &CLAUDE_RENDER_LOGGED,
+        AgentPresetKind::OpenCode => &OPENCODE_RENDER_LOGGED,
+    };
+
+    once.get_or_init(|| {
+        tracing::info!(
+            preset = kind.key(),
+            asset = preset_icon_asset_path(kind),
+            "preset icon render path active"
+        );
+    });
+}
+
+fn preset_icon_render_size_px(kind: AgentPresetKind) -> f32 {
+    match kind {
+        AgentPresetKind::Codex => 20.,
+        AgentPresetKind::Claude | AgentPresetKind::OpenCode => 14.,
+    }
+}
+
+fn agent_preset_button_content(kind: AgentPresetKind, text_color: u32) -> Div {
+    log_preset_icon_render_once(kind);
+    let icon = preset_icon_image(kind);
+    let icon_size = preset_icon_render_size_px(kind);
+    let icon_slot_size = icon_size.max(14.);
+    let fallback_color = match kind {
+        AgentPresetKind::Claude => 0xD97757,
+        AgentPresetKind::Codex | AgentPresetKind::OpenCode => text_color,
+    };
+    let fallback_glyph = match kind {
+        AgentPresetKind::Claude => "C",
+        AgentPresetKind::Codex | AgentPresetKind::OpenCode => kind.fallback_icon(),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .w(px(icon_slot_size))
+                .h(px(icon_slot_size))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(img(icon).size(px(icon_size)).with_fallback(move || {
+                    log_preset_icon_fallback_once(kind, fallback_glyph);
+                    div()
+                        .font_family(FONT_MONO)
+                        .text_size(px(12.))
+                        .line_height(px(12.))
+                        .text_color(rgb(fallback_color))
+                        .child(fallback_glyph)
+                        .into_any_element()
+                })),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .line_height(px(14.))
+                .text_color(rgb(text_color))
+                .child(kind.label()),
+        )
 }
 
 fn git_action_button(
@@ -11312,9 +12267,9 @@ fn install_app_menu_and_keys(cx: &mut App) {
                 MenuItem::action("New Terminal Tab", SpawnTerminal),
                 MenuItem::action("Close Terminal Tab", CloseActiveTerminal),
                 MenuItem::separator(),
+                MenuItem::action("Edit Presets...", OpenManagePresets),
+                MenuItem::separator(),
                 MenuItem::action("Use Embedded Backend", UseEmbeddedBackend),
-                MenuItem::action("Use Alacritty Backend", UseAlacrittyBackend),
-                MenuItem::action("Use Ghostty Backend", UseGhosttyBackend),
             ],
         },
         Menu {

@@ -282,8 +282,7 @@ async fn list_worktrees(
         match worktree::list(&repository_root) {
             Ok(entries) => {
                 for entry in entries {
-                    let last_activity_unix_ms =
-                        worktree::last_git_activity_ms(&entry.path);
+                    let last_activity_unix_ms = worktree::last_git_activity_ms(&entry.path);
                     worktrees.push(WorktreeDto {
                         repo_root: repository_root.display().to_string(),
                         path: entry.path.display().to_string(),
