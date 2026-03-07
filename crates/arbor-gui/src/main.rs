@@ -6633,7 +6633,11 @@ impl ArborWindow {
                                     )
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_x_hidden()
                                             .text_sm()
+                                            .whitespace_nowrap()
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
                                             } else {
