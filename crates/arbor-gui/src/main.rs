@@ -6609,6 +6609,7 @@ impl ArborWindow {
                                     .h_full()
                                     .cursor_pointer()
                                     .w(px(160.))
+                                    .overflow_hidden()
                                     .pl_4()
                                     .pr(px(28.))
                                     .flex()
