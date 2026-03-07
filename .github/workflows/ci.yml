@@ -16,8 +16,25 @@ env:
   NIGHTLY_TOOLCHAIN: nightly-2025-11-30
 
 jobs:
+  zizmor:
+    name: Workflow Security
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@v0.4.1
+        with:
+          advanced-security: false
+          online-audits: false
+
   fmt:
     name: Format
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,6 +51,8 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,6 +69,8 @@ jobs:
 
   test:
     name: Test
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -191,8 +212,14 @@ jobs:
         shell: bash
         run: |
           APP_PATH="dist/Arbor.app"
+          echo "Available signing identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
-              | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+              | { grep "Developer ID Application" || true; } | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::No 'Developer ID Application' identity found in keychain"
+            exit 1
+          fi
           echo "Signing with identity: $IDENTITY"
 
           /usr/bin/codesign --force --timestamp --options runtime \
