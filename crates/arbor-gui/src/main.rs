@@ -3285,6 +3285,34 @@ impl ArborWindow {
 
     fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.selected_file_tree_entry = Some(path.clone());
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let is_image = matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg" | "tiff" | "tif"
+        );
+
+        if !is_image {
+            if let Ok(editor) = env::var("EDITOR") {
+                if let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf)
+                {
+                    let full_path = worktree_path.join(&path);
+                    if let Err(error) =
+                        Command::new(&editor).arg(&full_path).spawn()
+                    {
+                        self.notice =
+                            Some(format!("Failed to open $EDITOR ({editor}): {error}"));
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
         self.open_file_view_tab(path, cx);
         cx.notify();
     }
@@ -4357,6 +4385,9 @@ impl ArborWindow {
 
         self.sync_daemon_session_store(cx);
         self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
+        self.file_view_editing = false;
+        self.logs_tab_active = false;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
@@ -9267,6 +9298,12 @@ fn render_file_view_session(
             };
             let highlighted = highlighted.clone();
             let raw_lines_clone = raw_lines.clone();
+            let click_raw_lines = raw_lines.clone();
+            let click_line_count = line_count;
+            let click_scroll_handle = scroll_handle.clone();
+            let line_number_width = line_count.to_string().len().max(3);
+            let gutter_px =
+                (line_number_width + 2) as f32 * DIFF_FONT_SIZE_PX * 0.6 + 8.0; // +8 for pl_2
             let body = div()
                 .id(("file-view-scroll", session_id))
                 .flex_1()
@@ -9275,9 +9312,42 @@ fn render_file_view_session(
                 .cursor_text()
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.file_view_editing = true;
                         this.right_pane_search_active = false;
+
+                        // Compute clicked line and column from mouse position
+                        let state = click_scroll_handle.0.borrow();
+                        let bounds = state.base_handle.bounds();
+                        let offset = state.base_handle.offset();
+                        drop(state);
+
+                        let local_y =
+                            f32::from(event.position.y - bounds.top()).max(0.);
+                        let content_y = (local_y - f32::from(offset.y)).max(0.);
+                        let clicked_line = ((content_y / DIFF_ROW_HEIGHT_PX).floor()
+                            as usize)
+                            .min(click_line_count.saturating_sub(1));
+
+                        let local_x =
+                            (f32::from(event.position.x - bounds.left()) - gutter_px)
+                                .max(0.);
+                        let char_width = DIFF_FONT_SIZE_PX * 0.6;
+                        let clicked_col = (local_x / char_width).floor() as usize;
+
+                        let max_col = click_raw_lines
+                            .get(clicked_line)
+                            .map(|l| l.chars().count())
+                            .unwrap_or(0);
+
+                        if let Some(session) = this
+                            .file_view_sessions
+                            .iter_mut()
+                            .find(|s| s.id == session_id)
+                        {
+                            session.cursor.line = clicked_line;
+                            session.cursor.col = clicked_col.min(max_col);
+                        }
                         cx.notify();
                     }),
                 )
