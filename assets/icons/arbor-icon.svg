@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#1b6b3c"/>
+      <stop offset="100%" stop-color="#2d9060"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0.32" cy="0.22" r="0.8">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.09)"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0.04)"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="228" ry="228" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="228" ry="228" fill="url(#shine)"/>
+
+  <!--
+    Git-tree / arbor structure:
+    A main trunk line going up, with branches forking left and right.
+    Nodes (circles) at each commit/fork point.
+    Reads as both a tree and a git graph.
+  -->
+
+  <g stroke="#f2ede6" fill="none" stroke-linecap="round">
+    <!-- Main trunk (bottom to top) -->
+    <line x1="512" y1="820" x2="512" y2="200" stroke-width="44"/>
+
+    <!-- Branch left-1 (from trunk at y=620) -->
+    <path d="M 512 620 C 480 590, 400 560, 330 540" stroke-width="32"/>
+
+    <!-- Branch right-1 (from trunk at y=500) -->
+    <path d="M 512 500 C 544 470, 630 440, 700 420" stroke-width="32"/>
+
+    <!-- Branch left-2 (from trunk at y=380) -->
+    <path d="M 512 380 C 475 350, 380 310, 310 290" stroke-width="32"/>
+
+    <!-- Branch right-2 (from trunk at y=280) - smaller -->
+    <path d="M 512 280 C 540 260, 600 240, 650 230" stroke-width="26"/>
+
+    <!-- Sub-branch from left-1 -->
+    <path d="M 370 555 C 350 530, 300 490, 260 470" stroke-width="22"/>
+
+    <!-- Sub-branch from left-2 going further left-up -->
+    <path d="M 350 305 C 330 280, 280 250, 240 230" stroke-width="22"/>
+  </g>
+
+  <!-- Nodes (git commits / tree forks) -->
+  <g fill="#ffffff">
+    <!-- Main trunk nodes -->
+    <circle cx="512" cy="820" r="18"/>
+    <circle cx="512" cy="620" r="18"/>
+    <circle cx="512" cy="500" r="18"/>
+    <circle cx="512" cy="380" r="18"/>
+    <circle cx="512" cy="280" r="16"/>
+    <circle cx="512" cy="200" r="14"/>
+
+    <!-- Branch endpoint nodes -->
+    <circle cx="330" cy="540" r="16"/>
+    <circle cx="700" cy="420" r="16"/>
+    <circle cx="310" cy="290" r="16"/>
+    <circle cx="650" cy="230" r="14"/>
+
+    <!-- Sub-branch endpoints -->
+    <circle cx="260" cy="470" r="13"/>
+    <circle cx="240" cy="230" r="13"/>
+  </g>
+
+  <!-- Subtle leaf accents on branch tips (small green circles behind white nodes) -->
+  <g fill="#a8e0bc" opacity="0.6">
+    <circle cx="512" cy="200" r="30"/>
+    <circle cx="330" cy="540" r="28"/>
+    <circle cx="700" cy="420" r="28"/>
+    <circle cx="310" cy="290" r="28"/>
+    <circle cx="650" cy="230" r="24"/>
+    <circle cx="260" cy="470" r="22"/>
+    <circle cx="240" cy="230" r="22"/>
+  </g>
+
+  <!-- Re-draw nodes on top of leaf accents -->
+  <g fill="#ffffff">
+    <circle cx="512" cy="820" r="18"/>
+    <circle cx="512" cy="620" r="18"/>
+    <circle cx="512" cy="500" r="18"/>
+    <circle cx="512" cy="380" r="18"/>
+    <circle cx="512" cy="280" r="16"/>
+    <circle cx="512" cy="200" r="14"/>
+    <circle cx="330" cy="540" r="16"/>
+    <circle cx="700" cy="420" r="16"/>
+    <circle cx="310" cy="290" r="16"/>
+    <circle cx="650" cy="230" r="14"/>
+    <circle cx="260" cy="470" r="13"/>
+    <circle cx="240" cy="230" r="13"/>
+  </g>
+</svg>
