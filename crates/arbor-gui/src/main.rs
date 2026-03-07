@@ -12516,6 +12516,53 @@ mod tests {
     }
 
     #[test]
+    fn truncate_with_ellipsis_short_string_unchanged() {
+        let result = crate::truncate_with_ellipsis("hello", 11);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_exact_limit_unchanged() {
+        let result = crate::truncate_with_ellipsis("12345678901", 11);
+        assert_eq!(result, "12345678901");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_over_limit_adds_ellipsis() {
+        let result = crate::truncate_with_ellipsis("123456789012", 11);
+        assert_eq!(result, "1234567890\u{2026}");
+        assert_eq!(result.chars().count(), 11);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_tab_label_cases() {
+        // These are the actual tab titles that need to show "…"
+        let cases = [
+            "nvim: CHANGELOG.md",
+            "nvim: CLAUDE.md",
+            "nvim: Cargo.lock",
+            "nvim: Cargo.toml",
+            "nvim: clippy.toml",
+            "nvim: LICENSE",
+            "nvim: AGENTS.md",
+        ];
+        for title in cases {
+            let result = crate::truncate_with_ellipsis(title, 11);
+            assert!(
+                result.chars().count() <= 11,
+                "'{result}' from '{title}' is {} chars, exceeds 11",
+                result.chars().count()
+            );
+            if title.chars().count() > 11 {
+                assert!(
+                    result.ends_with('\u{2026}'),
+                    "'{result}' from '{title}' should end with ellipsis"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn side_by_side_diff_hides_large_unchanged_gaps() {
         let before = "a1\na2\na3\na4\na5\na6\na7\na8\na9\na10\n";
         let after = "a1\na2\na3\na4\na5\nchanged\na7\na8\na9\na10\n";
