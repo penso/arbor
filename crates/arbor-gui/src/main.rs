@@ -6595,6 +6595,7 @@ impl ArborWindow {
                                         true,
                                     ),
                                 };
+                                let tab_label = truncate_with_ellipsis(&tab_label, 11);
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                     CenterTab::Diff(id) => ("center-tab-diff", id),
@@ -6609,7 +6610,6 @@ impl ArborWindow {
                                     .h_full()
                                     .cursor_pointer()
                                     .w(px(160.))
-                                    .overflow_hidden()
                                     .pl_4()
                                     .pr(px(28.))
                                     .flex()
@@ -6635,11 +6635,6 @@ impl ArborWindow {
                                     )
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
                                             .text_sm()
                                             .text_color(rgb(if is_active {
                                                 theme.text_primary
