@@ -2057,27 +2057,19 @@ impl ArborWindow {
                 .detach();
 
                 let first = rx.recv().await;
-                match first {
-                    Ok(Some(text)) => {
-                        tracing::info!("agent activity WS connected");
-                        backoff_secs = 3;
-                        let _ = this.update(cx, |this, _| {
-                            this.agent_ws_connected = true;
-                        });
-                        // Process the first message
-                        process_agent_ws_message(&this, cx, &text);
+                if let Ok(Some(text)) = first {
+                    tracing::info!("agent activity WS connected");
+                    backoff_secs = 3;
+                    let _ = this.update(cx, |this, _| {
+                        this.agent_ws_connected = true;
+                    });
+                    // Process the first message
+                    process_agent_ws_message(&this, cx, &text);
 
-                        // Process subsequent messages
-                        loop {
-                            match rx.recv().await {
-                                Ok(Some(text)) => {
-                                    process_agent_ws_message(&this, cx, &text);
-                                },
-                                Ok(None) | Err(_) => break,
-                            }
-                        }
-                    },
-                    _ => {},
+                    // Process subsequent messages
+                    while let Ok(Some(text)) = rx.recv().await {
+                        process_agent_ws_message(&this, cx, &text);
+                    }
                 }
 
                 tracing::debug!("agent activity WS disconnected, will retry");
@@ -3133,7 +3125,11 @@ impl ArborWindow {
             target,
             label,
             branch: worktree::short_branch(&branch),
-            has_unpushed: if worktree_index.is_some() { None } else { Some(false) },
+            has_unpushed: if worktree_index.is_some() {
+                None
+            } else {
+                Some(false)
+            },
             delete_branch: false,
             is_deleting: false,
             error: None,
@@ -3141,24 +3137,22 @@ impl ArborWindow {
         cx.notify();
 
         // For worktrees, spawn async check for unpushed commits.
-        if let Some(worktree_index) = worktree_index {
-            if let Some(wt) = self.worktrees.get(worktree_index) {
-                let wt_path = wt.path.clone();
-                cx.spawn(async move |this, cx| {
-                    let has_unpushed = cx
-                        .background_spawn(async move {
-                            worktree::has_unpushed_commits(&wt_path)
-                        })
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if let Some(modal) = this.delete_modal.as_mut() {
-                            modal.has_unpushed = Some(has_unpushed);
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
+        if let Some(worktree_index) = worktree_index
+            && let Some(wt) = self.worktrees.get(worktree_index)
+        {
+            let wt_path = wt.path.clone();
+            cx.spawn(async move |this, cx| {
+                let has_unpushed = cx
+                    .background_spawn(async move { worktree::has_unpushed_commits(&wt_path) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(modal) = this.delete_modal.as_mut() {
+                        modal.has_unpushed = Some(has_unpushed);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
     }
 
@@ -3706,11 +3700,11 @@ impl ArborWindow {
                     cx.stop_propagation();
                 },
                 "space" | " " => {
-                    if let Some(modal) = self.delete_modal.as_mut() {
-                        if matches!(modal.target, DeleteTarget::Worktree(_)) {
-                            modal.delete_branch = !modal.delete_branch;
-                            cx.notify();
-                        }
+                    if let Some(modal) = self.delete_modal.as_mut()
+                        && matches!(modal.target, DeleteTarget::Worktree(_))
+                    {
+                        modal.delete_branch = !modal.delete_branch;
+                        cx.notify();
                     }
                     cx.stop_propagation();
                 },
@@ -8386,8 +8380,7 @@ fn process_agent_ws_message(
                         "waiting" => AgentState::Waiting,
                         _ => return,
                     };
-                    let updated_at =
-                        session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+                    let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
                     let entries = vec![(cwd.to_owned(), state, updated_at)];
                     let _ = this.update(cx, |this, cx| {
                         apply_agent_ws_update(this, &entries);
@@ -8420,24 +8413,19 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
             .filter(|wt_path| cwd_path.starts_with(wt_path))
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
-        if let Some(matched_path) = best_match {
-            if let Some(worktree) = app
-                .worktrees
-                .iter_mut()
-                .find(|w| &w.path == matched_path)
-            {
-                tracing::debug!(
-                    cwd = %cwd,
-                    worktree = %worktree.path.display(),
-                    ?state,
-                    "agent activity matched"
-                );
-                worktree.agent_state = Some(*state);
-                if let Some(ts) = updated_at {
-                    worktree.last_activity_unix_ms = Some(
-                        worktree.last_activity_unix_ms.unwrap_or(0).max(*ts),
-                    );
-                }
+        if let Some(matched_path) = best_match
+            && let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path)
+        {
+            tracing::debug!(
+                cwd = %cwd,
+                worktree = %worktree.path.display(),
+                ?state,
+                "agent activity matched"
+            );
+            worktree.agent_state = Some(*state);
+            if let Some(ts) = updated_at {
+                worktree.last_activity_unix_ms =
+                    Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
             }
         }
     }

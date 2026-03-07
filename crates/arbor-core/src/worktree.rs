@@ -248,11 +248,11 @@ pub fn has_unpushed_commits(path: &Path) -> bool {
     // Try upstream comparison first.
     let mut cmd = base_git_command(path);
     cmd.args(["log", "@{u}..HEAD", "--oneline"]);
-    if let Ok(output) = cmd.output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return !stdout.trim().is_empty();
-        }
+    if let Ok(output) = cmd.output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return !stdout.trim().is_empty();
     }
 
     // No upstream — check for commits not on any remote branch.
