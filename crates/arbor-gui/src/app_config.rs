@@ -14,6 +14,7 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # terminal_backend = "embedded" # embedded | alacritty | ghostty
 # theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark
 # daemon_url = "http://127.0.0.1:8787" # arbor-httpd base URL
+# notifications = true
 
 # [[remote_hosts]]
 # name = "build-server"
@@ -33,6 +34,7 @@ pub struct ArborConfig {
     pub terminal_backend: Option<String>,
     pub theme: Option<String>,
     pub daemon_url: Option<String>,
+    pub notifications: Option<bool>,
     pub remote_hosts: Vec<RemoteHostConfig>,
 }
 
