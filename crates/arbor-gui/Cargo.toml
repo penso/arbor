@@ -31,6 +31,7 @@ syntect = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tungstenite = "0.28"
 ureq = { workspace = true }
 
 [lints]

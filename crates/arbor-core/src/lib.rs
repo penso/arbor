@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod changes;
 pub mod daemon;
 pub mod outpost;

@@ -4,6 +4,7 @@ mod terminal_daemon;
 use {
     crate::terminal_daemon::{LocalTerminalDaemon, LocalTerminalDaemonError, SessionEvent},
     arbor_core::{
+        agent::AgentState,
         daemon::{
             CreateOrAttachRequest, DaemonSessionRecord, DetachRequest, JsonDaemonSessionStore,
             KillRequest, ResizeRequest, SignalRequest, SnapshotRequest, TerminalDaemon,
@@ -24,19 +25,53 @@ use {
     futures_util::StreamExt,
     serde::{Deserialize, Serialize},
     std::{
+        collections::HashMap,
         net::SocketAddr,
         path::{Path, PathBuf},
         process::Command,
         sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
     },
     tokio::sync::Mutex,
     tower_http::services::{ServeDir, ServeFile},
 };
 
+const AGENT_SESSION_EXPIRY_SECS: u64 = 300;
+
 #[derive(Clone)]
 struct AppState {
     repository_store_path: PathBuf,
     daemon: Arc<Mutex<LocalTerminalDaemon>>,
+    agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
+    agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentSession {
+    cwd: String,
+    state: AgentState,
+    updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgentNotifyRequest {
+    hook_event_name: String,
+    session_id: String,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum AgentWsEvent {
+    Snapshot { sessions: Vec<AgentSessionDto> },
+    Update { session: AgentSessionDto },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentSessionDto {
+    cwd: String,
+    state: String,
+    updated_at_unix_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,9 +183,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let daemon_store = JsonDaemonSessionStore::default();
+    let (agent_broadcast, _) = tokio::sync::broadcast::channel::<AgentWsEvent>(64);
     let state = AppState {
         repository_store_path: repository_store::default_repository_store_path(),
         daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(daemon_store))),
+        agent_sessions: Arc::new(Mutex::new(HashMap::new())),
+        agent_broadcast,
     };
 
     let app = router(
@@ -186,7 +224,9 @@ fn router(state: AppState, web_ui_available: bool) -> Router {
         .route("/terminals/{session_id}/signal", post(signal_terminal))
         .route("/terminals/{session_id}/detach", post(detach_terminal))
         .route("/terminals/{session_id}", delete(kill_terminal))
-        .route("/terminals/{session_id}/ws", get(terminal_ws));
+        .route("/terminals/{session_id}/ws", get(terminal_ws))
+        .route("/agent/notify", post(agent_notify))
+        .route("/agent/activity/ws", get(agent_activity_ws));
 
     let with_state = Router::new().nest("/api/v1", api).with_state(state);
 
@@ -601,6 +641,99 @@ async fn process_ws_client_message(
 
 async fn send_ws_event(socket: &mut WebSocket, event: WsServerEvent) -> Result<(), ()> {
     let payload = serde_json::to_string(&event).map_err(|_| ())?;
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|_| ())
+}
+
+async fn agent_notify(
+    State(state): State<AppState>,
+    Json(request): Json<AgentNotifyRequest>,
+) -> StatusCode {
+    let agent_state = match request.hook_event_name.as_str() {
+        "UserPromptSubmit" => AgentState::Working,
+        "Stop" => AgentState::Waiting,
+        _ => return StatusCode::OK,
+    };
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let dto = {
+        let mut sessions = state.agent_sessions.lock().await;
+
+        // Expire stale sessions
+        let cutoff = now_ms.saturating_sub(AGENT_SESSION_EXPIRY_SECS * 1000);
+        sessions.retain(|_, session| session.updated_at_unix_ms > cutoff);
+
+        sessions.insert(request.session_id, AgentSession {
+            cwd: request.cwd.clone(),
+            state: agent_state,
+            updated_at_unix_ms: now_ms,
+        });
+
+        AgentSessionDto {
+            cwd: request.cwd,
+            state: match agent_state {
+                AgentState::Working => "working".to_owned(),
+                AgentState::Waiting => "waiting".to_owned(),
+            },
+            updated_at_unix_ms: now_ms,
+        }
+    };
+
+    let _ = state
+        .agent_broadcast
+        .send(AgentWsEvent::Update { session: dto });
+
+    StatusCode::OK
+}
+
+async fn agent_activity_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| handle_agent_activity_ws(state, socket))
+        .into_response()
+}
+
+async fn handle_agent_activity_ws(state: AppState, mut socket: WebSocket) {
+    let snapshot = {
+        let sessions = state.agent_sessions.lock().await;
+        let dtos: Vec<AgentSessionDto> = sessions
+            .values()
+            .map(|session| AgentSessionDto {
+                cwd: session.cwd.clone(),
+                state: match session.state {
+                    AgentState::Working => "working".to_owned(),
+                    AgentState::Waiting => "waiting".to_owned(),
+                },
+                updated_at_unix_ms: session.updated_at_unix_ms,
+            })
+            .collect();
+        AgentWsEvent::Snapshot { sessions: dtos }
+    };
+
+    if send_ws_json(&mut socket, &snapshot).await.is_err() {
+        return;
+    }
+
+    let mut rx = state.agent_broadcast.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                if send_ws_json(&mut socket, &event).await.is_err() {
+                    break;
+                }
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn send_ws_json(socket: &mut WebSocket, value: &impl Serialize) -> Result<(), ()> {
+    let payload = serde_json::to_string(value).map_err(|_| ())?;
     socket
         .send(Message::Text(payload.into()))
         .await

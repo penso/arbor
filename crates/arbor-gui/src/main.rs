@@ -11,6 +11,7 @@ mod ui_state_store;
 
 use {
     arbor_core::{
+        agent::AgentState,
         changes::{self, ChangeKind, ChangedFile},
         daemon::{
             self, CreateOrAttachRequest, DaemonSessionRecord, DetachRequest, KillRequest,
@@ -157,6 +158,7 @@ struct WorktreeSummary {
     pr_number: Option<u64>,
     pr_url: Option<String>,
     diff_summary: Option<changes::DiffLineSummary>,
+    agent_state: Option<AgentState>,
 }
 
 #[derive(Debug, Clone)]
@@ -593,6 +595,7 @@ struct ArborWindow {
     logs_tab_open: bool,
     logs_tab_active: bool,
     quit_overlay_until: Option<Instant>,
+    agent_ws_connected: bool,
 }
 
 impl ArborWindow {
@@ -687,6 +690,7 @@ impl ArborWindow {
                     logs_tab_open: false,
                     logs_tab_active: false,
                     quit_overlay_until: None,
+                    agent_ws_connected: false,
                 };
             },
         };
@@ -763,6 +767,7 @@ impl ArborWindow {
                     logs_tab_open: false,
                     logs_tab_active: false,
                     quit_overlay_until: None,
+                    agent_ws_connected: false,
                 };
             },
         };
@@ -951,6 +956,7 @@ impl ArborWindow {
             logs_tab_open: false,
             logs_tab_active: false,
             quit_overlay_until: None,
+            agent_ws_connected: false,
         };
 
         app.refresh_worktrees(cx);
@@ -962,6 +968,8 @@ impl ArborWindow {
         app.start_worktree_auto_refresh(cx);
         app.start_github_pr_auto_refresh(cx);
         app.start_config_auto_refresh(cx);
+        app.start_agent_activity_ws(cx);
+        app.ensure_claude_code_hooks(cx);
         app
     }
 
@@ -1024,6 +1032,7 @@ impl ArborWindow {
                     }
 
                     this.refresh_worktree_diff_summaries(cx);
+                    this.refresh_agent_activity(cx);
                     if this.active_outpost_index.is_some() {
                         this.refresh_remote_changed_files(cx);
                     } else if this.reload_changed_files() {
@@ -1769,6 +1778,15 @@ impl ArborWindow {
                     .map(|pr_url| (worktree.path.clone(), pr_url.clone()))
             })
             .collect();
+        let previous_agent_states: HashMap<PathBuf, AgentState> = self
+            .worktrees
+            .iter()
+            .filter_map(|worktree| {
+                worktree
+                    .agent_state
+                    .map(|state| (worktree.path.clone(), state))
+            })
+            .collect();
 
         let mut refresh_errors = Vec::new();
         let mut next_worktrees = Vec::new();
@@ -1792,6 +1810,7 @@ impl ArborWindow {
             worktree.diff_summary = previous_summaries.get(&worktree.path).copied();
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
+            worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
         }
 
         let rows_changed = worktree_rows_changed(&self.worktrees, &next_worktrees);
@@ -1914,6 +1933,139 @@ impl ArborWindow {
                     cx.notify();
                 }
             });
+        })
+        .detach();
+    }
+
+    fn refresh_agent_activity(&mut self, cx: &mut Context<Self>) {
+        if self.agent_ws_connected {
+            return;
+        }
+
+        let worktree_paths: Vec<PathBuf> = self
+            .worktrees
+            .iter()
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        if worktree_paths.is_empty() {
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let active_worktrees = cx
+                .background_spawn(async move {
+                    let cwds = arbor_core::agent::detect_agent_cwds();
+                    arbor_core::agent::worktrees_with_agents(&cwds, &worktree_paths)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
+                for worktree in &mut this.worktrees {
+                    let new_state = if active_worktrees.contains(&worktree.path) {
+                        Some(AgentState::Working)
+                    } else {
+                        None
+                    };
+                    if worktree.agent_state != new_state {
+                        worktree.agent_state = new_state;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn start_agent_activity_ws(&mut self, cx: &mut Context<Self>) {
+        let daemon_base_url = self.daemon_base_url.clone();
+        cx.spawn(async move |this, cx| {
+            let ws_url = daemon_base_url
+                .replace("http://", "ws://")
+                .replace("https://", "wss://")
+                + "/api/v1/agent/activity/ws";
+
+            let mut backoff_secs = 3u64;
+
+            loop {
+                let url = ws_url.clone();
+                let (tx, rx) = smol::channel::unbounded::<Option<String>>();
+
+                cx.background_spawn(async move {
+                    let Ok((mut ws, _)) = tungstenite::connect(&url) else {
+                        let _ = tx.send(None).await;
+                        return;
+                    };
+                    loop {
+                        match ws.read() {
+                            Ok(tungstenite::Message::Text(text)) => {
+                                if tx.send(Some(text.to_string())).await.is_err() {
+                                    break;
+                                }
+                            },
+                            Ok(tungstenite::Message::Ping(_))
+                            | Ok(tungstenite::Message::Pong(_)) => {},
+                            Ok(tungstenite::Message::Close(_)) | Err(_) => {
+                                let _ = tx.send(None).await;
+                                break;
+                            },
+                            _ => {},
+                        }
+                    }
+                })
+                .detach();
+
+                let first = rx.recv().await;
+                match first {
+                    Ok(Some(text)) => {
+                        tracing::info!("agent activity WS connected");
+                        backoff_secs = 3;
+                        let _ = this.update(cx, |this, _| {
+                            this.agent_ws_connected = true;
+                        });
+                        // Process the first message
+                        process_agent_ws_message(&this, cx, &text);
+
+                        // Process subsequent messages
+                        loop {
+                            match rx.recv().await {
+                                Ok(Some(text)) => {
+                                    process_agent_ws_message(&this, cx, &text);
+                                },
+                                Ok(None) | Err(_) => break,
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+
+                tracing::debug!("agent activity WS disconnected, will retry");
+                let _ = this.update(cx, |this, _| {
+                    this.agent_ws_connected = false;
+                });
+
+                cx.background_spawn(async move {
+                    std::thread::sleep(Duration::from_secs(backoff_secs));
+                })
+                .await;
+                backoff_secs = (backoff_secs * 2).min(30);
+            }
+        })
+        .detach();
+    }
+
+    fn ensure_claude_code_hooks(&self, cx: &mut Context<Self>) {
+        let daemon_base_url = self.daemon_base_url.clone();
+        cx.spawn(async move |_this, cx| {
+            cx.background_spawn(async move {
+                if let Err(error) = install_claude_code_hooks(&daemon_base_url) {
+                    tracing::warn!(%error, "failed to install Claude Code hooks");
+                }
+            })
+            .await;
         })
         .detach();
     }
@@ -5136,6 +5288,23 @@ impl ArborWindow {
                                 .enumerate()
                                 .filter(|(_, worktree)| worktree.repo_root == repository.root)
                                 .collect();
+                            let repo_agent_dot_color = if is_collapsed {
+                                if repo_worktrees
+                                    .iter()
+                                    .any(|(_, wt)| wt.agent_state == Some(AgentState::Working))
+                                {
+                                    Some(0xe5c07b_u32)
+                                } else if repo_worktrees
+                                    .iter()
+                                    .any(|(_, wt)| wt.agent_state == Some(AgentState::Waiting))
+                                {
+                                    Some(0x61afef_u32)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
                             let repo_outposts: Vec<(usize, OutpostSummary)> = self
                                 .outposts
                                 .iter()
@@ -5275,6 +5444,15 @@ impl ArborWindow {
                                                         )),
                                                 ),
                                         )
+                                        .when_some(repo_agent_dot_color, |this, color| {
+                                            this.child(
+                                                div()
+                                                    .flex_none()
+                                                    .size(px(6.))
+                                                    .rounded_full()
+                                                    .bg(rgb(color)),
+                                            )
+                                        })
                                         .child(
                                             div()
                                                 .id(("repository-add-worktree", repository_index))
@@ -5319,6 +5497,11 @@ impl ArborWindow {
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
                                                 let show_name = worktree.label != worktree.branch;
+                                                let agent_dot_color = match worktree.agent_state {
+                                                    Some(AgentState::Working) => Some(0xe5c07b_u32),
+                                                    Some(AgentState::Waiting) => Some(0x61afef_u32),
+                                                    None => None,
+                                                };
                                                 let checkout_icon = if worktree.is_primary_checkout
                                                 {
                                                     "◦"
@@ -5371,6 +5554,15 @@ impl ArborWindow {
                                                                             ))
                                                                             .child(checkout_icon),
                                                                     )
+                                                                    .when_some(agent_dot_color, |this, color| {
+                                                                        this.child(
+                                                                            div()
+                                                                                .flex_none()
+                                                                                .size(px(6.))
+                                                                                .rounded_full()
+                                                                                .bg(rgb(color)),
+                                                                        )
+                                                                    })
                                                                     .child(
                                                                         div().min_w_0().flex_1().when(
                                                                             show_name,
@@ -7543,6 +7735,7 @@ impl WorktreeSummary {
             pr_number: None,
             pr_url: None,
             diff_summary: None,
+            agent_state: None,
         }
     }
 }
@@ -7669,6 +7862,167 @@ impl Render for ArborWindow {
                 },
             )
     }
+}
+
+fn process_agent_ws_message(
+    this: &gpui::WeakEntity<ArborWindow>,
+    cx: &mut gpui::AsyncApp,
+    text: &str,
+) {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(text);
+    let Ok(value) = parsed else {
+        return;
+    };
+
+    let msg_type = value.get("type").and_then(|v| v.as_str());
+    match msg_type {
+        Some("snapshot") => {
+            let sessions = value
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let entries: Vec<(String, AgentState)> = sessions
+                .iter()
+                .filter_map(|s| {
+                    let cwd = s.get("cwd")?.as_str()?;
+                    let state_str = s.get("state")?.as_str()?;
+                    let state = match state_str {
+                        "working" => AgentState::Working,
+                        "waiting" => AgentState::Waiting,
+                        _ => return None,
+                    };
+                    Some((cwd.to_owned(), state))
+                })
+                .collect();
+            let _ = this.update(cx, |this, cx| {
+                apply_agent_ws_snapshot(this, &entries);
+                cx.notify();
+            });
+        },
+        Some("update") => {
+            if let Some(session) = value.get("session") {
+                let cwd = session.get("cwd").and_then(|v| v.as_str());
+                let state_str = session.get("state").and_then(|v| v.as_str());
+                if let (Some(cwd), Some(state_str)) = (cwd, state_str) {
+                    let state = match state_str {
+                        "working" => AgentState::Working,
+                        "waiting" => AgentState::Waiting,
+                        _ => return,
+                    };
+                    let entries = vec![(cwd.to_owned(), state)];
+                    let _ = this.update(cx, |this, cx| {
+                        apply_agent_ws_update(this, &entries);
+                        cx.notify();
+                    });
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState)]) {
+    tracing::debug!(count = entries.len(), "agent WS snapshot received");
+    for worktree in &mut app.worktrees {
+        worktree.agent_state = None;
+    }
+    apply_agent_ws_update(app, entries);
+}
+
+fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState)]) {
+    let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
+
+    for (cwd, state) in entries {
+        let cwd_path = Path::new(cwd);
+        // Find the most specific (longest) worktree path that is a prefix of this cwd,
+        // same logic as worktrees_with_agents().
+        let best_match = worktree_paths
+            .iter()
+            .filter(|wt_path| cwd_path.starts_with(wt_path))
+            .max_by_key(|wt_path| wt_path.as_os_str().len());
+
+        if let Some(matched_path) = best_match {
+            if let Some(worktree) = app
+                .worktrees
+                .iter_mut()
+                .find(|w| &w.path == matched_path)
+            {
+                tracing::debug!(
+                    cwd = %cwd,
+                    worktree = %worktree.path.display(),
+                    ?state,
+                    "agent activity matched"
+                );
+                worktree.agent_state = Some(*state);
+            }
+        }
+    }
+}
+
+fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
+    let home = env::var("HOME").map_err(|_| "HOME not set".to_owned())?;
+    let claude_dir = PathBuf::from(&home).join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .map_err(|e| format!("failed to read settings.json: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("failed to parse settings.json: {e}"))?
+    } else {
+        if !claude_dir.exists() {
+            fs::create_dir_all(&claude_dir)
+                .map_err(|e| format!("failed to create .claude dir: {e}"))?;
+        }
+        serde_json::json!({})
+    };
+
+    let notify_url = format!("{daemon_base_url}/api/v1/agent/notify");
+
+    // Check if our hooks are already present
+    if let Some(hooks) = settings.get("hooks") {
+        let hooks_str = hooks.to_string();
+        if hooks_str.contains("/api/v1/agent/notify") {
+            tracing::debug!("Claude Code hooks already installed");
+            return Ok(());
+        }
+    }
+
+    let hook_entry = serde_json::json!([
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "http",
+                    "url": notify_url,
+                    "timeout": 2
+                }
+            ]
+        }
+    ]);
+
+    let hooks = settings
+        .as_object_mut()
+        .ok_or("settings.json is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+
+    let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
+
+    if !hooks_obj.contains_key("UserPromptSubmit") {
+        hooks_obj.insert("UserPromptSubmit".to_owned(), hook_entry.clone());
+    }
+    if !hooks_obj.contains_key("Stop") {
+        hooks_obj.insert("Stop".to_owned(), hook_entry);
+    }
+
+    let serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("failed to serialize settings: {e}"))?;
+    fs::write(&settings_path, serialized)
+        .map_err(|e| format!("failed to write settings.json: {e}"))?;
+
+    tracing::info!(path = %settings_path.display(), "installed Claude Code hooks");
+    Ok(())
 }
 
 fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary]) -> bool {
