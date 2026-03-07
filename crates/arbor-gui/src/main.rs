@@ -727,6 +727,7 @@ enum HostsModalInputEvent {
 enum DeleteTarget {
     Worktree(usize),
     Outpost(usize),
+    Repository(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -738,6 +739,16 @@ struct DeleteModal {
     delete_branch: bool,
     is_deleting: bool,
     error: Option<String>,
+}
+
+struct RepositoryContextMenu {
+    repository_index: usize,
+    position: gpui::Point<gpui::Pixels>,
+}
+
+struct WorktreeContextMenu {
+    worktree_index: usize,
+    position: gpui::Point<gpui::Pixels>,
 }
 
 struct CreatedWorktree {
@@ -820,6 +831,8 @@ struct ArborWindow {
     selected_file_tree_entry: Option<PathBuf>,
     left_pane_visible: bool,
     collapsed_repositories: HashSet<usize>,
+    repository_context_menu: Option<RepositoryContextMenu>,
+    worktree_context_menu: Option<WorktreeContextMenu>,
     worktree_nav_back: Vec<usize>,
     worktree_nav_forward: Vec<usize>,
     log_buffer: log_layer::LogBuffer,
@@ -998,6 +1011,8 @@ impl ArborWindow {
                     selected_file_tree_entry: None,
                     left_pane_visible: true,
                     collapsed_repositories: HashSet::new(),
+                    repository_context_menu: None,
+                    worktree_context_menu: None,
                     worktree_nav_back: Vec::new(),
                     worktree_nav_forward: Vec::new(),
                     log_buffer: log_buffer.clone(),
@@ -1205,6 +1220,8 @@ impl ArborWindow {
             terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
+            repository_context_menu: None,
+            worktree_context_menu: None,
             worktree_nav_back: Vec::new(),
             worktree_nav_forward: Vec::new(),
             last_persisted_ui_state: startup_ui_state,
@@ -3042,6 +3059,8 @@ impl ArborWindow {
     }
 
     fn select_repository(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.repository_context_menu = None;
+        self.worktree_context_menu = None;
         let Some(repository) = self.repositories.get(index).cloned() else {
             return;
         };
@@ -3254,6 +3273,8 @@ impl ArborWindow {
     }
 
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_context_menu = None;
+        self.worktree_context_menu = None;
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
         }
@@ -3285,6 +3306,8 @@ impl ArborWindow {
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_context_menu = None;
+        self.worktree_context_menu = None;
         self.close_top_bar_worktree_quick_actions();
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
@@ -3944,6 +3967,46 @@ impl ArborWindow {
                     self.active_outpost_index = Some(active - 1);
                 }
                 self.delete_modal = None;
+                cx.notify();
+            },
+            DeleteTarget::Repository(index) => {
+                if index >= self.repositories.len() {
+                    self.close_delete_modal(cx);
+                    return;
+                }
+
+                self.repositories.remove(index);
+
+                // Adjust active_repository_index
+                if self.repositories.is_empty() {
+                    self.active_repository_index = None;
+                } else if self.active_repository_index == Some(index) {
+                    self.active_repository_index = Some(index.min(self.repositories.len() - 1));
+                } else if let Some(active) = self.active_repository_index
+                    && active > index
+                {
+                    self.active_repository_index = Some(active - 1);
+                }
+
+                // Rebuild collapsed_repositories: shift indices above the removed one down by 1
+                let new_collapsed: HashSet<usize> = self
+                    .collapsed_repositories
+                    .iter()
+                    .filter_map(|&i| {
+                        if i == index {
+                            None
+                        } else if i > index {
+                            Some(i - 1)
+                        } else {
+                            Some(i)
+                        }
+                    })
+                    .collect();
+                self.collapsed_repositories = new_collapsed;
+
+                self.delete_modal = None;
+                self.persist_repositories(cx);
+                self.refresh_worktrees(cx);
                 cx.notify();
             },
         }
@@ -7468,6 +7531,14 @@ impl ArborWindow {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_repository(repository_index, cx);
                                         }))
+                                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.repository_context_menu = Some(RepositoryContextMenu {
+                                                repository_index,
+                                                position: event.position,
+                                            });
+                                            cx.notify();
+                                        }))
                                         // GitHub icon or avatar outside the cell
                                         .child(
                                             if let Some(url) =
@@ -7632,8 +7703,6 @@ impl ArborWindow {
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
                                                 let is_primary = worktree.is_primary_checkout;
-                                                let wt_label = worktree.label.clone();
-                                                let wt_branch = worktree.branch.clone();
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
@@ -7641,7 +7710,6 @@ impl ArborWindow {
                                                 };
                                                 div()
                                                     .id(("worktree-row", index))
-                                                    .group("wt-row")
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
                                                     .flex()
@@ -7651,49 +7719,16 @@ impl ArborWindow {
                                                             this.select_worktree(index, window, cx)
                                                         }),
                                                     )
-                                                    // X delete button in 24px left column (hidden until row hover)
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .w(px(24.))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .when(!is_primary, |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .id(("worktree-delete", index))
-                                                                        .w(px(18.))
-                                                                        .h(px(18.))
-                                                                        .flex()
-                                                                        .items_center()
-                                                                        .justify_center()
-                                                                        .font_family(FONT_MONO)
-                                                                        .text_size(px(16.))
-                                                                        .text_color(rgb(theme.text_muted))
-                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
-                                                                        .invisible()
-                                                                        .group_hover("wt-row", |s| s.visible())
-                                                                        .child("\u{f00d}")
-                                                                        .on_mouse_down(
-                                                                            MouseButton::Left,
-                                                                            cx.listener({
-                                                                                let wt_label = wt_label.clone();
-                                                                                let wt_branch = wt_branch.clone();
-                                                                                move |this, _: &MouseDownEvent, _, cx| {
-                                                                                    cx.stop_propagation();
-                                                                                    this.open_delete_modal(
-                                                                                        DeleteTarget::Worktree(index),
-                                                                                        wt_label.clone(),
-                                                                                        wt_branch.clone(),
-                                                                                        cx,
-                                                                                    );
-                                                                                }
-                                                                            }),
-                                                                        ),
-                                                                )
-                                                            }),
-                                                    )
+                                                    .when(!is_primary, |this| {
+                                                        this.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.worktree_context_menu = Some(WorktreeContextMenu {
+                                                                worktree_index: index,
+                                                                position: event.position,
+                                                            });
+                                                            cx.notify();
+                                                        }))
+                                                    })
                                                     // Bordered cell
                                                     .child(
                                                     div()
@@ -9740,6 +9775,188 @@ impl ArborWindow {
             )
     }
 
+    fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(menu) = self.repository_context_menu.as_ref() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let index = menu.repository_index;
+        let position = menu.position;
+
+        // Full-screen invisible overlay to dismiss on click outside,
+        // with the menu as a child — same pattern as render_top_bar_worktree_quick_actions_overlay
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.repository_context_menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
+                this.repository_context_menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            // Absolutely-positioned menu at cursor position
+            .child(
+                div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .w(px(180.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("repository-context-remove")
+                            .h(px(30.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(0x3a2030)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let label = this
+                                    .repositories
+                                    .get(index)
+                                    .map(|r| r.label.clone())
+                                    .unwrap_or_default();
+                                this.repository_context_menu = None;
+                                this.delete_modal = Some(DeleteModal {
+                                    target: DeleteTarget::Repository(index),
+                                    label,
+                                    branch: String::new(),
+                                    has_unpushed: None,
+                                    delete_branch: false,
+                                    is_deleting: false,
+                                    error: None,
+                                });
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(16.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("\u{f1f8}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("Remove"),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_worktree_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(menu) = self.worktree_context_menu.as_ref() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let index = menu.worktree_index;
+        let position = menu.position;
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.worktree_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.worktree_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .w(px(180.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("worktree-context-delete")
+                            .h(px(30.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(0x3a2030)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.worktree_context_menu = None;
+                                let wt_label = this
+                                    .worktrees
+                                    .get(index)
+                                    .map(|wt| wt.label.clone())
+                                    .unwrap_or_default();
+                                let wt_branch = this
+                                    .worktrees
+                                    .get(index)
+                                    .map(|wt| wt.branch.clone())
+                                    .unwrap_or_default();
+                                this.open_delete_modal(
+                                    DeleteTarget::Worktree(index),
+                                    wt_label,
+                                    wt_branch,
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(16.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("\u{f1f8}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("Delete"),
+                            ),
+                    ),
+            )
+    }
+
     fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.delete_modal.clone() else {
             return div();
@@ -9747,14 +9964,23 @@ impl ArborWindow {
 
         let theme = self.theme();
         let is_worktree = matches!(modal.target, DeleteTarget::Worktree(_));
-        let title = if is_worktree {
-            "Delete Worktree"
-        } else {
-            "Remove Outpost"
+        let title = match &modal.target {
+            DeleteTarget::Worktree(_) => "Delete Worktree",
+            DeleteTarget::Outpost(_) => "Remove Outpost",
+            DeleteTarget::Repository(_) => "Remove Repository",
+        };
+        let label_prefix = match &modal.target {
+            DeleteTarget::Worktree(_) => "Worktree",
+            DeleteTarget::Outpost(_) => "Outpost",
+            DeleteTarget::Repository(_) => "Repository",
         };
         let delete_disabled = modal.is_deleting;
         let delete_label = if modal.is_deleting {
-            "Deleting..."
+            if is_worktree {
+                "Deleting..."
+            } else {
+                "Removing..."
+            }
         } else if is_worktree {
             "Delete"
         } else {
@@ -9805,7 +10031,7 @@ impl ArborWindow {
                         div()
                             .text_xs()
                             .text_color(rgb(theme.text_muted))
-                            .child(format!("{}: {}", if is_worktree { "Worktree" } else { "Outpost" }, modal.label)),
+                            .child(format!("{}: {}", label_prefix, modal.label)),
                     )
                     // Unpushed commits warning (worktrees only)
                     .when(is_worktree, |this| {
@@ -10930,6 +11156,8 @@ impl Render for ArborWindow {
             .child(self.render_top_bar_worktree_quick_actions_menu(cx))
             .child(self.render_notice_toast(cx))
             .child(self.render_create_modal(cx))
+            .child(self.render_repository_context_menu(cx))
+            .child(self.render_worktree_context_menu(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))
