@@ -7789,6 +7789,14 @@ impl ArborWindow {
                 .cloned(),
             _ => None,
         };
+        let active_file_view_session = match active_tab {
+            Some(CenterTab::FileView(fv_id)) => self
+                .file_view_sessions
+                .iter()
+                .find(|session| session.id == fv_id)
+                .cloned(),
+            _ => None,
+        };
         let active_preset_tab = self.active_preset_tab;
         let preset_button = |kind: AgentPresetKind| {
             let is_active = active_preset_tab == Some(kind);
@@ -7898,6 +7906,15 @@ impl ArborWindow {
                                                     .unwrap_or_else(|| "diff".to_owned()),
                                                 false,
                                             ),
+                                            CenterTab::FileView(fv_id) => (
+                                                TAB_ICON_FILE,
+                                                self.file_view_sessions
+                                                    .iter()
+                                                    .find(|session| session.id == fv_id)
+                                                    .map(|s| s.title.clone())
+                                                    .unwrap_or_else(|| "file".to_owned()),
+                                                false,
+                                            ),
                                             CenterTab::Logs => (
                                                 TAB_ICON_LOGS,
                                                 "Logs".to_owned(),
@@ -7907,6 +7924,7 @@ impl ArborWindow {
                                         let tab_id = match tab {
                                             CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                             CenterTab::Diff(id) => ("center-tab-diff", id),
+                                            CenterTab::FileView(id) => ("center-tab-fileview", id),
                                             CenterTab::Logs => ("center-tab-logs", 0),
                                         };
 
@@ -7954,6 +7972,7 @@ impl ArborWindow {
                                                     .id(match tab {
                                                         CenterTab::Terminal(id) => ("tab-close-terminal", id),
                                                         CenterTab::Diff(id) => ("tab-close-diff", id),
+                                                        CenterTab::FileView(id) => ("tab-close-fileview", id),
                                                         CenterTab::Logs => ("tab-close-logs", 0),
                                                     })
                                                     .absolute()
@@ -7989,6 +8008,11 @@ impl ArborWindow {
                                                                         cx.notify();
                                                                     }
                                                                 },
+                                                                CenterTab::FileView(fv_id) => {
+                                                                    if this.close_file_view_session_by_id(fv_id) {
+                                                                        cx.notify();
+                                                                    }
+                                                                },
                                                                 CenterTab::Logs => {
                                                                     this.logs_tab_open = false;
                                                                     this.logs_tab_active = false;
@@ -8021,6 +8045,10 @@ impl ArborWindow {
                                                 CenterTab::Diff(diff_id) => {
                                                     this.logs_tab_active = false;
                                                     this.select_diff_tab(diff_id, cx);
+                                                },
+                                                CenterTab::FileView(fv_id) => {
+                                                    this.logs_tab_active = false;
+                                                    this.select_file_view_tab(fv_id, cx);
                                                 },
                                                 CenterTab::Logs => {
                                                     this.logs_tab_active = true;
