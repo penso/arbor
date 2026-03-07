@@ -72,7 +72,7 @@ const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
-const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 28;
+const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 16;
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_LEFT_PANE_WIDTH: f32 = 290.;
 const DEFAULT_RIGHT_PANE_WIDTH: f32 = 340.;
@@ -6595,6 +6595,7 @@ impl ArborWindow {
                                         true,
                                     ),
                                 };
+                                let tab_label = truncate_with_ellipsis(&tab_label, TERMINAL_TAB_COMMAND_MAX_CHARS);
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                     CenterTab::Diff(id) => ("center-tab-diff", id),
