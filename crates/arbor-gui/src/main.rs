@@ -3298,14 +3298,24 @@ impl ArborWindow {
 
         if !is_image {
             if let Ok(editor) = env::var("EDITOR") {
-                if let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf)
+                if let Some(worktree_path) =
+                    self.selected_worktree_path().map(Path::to_path_buf)
                 {
                     let full_path = worktree_path.join(&path);
-                    if let Err(error) =
-                        Command::new(&editor).arg(&full_path).spawn()
-                    {
-                        self.notice =
-                            Some(format!("Failed to open $EDITOR ({editor}): {error}"));
+                    if is_gui_editor(&editor) {
+                        if let Err(error) =
+                            Command::new(&editor)
+                                .arg(&full_path)
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn()
+                        {
+                            self.notice =
+                                Some(format!("Failed to open $EDITOR ({editor}): {error}"));
+                        }
+                    } else {
+                        self.open_editor_in_terminal(&editor, &full_path, cx);
                     }
                     cx.notify();
                     return;
@@ -4370,6 +4380,37 @@ impl ArborWindow {
 
         self.terminals.push(session);
         true
+    }
+
+    fn open_editor_in_terminal(
+        &mut self,
+        editor: &str,
+        file_path: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.spawn_terminal_session_inner(true) {
+            cx.notify();
+            return;
+        }
+
+        // Find the session we just spawned and send the editor command
+        let session_id = self.next_terminal_id - 1;
+        let cmd = format!(
+            "{} {}; exit\n",
+            shell_escape(editor),
+            shell_escape(&file_path.to_string_lossy()),
+        );
+        if let Err(error) = self.write_input_to_terminal(session_id, cmd.as_bytes()) {
+            self.notice = Some(format!("Failed to send command to terminal: {error}"));
+        }
+
+        self.sync_daemon_session_store(cx);
+        self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
+        self.file_view_editing = false;
+        self.logs_tab_active = false;
+        self.terminal_scroll_handle.scroll_to_bottom();
+        self.focus_terminal_on_next_render = true;
     }
 
     fn spawn_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -10327,6 +10368,42 @@ fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .text_xs()
         .text_color(rgb(theme.text_muted))
         .child(text.into())
+}
+
+fn is_gui_editor(editor: &str) -> bool {
+    let basename = Path::new(editor)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(editor);
+    matches!(
+        basename,
+        "code"
+            | "codium"
+            | "subl"
+            | "atom"
+            | "gedit"
+            | "kate"
+            | "mousepad"
+            | "xed"
+            | "pluma"
+            | "gvim"
+            | "mvim"
+            | "mate"
+            | "bbedit"
+            | "nova"
+            | "zed"
+            | "cursor"
+            | "fleet"
+            | "lite-xl"
+    )
+}
+
+fn shell_escape(s: &str) -> String {
+    if s.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_') {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
