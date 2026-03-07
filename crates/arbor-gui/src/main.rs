@@ -371,6 +371,32 @@ enum GitActionKind {
     CreatePullRequest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeQuickAction {
+    OpenFinder,
+    CopyPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickActionSubmenu {
+    Ide,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalLauncherKind {
+    Command(&'static str),
+    MacApp(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExternalLauncher {
+    label: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    kind: ExternalLauncherKind,
+}
+
 #[derive(Debug, Clone)]
 struct FileTreeEntry {
     path: PathBuf,
@@ -594,6 +620,10 @@ struct ArborWindow {
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
+    top_bar_quick_actions_open: bool,
+    top_bar_quick_actions_submenu: Option<QuickActionSubmenu>,
+    ide_launchers: Vec<ExternalLauncher>,
+    terminal_launchers: Vec<ExternalLauncher>,
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
     notifications_enabled: bool,
@@ -690,6 +720,10 @@ impl ArborWindow {
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
+                    top_bar_quick_actions_open: false,
+                    top_bar_quick_actions_submenu: None,
+                    ide_launchers: Vec::new(),
+                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notifications_enabled: true,
@@ -768,6 +802,10 @@ impl ArborWindow {
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
+                    top_bar_quick_actions_open: false,
+                    top_bar_quick_actions_submenu: None,
+                    ide_launchers: Vec::new(),
+                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notifications_enabled: true,
@@ -958,6 +996,10 @@ impl ArborWindow {
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
+            top_bar_quick_actions_open: false,
+            top_bar_quick_actions_submenu: None,
+            ide_launchers: Vec::new(),
+            terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             worktree_nav_back: Vec::new(),
@@ -2266,6 +2308,11 @@ impl ArborWindow {
             .map(|worktree| worktree.path.as_path())
     }
 
+    fn selected_local_worktree_path(&self) -> Option<&Path> {
+        self.active_worktree()
+            .map(|worktree| worktree.path.as_path())
+    }
+
     fn can_run_local_git_actions(&self) -> bool {
         self.active_outpost_index.is_none() && self.selected_worktree_path().is_some()
     }
@@ -2675,6 +2722,111 @@ impl ArborWindow {
         cx.open_url(url);
     }
 
+    fn close_top_bar_worktree_quick_actions(&mut self) {
+        self.top_bar_quick_actions_open = false;
+        self.top_bar_quick_actions_submenu = None;
+    }
+
+    fn refresh_top_bar_external_launchers(&mut self) {
+        self.ide_launchers = detect_ide_launchers();
+        self.terminal_launchers = detect_terminal_launchers();
+    }
+
+    fn toggle_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) {
+        if self.selected_local_worktree_path().is_none() {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        }
+
+        if self.top_bar_quick_actions_open {
+            self.close_top_bar_worktree_quick_actions();
+        } else {
+            self.top_bar_quick_actions_open = true;
+            self.top_bar_quick_actions_submenu = None;
+            self.refresh_top_bar_external_launchers();
+        }
+        cx.notify();
+    }
+
+    fn toggle_top_bar_worktree_quick_actions_submenu(
+        &mut self,
+        submenu: QuickActionSubmenu,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.top_bar_quick_actions_open {
+            return;
+        }
+
+        self.top_bar_quick_actions_submenu = if self.top_bar_quick_actions_submenu == Some(submenu)
+        {
+            None
+        } else {
+            Some(submenu)
+        };
+        cx.notify();
+    }
+
+    fn run_worktree_quick_action(&mut self, action: WorktreeQuickAction, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let result = match action {
+            WorktreeQuickAction::OpenFinder => open_worktree_in_file_manager(&worktree_path),
+            WorktreeQuickAction::CopyPath => {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    worktree_path.display().to_string(),
+                ));
+                Ok("copied worktree path to clipboard".to_owned())
+            },
+        };
+
+        self.close_top_bar_worktree_quick_actions();
+        self.notice = Some(match result {
+            Ok(message) => message,
+            Err(error) => error,
+        });
+        cx.notify();
+    }
+
+    fn run_worktree_external_launcher(
+        &mut self,
+        submenu: QuickActionSubmenu,
+        launcher_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let launcher = match submenu {
+            QuickActionSubmenu::Ide => self.ide_launchers.get(launcher_index).copied(),
+            QuickActionSubmenu::Terminal => self.terminal_launchers.get(launcher_index).copied(),
+        };
+        let Some(launcher) = launcher else {
+            self.notice = Some("launcher no longer available".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let result = open_worktree_with_external_launcher(&worktree_path, launcher);
+        self.close_top_bar_worktree_quick_actions();
+        self.notice = Some(match result {
+            Ok(message) => message,
+            Err(error) => error,
+        });
+        cx.notify();
+    }
+
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
@@ -2685,6 +2837,7 @@ impl ArborWindow {
             self.worktree_nav_back.push(old);
             self.worktree_nav_forward.clear();
         }
+        self.close_top_bar_worktree_quick_actions();
         self.active_worktree_index = Some(index);
         self.active_outpost_index = None;
         self.active_diff_session_id = None;
@@ -2706,6 +2859,7 @@ impl ArborWindow {
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        self.close_top_bar_worktree_quick_actions();
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
         self.changed_files.clear();
@@ -5278,6 +5432,9 @@ impl ArborWindow {
         let back_enabled = !self.worktree_nav_back.is_empty();
         let forward_enabled = !self.worktree_nav_forward.is_empty();
         let sidebar_hidden = !self.left_pane_visible;
+        let worktree_quick_actions_enabled = self.selected_local_worktree_path().is_some();
+        let worktree_quick_actions_open =
+            worktree_quick_actions_enabled && self.top_bar_quick_actions_open;
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -5381,7 +5538,7 @@ impl ArborWindow {
                             .child(centered_title),
                     ),
             )
-            // Right group: report issue button
+            // Right group: worktree quick actions + report issue button
             .child(
                 div()
                     .absolute()
@@ -5390,6 +5547,55 @@ impl ArborWindow {
                     .bottom_0()
                     .flex()
                     .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("worktree-quick-actions")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(if worktree_quick_actions_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(worktree_quick_actions_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(theme.panel_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_menu(cx);
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .child("\u{f0e7}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .child("Action"),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(9.))
+                                    .child(if worktree_quick_actions_open {
+                                        "\u{f077}"
+                                    } else {
+                                        "\u{f078}"
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .id("report-issue")
@@ -5403,7 +5609,8 @@ impl ArborWindow {
                             .rounded_sm()
                             .border_1()
                             .border_color(rgb(theme.border))
-                            .on_click(cx.listener(|_this, _, _window, cx| {
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_top_bar_worktree_quick_actions();
                                 cx.open_url("https://github.com/penso/arbor/issues/new");
                             }))
                             .child(
@@ -5418,6 +5625,372 @@ impl ArborWindow {
                                     .child("Report issue"),
                             ),
                     ),
+            )
+    }
+
+    fn render_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let menu_open =
+            self.top_bar_quick_actions_open && self.selected_local_worktree_path().is_some();
+
+        if !menu_open {
+            return div();
+        }
+
+        let ide_has_launchers = !self.ide_launchers.is_empty();
+        let terminal_has_launchers = !self.terminal_launchers.is_empty();
+        let submenu = self.top_bar_quick_actions_submenu;
+        let ide_row_active = submenu == Some(QuickActionSubmenu::Ide);
+        let terminal_row_active = submenu == Some(QuickActionSubmenu::Terminal);
+
+        let mut overlay = div()
+            .absolute()
+            .right(px(16.))
+            .top(px(TITLEBAR_HEIGHT))
+            .mt(px(4.))
+            .child(
+                div()
+                    .w(px(192.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("quick-action-open-finder")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_worktree_quick_action(WorktreeQuickAction::OpenFinder, cx);
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(0xe5c07b))
+                                    .child("\u{f07b}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Open in Finder"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("quick-action-open-ide-submenu")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .text_color(rgb(if ide_has_launchers {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(ide_has_launchers, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_submenu(
+                                            QuickActionSubmenu::Ide,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(ide_row_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(12.))
+                                            .text_color(rgb(0x39a0ed))
+                                            .child("\u{f121}"),
+                                    )
+                                    .child(div().text_size(px(11.)).child("IDE")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if ide_has_launchers {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f054}"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("quick-action-open-terminal-submenu")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .text_color(rgb(if terminal_has_launchers {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(terminal_has_launchers, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_submenu(
+                                            QuickActionSubmenu::Terminal,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(terminal_row_active, |this| {
+                                this.bg(rgb(theme.panel_active_bg))
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(12.))
+                                            .text_color(rgb(0x68c38d))
+                                            .child("\u{f120}"),
+                                    )
+                                    .child(div().text_size(px(11.)).child("Terminal")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if terminal_has_launchers {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f054}"),
+                            ),
+                    )
+                    .child(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(rgb(theme.border)))
+                    .child(
+                        div()
+                            .id("quick-action-copy-path")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_worktree_quick_action(WorktreeQuickAction::CopyPath, cx);
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("\u{f0c5}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Copy path"),
+                            ),
+                    ),
+            );
+
+        if let Some(submenu) = submenu {
+            let launchers: &[ExternalLauncher] = match submenu {
+                QuickActionSubmenu::Ide => &self.ide_launchers,
+                QuickActionSubmenu::Terminal => &self.terminal_launchers,
+            };
+            if launchers.is_empty() {
+                return overlay;
+            }
+            let submenu_top = match submenu {
+                QuickActionSubmenu::Ide => px(28.),
+                QuickActionSubmenu::Terminal => px(52.),
+            };
+
+            overlay = overlay.child(
+                div()
+                    .id("quick-action-launcher-submenu")
+                    .absolute()
+                    .right(px(200.))
+                    .top(submenu_top)
+                    .w(px(220.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .children(launchers.iter().enumerate().map(|(index, launcher)| {
+                        let launcher = *launcher;
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "quick-action-launcher-item".into(),
+                                index as u64,
+                            ))
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_worktree_external_launcher(submenu, index, cx);
+                            }))
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .flex_none()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_center()
+                                    .text_color(rgb(launcher.icon_color))
+                                    .child(launcher.icon),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(launcher.label),
+                            )
+                    })),
+            );
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.close_top_bar_worktree_quick_actions();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(overlay)
+    }
+
+    fn render_notice_toast(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(notice) = self.notice.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_error = notice_looks_like_error(&notice);
+        let background = if is_error {
+            theme.notice_bg
+        } else {
+            theme.chrome_bg
+        };
+        let text_color = if is_error {
+            theme.notice_text
+        } else {
+            theme.text_primary
+        };
+        let border_color = if is_error {
+            0xb95d5d
+        } else {
+            theme.accent
+        };
+        let icon = if is_error {
+            "\u{f06a}"
+        } else {
+            "\u{f05a}"
+        };
+        let icon_color = if is_error {
+            theme.notice_text
+        } else {
+            theme.accent
+        };
+
+        div()
+            .absolute()
+            .right(px(16.))
+            .bottom(px(36.))
+            .w(px(420.))
+            .max_w(px(420.))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(border_color))
+            .bg(rgb(background))
+            .px_2()
+            .py(px(8.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(12.))
+                            .text_color(rgb(icon_color))
+                            .child(icon),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(text_color))
+                            .child(notice),
+                    ),
+            )
+            .child(
+                div()
+                    .id("notice-toast-dismiss")
+                    .cursor_pointer()
+                    .font_family(FONT_MONO)
+                    .text_size(px(11.))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.notice = None;
+                        cx.notify();
+                    }))
+                    .child("\u{f00d}"),
             )
     }
 
@@ -8336,14 +8909,6 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
-            .child(div().when_some(self.notice.clone(), |this, notice| {
-                this.px_3()
-                    .py_2()
-                    .bg(rgb(theme.notice_bg))
-                    .text_color(rgb(theme.notice_text))
-                    .text_xs()
-                    .child(notice)
-            }))
             .child(
                 div()
                     .flex_1()
@@ -8370,6 +8935,8 @@ impl Render for ArborWindow {
                     .child(self.render_right_pane(cx)),
             )
             .child(self.render_status_bar())
+            .child(self.render_top_bar_worktree_quick_actions_menu(cx))
+            .child(self.render_notice_toast(cx))
             .child(self.render_create_modal(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
@@ -9694,6 +10261,22 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn notice_looks_like_error(notice: &str) -> bool {
+    let lower = notice.to_ascii_lowercase();
+    [
+        "error",
+        "failed",
+        "invalid",
+        "cannot",
+        "could not",
+        "missing",
+        "not found",
+        "denied",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn action_button(
     theme: ThemePalette,
     id: impl Into<ElementId>,
@@ -9910,6 +10493,203 @@ fn truncate_middle_text(input: &str, max_chars: usize) -> String {
     output.push('…');
     output.extend(chars.iter().skip(tail_start));
     output
+}
+
+fn run_launch_command(command: &mut Command, operation: &str) -> Result<(), String> {
+    let output = run_command_output(command, operation)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure_message(operation, &output))
+    }
+}
+
+fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in Finder")?;
+        return Ok("opened worktree in Finder".to_owned());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in file manager")?;
+        return Ok("opened worktree in file manager".to_owned());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in File Explorer")?;
+        return Ok("opened worktree in File Explorer".to_owned());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening this worktree in a file manager is not supported on this platform".to_owned())
+}
+
+fn open_worktree_with_external_launcher(
+    worktree_path: &Path,
+    launcher: ExternalLauncher,
+) -> Result<String, String> {
+    match launcher.kind {
+        ExternalLauncherKind::Command(command_name) => {
+            let mut command = Command::new(command_name);
+            command.arg(worktree_path);
+            run_launch_command(
+                &mut command,
+                &format!("open worktree with {}", launcher.label),
+            )?;
+        },
+        ExternalLauncherKind::MacApp(app_name) => {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(app_name).arg(worktree_path);
+            run_launch_command(
+                &mut command,
+                &format!("open worktree in {}", launcher.label),
+            )?;
+        },
+    }
+
+    Ok(format!("opened worktree in {}", launcher.label))
+}
+
+fn command_exists_on_path(command_name: &str) -> bool {
+    let Some(path_env) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&path_env).any(|directory| directory.join(command_name).is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_app_bundle_exists(app_name: &str) -> bool {
+    let launch_services_status = Command::new("open")
+        .arg("-Ra")
+        .arg(app_name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if matches!(launch_services_status, Ok(status) if status.success()) {
+        return true;
+    }
+
+    // Fallback for environments where LaunchServices lookup is unavailable.
+    let bundle = format!("{app_name}.app");
+    [
+        "/Applications",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .chain(
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .into_iter()
+            .map(|home| home.join("Applications")),
+    )
+    .any(|base| base.join(&bundle).exists())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_app_bundle_exists(_: &str) -> bool {
+    false
+}
+
+fn detect_external_launcher(
+    label: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    mac_app: Option<&'static str>,
+    command: Option<&'static str>,
+) -> Option<ExternalLauncher> {
+    if let Some(app_name) = mac_app
+        && mac_app_bundle_exists(app_name)
+    {
+        return Some(ExternalLauncher {
+            label,
+            icon,
+            icon_color,
+            kind: ExternalLauncherKind::MacApp(app_name),
+        });
+    }
+
+    if let Some(command_name) = command
+        && command_exists_on_path(command_name)
+    {
+        return Some(ExternalLauncher {
+            label,
+            icon,
+            icon_color,
+            kind: ExternalLauncherKind::Command(command_name),
+        });
+    }
+
+    None
+}
+
+fn detect_ide_launchers() -> Vec<ExternalLauncher> {
+    [
+        (
+            "VS Code",
+            "\u{e70c}",
+            0x2f80ed,
+            Some("Visual Studio Code"),
+            Some("code"),
+        ),
+        (
+            "VS Code Insiders",
+            "\u{e70c}",
+            0x4f9fff,
+            Some("Visual Studio Code - Insiders"),
+            Some("code-insiders"),
+        ),
+        ("Cursor", "Cu", 0x6ca6ff, Some("Cursor"), Some("cursor")),
+        ("Zed", "Ze", 0x59a6ff, Some("Zed"), Some("zed")),
+        (
+            "Windsurf",
+            "Ws",
+            0x3cb9fc,
+            Some("Windsurf"),
+            Some("windsurf"),
+        ),
+        ("VSCodium", "Vc", 0x23a8f2, Some("VSCodium"), Some("codium")),
+    ]
+    .into_iter()
+    .filter_map(|(label, icon, icon_color, mac_app, command)| {
+        detect_external_launcher(label, icon, icon_color, mac_app, command)
+    })
+    .collect()
+}
+
+fn detect_terminal_launchers() -> Vec<ExternalLauncher> {
+    [
+        ("Terminal", "Tm", 0x7ecf95, Some("Terminal"), None),
+        ("iTerm", "iT", 0x8ad1ec, Some("iTerm"), Some("iterm2")),
+        ("iTerm2", "i2", 0x8ad1ec, Some("iTerm2"), Some("iterm2")),
+        ("Ghostty", "Gh", 0xbf8cf8, Some("Ghostty"), Some("ghostty")),
+        (
+            "Alacritty",
+            "Al",
+            0xf0a168,
+            Some("Alacritty"),
+            Some("alacritty"),
+        ),
+        ("Warp", "Wp", 0x6f8dff, Some("Warp"), Some("warp")),
+        ("WezTerm", "Wz", 0x6dc5ff, Some("WezTerm"), Some("wezterm")),
+        ("Kitty", "Kt", 0xc89fff, Some("kitty"), Some("kitty")),
+    ]
+    .into_iter()
+    .filter_map(|(label, icon, icon_color, mac_app, command)| {
+        detect_external_launcher(label, icon, icon_color, mac_app, command)
+    })
+    .collect()
 }
 
 fn run_command_output(
