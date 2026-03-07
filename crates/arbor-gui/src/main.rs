@@ -604,6 +604,7 @@ struct ArborWindow {
     right_pane_width: f32,
     terminal_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
+    center_tabs_scroll_handle: ScrollHandle,
     diff_scroll_handle: UniformListScrollHandle,
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
@@ -706,6 +707,7 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    center_tabs_scroll_handle: ScrollHandle::new(),
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
@@ -790,6 +792,7 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    center_tabs_scroll_handle: ScrollHandle::new(),
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
@@ -986,6 +989,7 @@ impl ArborWindow {
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
+            center_tabs_scroll_handle: ScrollHandle::new(),
             diff_scroll_handle: UniformListScrollHandle::new(),
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
@@ -6494,6 +6498,9 @@ impl ArborWindow {
 
         let active_tab_index =
             active_tab.and_then(|tab| tabs.iter().position(|entry| *entry == tab));
+        if let Some(index) = active_tab_index {
+            self.center_tabs_scroll_handle.scroll_to_item(index);
+        }
         let active_terminal = match active_tab {
             Some(CenterTab::Terminal(session_id)) => self
                 .terminals
@@ -6543,6 +6550,7 @@ impl ArborWindow {
                     .child(
                         div()
                             .id("center-tabs-scroll")
+                            .track_scroll(&self.center_tabs_scroll_handle)
                             .h_full()
                             .flex_1()
                             .min_w_0()
