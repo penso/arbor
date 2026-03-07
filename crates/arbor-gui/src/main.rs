@@ -605,6 +605,8 @@ struct ArborWindow {
     window_is_active: bool,
     notice: Option<String>,
     right_pane_tab: RightPaneTab,
+    right_pane_search: String,
+    right_pane_search_active: bool,
     file_tree_entries: Vec<FileTreeEntry>,
     expanded_dirs: HashSet<PathBuf>,
     selected_file_tree_entry: Option<PathBuf>,
@@ -704,6 +706,8 @@ impl ArborWindow {
                     window_is_active: true,
                     notice: Some(format!("failed to read current directory: {error}")),
                     right_pane_tab: RightPaneTab::Changes,
+                    right_pane_search: String::new(),
+                    right_pane_search_active: false,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
@@ -785,6 +789,8 @@ impl ArborWindow {
                     window_is_active: true,
                     notice: Some(format!("failed to resolve git repository root: {error}")),
                     right_pane_tab: RightPaneTab::Changes,
+                    right_pane_search: String::new(),
+                    right_pane_search_active: false,
                     file_tree_entries: Vec::new(),
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
@@ -982,6 +988,8 @@ impl ArborWindow {
             window_is_active: true,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
             right_pane_tab: RightPaneTab::Changes,
+            right_pane_search: String::new(),
+            right_pane_search_active: false,
             file_tree_entries: Vec::new(),
             expanded_dirs: HashSet::new(),
             selected_file_tree_entry: None,
@@ -3267,6 +3275,8 @@ impl ArborWindow {
             return;
         }
         self.right_pane_tab = tab;
+        self.right_pane_search.clear();
+        self.right_pane_search_active = false;
         if tab == RightPaneTab::FileTree && self.file_tree_entries.is_empty() {
             self.rebuild_file_tree();
         }
@@ -3764,6 +3774,37 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         if event.is_held {
+            return;
+        }
+
+        if self.right_pane_search_active {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.right_pane_search.clear();
+                    self.right_pane_search_active = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                "backspace" => {
+                    self.right_pane_search.pop();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+            if event.keystroke.modifiers.platform
+                || event.keystroke.modifiers.control
+                || event.keystroke.modifiers.alt
+            {
+                return;
+            }
+            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                self.right_pane_search.push_str(key_char);
+                cx.notify();
+                cx.stop_propagation();
+            }
             return;
         }
 
@@ -6652,6 +6693,8 @@ impl ArborWindow {
             RightPaneTab::Changes => self.render_changes_content(cx),
             RightPaneTab::FileTree => self.render_file_tree(cx),
         };
+        let search_active = self.right_pane_search_active;
+        let search_text = self.right_pane_search.clone();
 
         div()
             .w(px(self.right_pane_width))
@@ -6661,6 +6704,47 @@ impl ArborWindow {
             .flex()
             .flex_col()
             .child(self.render_right_pane_tabs(cx))
+            .child(
+                div()
+                    .id("right-pane-search")
+                    .h(px(28.))
+                    .mx_1()
+                    .my(px(4.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(if search_active {
+                        theme.accent
+                    } else {
+                        theme.border
+                    }))
+                    .bg(rgb(theme.panel_bg))
+                    .cursor_text()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.right_pane_search_active = true;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_xs()
+                            .text_color(rgb(if search_text.is_empty() {
+                                theme.text_disabled
+                            } else {
+                                theme.text_primary
+                            }))
+                            .child(if search_text.is_empty() {
+                                "Filter files…".to_owned()
+                            } else {
+                                search_text
+                            }),
+                    ),
+            )
             .child(content)
     }
 
@@ -6722,6 +6806,20 @@ impl ArborWindow {
         let commit_enabled = can_run_actions && !is_busy && !self.changed_files.is_empty();
         let push_enabled = can_run_actions && !is_busy;
         let pr_enabled = can_run_actions && !is_busy;
+        let search_lower = self.right_pane_search.to_lowercase();
+        let filtered_changes: Vec<_> = self
+            .changed_files
+            .iter()
+            .filter(|change| {
+                search_lower.is_empty()
+                    || change
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&search_lower)
+            })
+            .cloned()
+            .collect();
 
         div()
             .flex_1()
@@ -6802,7 +6900,7 @@ impl ArborWindow {
                     .flex_col()
                     .font_family(FONT_MONO)
                     .p_1()
-                    .children(self.changed_files.iter().map(|change| {
+                    .children(filtered_changes.iter().map(|change| {
                         let is_selected = selected_path
                             .as_ref()
                             .is_some_and(|selected| selected.as_path() == change.path.as_path());
@@ -6897,6 +6995,21 @@ impl ArborWindow {
         let theme = self.theme();
         let selected_entry = self.selected_file_tree_entry.clone();
         let expanded_dirs = &self.expanded_dirs;
+        let search_lower = self.right_pane_search.to_lowercase();
+        let is_filtering = !search_lower.is_empty();
+        let filtered_entries: Vec<_> = self
+            .file_tree_entries
+            .iter()
+            .filter(|entry| {
+                if !is_filtering {
+                    return true;
+                }
+                if entry.is_dir {
+                    return false;
+                }
+                entry.path.to_string_lossy().to_lowercase().contains(&search_lower)
+            })
+            .collect();
 
         div().flex_1().min_h_0().flex().flex_col().child(
             div()
@@ -6909,11 +7022,15 @@ impl ArborWindow {
                 .flex_col()
                 .font_family(FONT_MONO)
                 .p_1()
-                .children(self.file_tree_entries.iter().map(|entry| {
+                .children(filtered_entries.iter().map(|entry| {
                     let is_selected = selected_entry
                         .as_ref()
                         .is_some_and(|selected| selected == &entry.path);
-                    let indent = entry.depth as f32 * 16. + 4.;
+                    let indent = if is_filtering {
+                        4.
+                    } else {
+                        entry.depth as f32 * 16. + 4.
+                    };
                     let entry_path = entry.path.clone();
                     let is_dir = entry.is_dir;
 
@@ -6981,7 +7098,11 @@ impl ArborWindow {
                                 .text_xs()
                                 .text_color(rgb(icon_color))
                                 .when(is_dir, |this| this.font_weight(FontWeight::SEMIBOLD))
-                                .child(entry.name.clone()),
+                                .child(if is_filtering {
+                                    entry.path.to_string_lossy().into_owned()
+                                } else {
+                                    entry.name.clone()
+                                }),
                         )
                 })),
         )
