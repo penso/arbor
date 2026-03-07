@@ -5612,7 +5612,7 @@ impl ArborWindow {
                                                 // Worktree count badge
                                                 .child(
                                                     div()
-                                                        .text_size(px(9.))
+                                                        .text_sm()
                                                         .text_color(rgb(theme.text_disabled))
                                                         .child(format!(
                                                             "{}",
@@ -5632,14 +5632,14 @@ impl ArborWindow {
                                         .child(
                                             div()
                                                 .id(("repository-add-worktree", repository_index))
-                                                .size(px(18.))
+                                                .size(px(20.))
                                                 .rounded_sm()
                                                 .cursor_pointer()
                                                 .flex_none()
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
-                                                .text_xs()
+                                                .text_sm()
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(theme.text_muted))
                                                 .child("+")
@@ -6077,7 +6077,7 @@ impl ArborWindow {
                     .items_center()
                     .gap_2()
                     .child(
-                        action_button(theme, "open-add-repository", "+ Add Repo", false, false)
+                        action_button(theme, "open-add-repository", "Add Repo", false, false)
                             .flex_1()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_add_repository_picker(cx);
