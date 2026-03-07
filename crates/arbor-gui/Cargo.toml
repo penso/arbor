@@ -9,7 +9,11 @@ version.workspace = true
 name = "Arbor"
 path = "src/main.rs"
 
+[features]
+vendored-openssl = ["libssh-rs-sys/vendored-openssl"]
+
 [dependencies]
+libssh-rs-sys = { version = "0.2", optional = true }
 anyhow = { workspace = true }
 arbor-core = { path = "../arbor-core" }
 arbor-mosh = { path = "../arbor-mosh" }

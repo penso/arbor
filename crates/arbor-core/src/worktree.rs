@@ -237,6 +237,43 @@ fn ensure_success(output: Output) -> Result<Output, WorktreeError> {
     Err(WorktreeError::GitCommandFailed(message))
 }
 
+/// Returns `true` if the worktree at `path` has commits that haven't been
+/// pushed to any remote tracking branch.
+///
+/// First tries `git log @{u}..HEAD` (upstream comparison).  If there is no
+/// upstream (fresh branch that was never pushed), falls back to
+/// `git log --oneline --not --remotes` which shows commits not reachable
+/// from any remote ref.
+pub fn has_unpushed_commits(path: &Path) -> bool {
+    // Try upstream comparison first.
+    let mut cmd = base_git_command(path);
+    cmd.args(["log", "@{u}..HEAD", "--oneline"]);
+    if let Ok(output) = cmd.output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return !stdout.trim().is_empty();
+    }
+
+    // No upstream — check for commits not on any remote branch.
+    let mut cmd2 = base_git_command(path);
+    cmd2.args(["log", "--oneline", "--not", "--remotes"]);
+    match cmd2.output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            !stdout.trim().is_empty()
+        },
+        _ => false,
+    }
+}
+
+/// Deletes a local branch using `git branch -D`.
+pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<(), WorktreeError> {
+    let mut command = base_git_command(repo_path);
+    command.args(["branch", "-D", branch]);
+    run_git_no_output(command)
+}
+
 /// Strips `refs/heads/` prefix from a full git branch ref.
 pub fn short_branch(value: &str) -> String {
     value

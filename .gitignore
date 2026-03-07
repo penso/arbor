@@ -2,3 +2,4 @@
 .DS_Store
 crates/arbor-web-ui/app/node_modules
 crates/arbor-web-ui/app/dist
+/homebrew-arbor

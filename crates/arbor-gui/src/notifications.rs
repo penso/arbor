@@ -1,9 +1,11 @@
-pub fn send(title: &str, body: &str) {
-    if let Err(error) = notify_rust::Notification::new()
-        .summary(title)
-        .body(body)
-        .show()
-    {
+pub fn send(title: &str, body: &str, play_sound: bool) {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(title).body(body);
+    if play_sound {
+        notification.sound_name("default");
+    }
+
+    if let Err(error) = notification.show() {
         tracing::warn!(%error, "failed to send desktop notification");
     }
 }

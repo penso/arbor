@@ -162,6 +162,7 @@ struct WorktreeSummary {
     pr_url: Option<String>,
     diff_summary: Option<changes::DiffLineSummary>,
     agent_state: Option<AgentState>,
+    agent_task: Option<String>,
     last_activity_unix_ms: Option<u64>,
 }
 
@@ -374,6 +375,32 @@ enum GitActionKind {
     CreatePullRequest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeQuickAction {
+    OpenFinder,
+    CopyPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickActionSubmenu {
+    Ide,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalLauncherKind {
+    Command(&'static str),
+    MacApp(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExternalLauncher {
+    label: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    kind: ExternalLauncherKind,
+}
+
 #[derive(Debug, Clone)]
 struct FileTreeEntry {
     path: PathBuf,
@@ -563,6 +590,23 @@ enum HostsModalInputEvent {
     ClearError,
 }
 
+#[derive(Debug, Clone)]
+enum DeleteTarget {
+    Worktree(usize),
+    Outpost(usize),
+}
+
+#[derive(Debug, Clone)]
+struct DeleteModal {
+    target: DeleteTarget,
+    label: String,
+    branch: String,
+    has_unpushed: Option<bool>,
+    delete_branch: bool,
+    is_deleting: bool,
+    error: Option<String>,
+}
+
 struct CreatedWorktree {
     worktree_name: String,
     branch_name: String,
@@ -609,6 +653,7 @@ struct ArborWindow {
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
     create_modal: Option<CreateModal>,
+    delete_modal: Option<DeleteModal>,
     outposts: Vec<OutpostSummary>,
     outpost_store: Box<dyn arbor_core::outpost_store::OutpostStore>,
     active_outpost_index: Option<usize>,
@@ -618,6 +663,10 @@ struct ArborWindow {
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
+    top_bar_quick_actions_open: bool,
+    top_bar_quick_actions_submenu: Option<QuickActionSubmenu>,
+    ide_launchers: Vec<ExternalLauncher>,
+    terminal_launchers: Vec<ExternalLauncher>,
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
     notifications_enabled: bool,
@@ -712,6 +761,7 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_modal: None,
+                    delete_modal: None,
                     outposts: Vec::new(),
                     outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
                     active_outpost_index: None,
@@ -721,6 +771,10 @@ impl ArborWindow {
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
+                    top_bar_quick_actions_open: false,
+                    top_bar_quick_actions_submenu: None,
+                    ide_launchers: Vec::new(),
+                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notifications_enabled: true,
@@ -797,6 +851,7 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_modal: None,
+                    delete_modal: None,
                     outposts: Vec::new(),
                     outpost_store: Box::new(arbor_core::outpost_store::default_outpost_store()),
                     active_outpost_index: None,
@@ -806,6 +861,10 @@ impl ArborWindow {
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
+                    top_bar_quick_actions_open: false,
+                    top_bar_quick_actions_submenu: None,
+                    ide_launchers: Vec::new(),
+                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notifications_enabled: true,
@@ -994,6 +1053,7 @@ impl ArborWindow {
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
             create_modal: None,
+            delete_modal: None,
             outposts,
             outpost_store,
             active_outpost_index: None,
@@ -1003,6 +1063,10 @@ impl ArborWindow {
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
+            top_bar_quick_actions_open: false,
+            top_bar_quick_actions_submenu: None,
+            ide_launchers: Vec::new(),
+            terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             worktree_nav_back: Vec::new(),
@@ -1425,9 +1489,9 @@ impl ArborWindow {
             .map(|worktree| worktree.path.clone())
     }
 
-    fn maybe_notify(&self, title: &str, body: &str) {
+    fn maybe_notify(&self, title: &str, body: &str, play_sound: bool) {
         if self.notifications_enabled && !self.window_is_active {
-            notifications::send(title, body);
+            notifications::send(title, body, play_sound);
         }
     }
 
@@ -1439,7 +1503,7 @@ impl ArborWindow {
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
         let daemon = self.terminal_daemon.clone();
         let mut sessions_to_close = Vec::new();
-        let mut pending_notifications: Vec<(String, String)> = Vec::new();
+        let mut pending_notifications: Vec<(String, String, bool)> = Vec::new();
 
         for index in 0..self.terminals.len() {
             let Some(runtime) = self
@@ -1491,6 +1555,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1500,6 +1565,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "terminal tab `{}` exited with code {exit_code}",
@@ -1576,6 +1642,7 @@ impl ArborWindow {
                                     pending_notifications.push((
                                         "Terminal completed".to_owned(),
                                         format!("`{title}` completed successfully"),
+                                        true,
                                     ));
                                     sessions_to_close.push(session.id);
                                 } else if session.state == TerminalState::Failed {
@@ -1584,6 +1651,7 @@ impl ArborWindow {
                                     pending_notifications.push((
                                         "Terminal failed".to_owned(),
                                         format!("`{title}` failed with code {exit_code}"),
+                                        false,
                                     ));
                                     self.notice = Some(format!(
                                         "terminal tab `{title}` exited with code {exit_code}",
@@ -1723,6 +1791,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "SSH terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1732,6 +1801,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "SSH terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "SSH terminal tab `{}` exited with code {exit_code}",
@@ -1780,6 +1850,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Mosh terminal completed".to_owned(),
                                 format!("`{}` completed successfully", session.title),
+                                true,
                             ));
                             sessions_to_close.push(session.id);
                         } else {
@@ -1789,6 +1860,7 @@ impl ArborWindow {
                             pending_notifications.push((
                                 "Mosh terminal failed".to_owned(),
                                 format!("`{}` failed with code {exit_code}", session.title),
+                                false,
                             ));
                             self.notice = Some(format!(
                                 "mosh terminal tab `{}` exited with code {exit_code}",
@@ -1800,8 +1872,8 @@ impl ArborWindow {
             };
         }
 
-        for (title, body) in pending_notifications {
-            self.maybe_notify(&title, &body);
+        for (title, body, play_sound) in pending_notifications {
+            self.maybe_notify(&title, &body, play_sound);
         }
 
         for session_id in sessions_to_close {
@@ -1857,6 +1929,16 @@ impl ArborWindow {
                     .map(|state| (worktree.path.clone(), state))
             })
             .collect();
+        let previous_agent_tasks: HashMap<PathBuf, String> = self
+            .worktrees
+            .iter()
+            .filter_map(|worktree| {
+                worktree
+                    .agent_task
+                    .as_ref()
+                    .map(|task| (worktree.path.clone(), task.clone()))
+            })
+            .collect();
         let previous_activity: HashMap<PathBuf, u64> = self
             .worktrees
             .iter()
@@ -1890,6 +1972,7 @@ impl ArborWindow {
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
             worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
+            worktree.agent_task = previous_agent_tasks.get(&worktree.path).cloned();
             // Take the max of fresh git-based timestamp and previous value
             // (which may include agent activity).
             let prev = previous_activity.get(&worktree.path).copied();
@@ -1963,6 +2046,7 @@ impl ArborWindow {
         }
 
         self.refresh_worktree_diff_summaries(cx);
+        self.refresh_agent_tasks(cx);
         self.refresh_worktree_pull_requests(cx);
         let changed_files_changed = self.reload_changed_files();
         let created_terminal = self.ensure_selected_worktree_terminal();
@@ -2014,6 +2098,48 @@ impl ArborWindow {
                 if this.worktree_stats_loading {
                     this.worktree_stats_loading = false;
                     changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_agent_tasks(&mut self, cx: &mut Context<Self>) {
+        let worktree_paths: Vec<PathBuf> = self
+            .worktrees
+            .iter()
+            .filter(|wt| wt.agent_task.is_none())
+            .map(|wt| wt.path.clone())
+            .collect();
+        if worktree_paths.is_empty() {
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_spawn(async move {
+                    worktree_paths
+                        .into_iter()
+                        .map(|path| {
+                            let task = arbor_core::session::extract_agent_task(&path);
+                            (path, task)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
+                for (path, task) in results {
+                    if let Some(task) = task
+                        && let Some(wt) = this.worktrees.iter_mut().find(|wt| wt.path == path)
+                    {
+                        wt.agent_task = Some(task);
+                        changed = true;
+                    }
                 }
                 if changed {
                     cx.notify();
@@ -2105,27 +2231,19 @@ impl ArborWindow {
                 .detach();
 
                 let first = rx.recv().await;
-                match first {
-                    Ok(Some(text)) => {
-                        tracing::info!("agent activity WS connected");
-                        backoff_secs = 3;
-                        let _ = this.update(cx, |this, _| {
-                            this.agent_ws_connected = true;
-                        });
-                        // Process the first message
-                        process_agent_ws_message(&this, cx, &text);
+                if let Ok(Some(text)) = first {
+                    tracing::info!("agent activity WS connected");
+                    backoff_secs = 3;
+                    let _ = this.update(cx, |this, _| {
+                        this.agent_ws_connected = true;
+                    });
+                    // Process the first message
+                    process_agent_ws_message(&this, cx, &text);
 
-                        // Process subsequent messages
-                        loop {
-                            match rx.recv().await {
-                                Ok(Some(text)) => {
-                                    process_agent_ws_message(&this, cx, &text);
-                                },
-                                Ok(None) | Err(_) => break,
-                            }
-                        }
-                    },
-                    _ => {},
+                    // Process subsequent messages
+                    while let Ok(Some(text)) = rx.recv().await {
+                        process_agent_ws_message(&this, cx, &text);
+                    }
                 }
 
                 tracing::debug!("agent activity WS disconnected, will retry");
@@ -2256,6 +2374,11 @@ impl ArborWindow {
         }
         self.active_worktree_index
             .and_then(|index| self.worktrees.get(index))
+            .map(|worktree| worktree.path.as_path())
+    }
+
+    fn selected_local_worktree_path(&self) -> Option<&Path> {
+        self.active_worktree()
             .map(|worktree| worktree.path.as_path())
     }
 
@@ -2842,6 +2965,111 @@ impl ArborWindow {
         cx.open_url(url);
     }
 
+    fn close_top_bar_worktree_quick_actions(&mut self) {
+        self.top_bar_quick_actions_open = false;
+        self.top_bar_quick_actions_submenu = None;
+    }
+
+    fn refresh_top_bar_external_launchers(&mut self) {
+        self.ide_launchers = detect_ide_launchers();
+        self.terminal_launchers = detect_terminal_launchers();
+    }
+
+    fn toggle_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) {
+        if self.selected_local_worktree_path().is_none() {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        }
+
+        if self.top_bar_quick_actions_open {
+            self.close_top_bar_worktree_quick_actions();
+        } else {
+            self.top_bar_quick_actions_open = true;
+            self.top_bar_quick_actions_submenu = None;
+            self.refresh_top_bar_external_launchers();
+        }
+        cx.notify();
+    }
+
+    fn toggle_top_bar_worktree_quick_actions_submenu(
+        &mut self,
+        submenu: QuickActionSubmenu,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.top_bar_quick_actions_open {
+            return;
+        }
+
+        self.top_bar_quick_actions_submenu = if self.top_bar_quick_actions_submenu == Some(submenu)
+        {
+            None
+        } else {
+            Some(submenu)
+        };
+        cx.notify();
+    }
+
+    fn run_worktree_quick_action(&mut self, action: WorktreeQuickAction, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let result = match action {
+            WorktreeQuickAction::OpenFinder => open_worktree_in_file_manager(&worktree_path),
+            WorktreeQuickAction::CopyPath => {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    worktree_path.display().to_string(),
+                ));
+                Ok("copied worktree path to clipboard".to_owned())
+            },
+        };
+
+        self.close_top_bar_worktree_quick_actions();
+        self.notice = Some(match result {
+            Ok(message) => message,
+            Err(error) => error,
+        });
+        cx.notify();
+    }
+
+    fn run_worktree_external_launcher(
+        &mut self,
+        submenu: QuickActionSubmenu,
+        launcher_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a local worktree first".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let launcher = match submenu {
+            QuickActionSubmenu::Ide => self.ide_launchers.get(launcher_index).copied(),
+            QuickActionSubmenu::Terminal => self.terminal_launchers.get(launcher_index).copied(),
+        };
+        let Some(launcher) = launcher else {
+            self.notice = Some("launcher no longer available".to_owned());
+            self.close_top_bar_worktree_quick_actions();
+            cx.notify();
+            return;
+        };
+
+        let result = open_worktree_with_external_launcher(&worktree_path, launcher);
+        self.close_top_bar_worktree_quick_actions();
+        self.notice = Some(match result {
+            Ok(message) => message,
+            Err(error) => error,
+        });
+        cx.notify();
+    }
+
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
@@ -2852,6 +3080,7 @@ impl ArborWindow {
             self.worktree_nav_back.push(old);
             self.worktree_nav_forward.clear();
         }
+        self.close_top_bar_worktree_quick_actions();
         self.active_worktree_index = Some(index);
         self.active_outpost_index = None;
         self.active_diff_session_id = None;
@@ -2873,36 +3102,12 @@ impl ArborWindow {
     }
 
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        self.close_top_bar_worktree_quick_actions();
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
         self.changed_files.clear();
         self.selected_changed_file = None;
         self.refresh_remote_changed_files(cx);
-        cx.notify();
-    }
-
-    fn remove_outpost(&mut self, outpost_index: usize, cx: &mut Context<Self>) {
-        let Some(outpost) = self.outposts.get(outpost_index) else {
-            return;
-        };
-
-        let outpost_id = outpost.outpost_id.clone();
-        if let Err(error) = self.outpost_store.remove(&outpost_id) {
-            self.notice = Some(format!("failed to remove outpost: {error}"));
-            cx.notify();
-            return;
-        }
-
-        self.outposts.remove(outpost_index);
-
-        if self.active_outpost_index == Some(outpost_index) {
-            self.active_outpost_index = None;
-        } else if let Some(active) = self.active_outpost_index
-            && active > outpost_index
-        {
-            self.active_outpost_index = Some(active - 1);
-        }
-
         cx.notify();
     }
 
@@ -3406,6 +3611,150 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn open_delete_modal(
+        &mut self,
+        target: DeleteTarget,
+        label: String,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) {
+        let worktree_index = match &target {
+            DeleteTarget::Worktree(i) => Some(*i),
+            _ => None,
+        };
+        self.delete_modal = Some(DeleteModal {
+            target,
+            label,
+            branch: worktree::short_branch(&branch),
+            has_unpushed: if worktree_index.is_some() {
+                None
+            } else {
+                Some(false)
+            },
+            delete_branch: false,
+            is_deleting: false,
+            error: None,
+        });
+        cx.notify();
+
+        // For worktrees, spawn async check for unpushed commits.
+        if let Some(worktree_index) = worktree_index
+            && let Some(wt) = self.worktrees.get(worktree_index)
+        {
+            let wt_path = wt.path.clone();
+            cx.spawn(async move |this, cx| {
+                let has_unpushed = cx
+                    .background_spawn(async move { worktree::has_unpushed_commits(&wt_path) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(modal) = this.delete_modal.as_mut() {
+                        modal.has_unpushed = Some(has_unpushed);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn close_delete_modal(&mut self, cx: &mut Context<Self>) {
+        self.delete_modal = None;
+        cx.notify();
+    }
+
+    fn execute_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.delete_modal.as_ref() else {
+            return;
+        };
+        if modal.is_deleting {
+            return;
+        }
+
+        match modal.target.clone() {
+            DeleteTarget::Worktree(index) => {
+                let Some(wt) = self.worktrees.get(index) else {
+                    self.close_delete_modal(cx);
+                    return;
+                };
+                let repo_root = wt.repo_root.clone();
+                let wt_path = wt.path.clone();
+                let branch = modal.branch.clone();
+                let delete_branch = modal.delete_branch;
+
+                if let Some(modal) = self.delete_modal.as_mut() {
+                    modal.is_deleting = true;
+                    modal.error = None;
+                    cx.notify();
+                }
+
+                cx.spawn(async move |this, cx| {
+                    // Remove the worktree (force to handle dirty state).
+                    let result = cx
+                        .background_spawn({
+                            let repo_root = repo_root.clone();
+                            let wt_path = wt_path.clone();
+                            async move { worktree::remove(&repo_root, &wt_path, true) }
+                        })
+                        .await;
+
+                    if let Err(e) = &result {
+                        let err_msg = e.to_string();
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(modal) = this.delete_modal.as_mut() {
+                                modal.is_deleting = false;
+                                modal.error = Some(err_msg);
+                                cx.notify();
+                            }
+                        });
+                        return;
+                    }
+
+                    // Optionally delete the branch.
+                    if delete_branch && !branch.is_empty() {
+                        let _ = cx
+                            .background_spawn(async move {
+                                worktree::delete_branch(&repo_root, &branch)
+                            })
+                            .await;
+                    }
+
+                    let _ = this.update(cx, |this, cx| {
+                        this.delete_modal = None;
+                        this.refresh_worktrees(cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+            DeleteTarget::Outpost(index) => {
+                let Some(outpost) = self.outposts.get(index) else {
+                    self.close_delete_modal(cx);
+                    return;
+                };
+                let outpost_id = outpost.outpost_id.clone();
+
+                if let Err(e) = self.outpost_store.remove(&outpost_id) {
+                    if let Some(modal) = self.delete_modal.as_mut() {
+                        modal.error = Some(e.to_string());
+                        cx.notify();
+                    }
+                    return;
+                }
+
+                self.outposts.remove(index);
+                if self.active_outpost_index == Some(index) {
+                    self.active_outpost_index = None;
+                } else if let Some(active) = self.active_outpost_index
+                    && active > index
+                {
+                    self.active_outpost_index = Some(active - 1);
+                }
+                self.delete_modal = None;
+                cx.notify();
+            },
+        }
+    }
+
     fn update_create_worktree_modal_input(
         &mut self,
         input: ModalInputEvent,
@@ -3865,6 +4214,33 @@ impl ArborWindow {
                 self.right_pane_search.push_str(key_char);
                 cx.notify();
                 cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.delete_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_delete_modal(cx);
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.execute_delete(cx);
+                    cx.stop_propagation();
+                },
+                "space" | " " => {
+                    if let Some(modal) = self.delete_modal.as_mut()
+                        && matches!(modal.target, DeleteTarget::Worktree(_))
+                    {
+                        modal.delete_branch = !modal.delete_branch;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                },
+                _ => {},
             }
             return;
         }
@@ -5650,6 +6026,9 @@ impl ArborWindow {
         let back_enabled = !self.worktree_nav_back.is_empty();
         let forward_enabled = !self.worktree_nav_forward.is_empty();
         let sidebar_hidden = !self.left_pane_visible;
+        let worktree_quick_actions_enabled = self.selected_local_worktree_path().is_some();
+        let worktree_quick_actions_open =
+            worktree_quick_actions_enabled && self.top_bar_quick_actions_open;
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -5753,6 +6132,460 @@ impl ArborWindow {
                             .child(centered_title),
                     ),
             )
+            // Right group: worktree quick actions + report issue button
+            .child(
+                div()
+                    .absolute()
+                    .right(px(16.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("worktree-quick-actions")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(if worktree_quick_actions_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(worktree_quick_actions_enabled, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(theme.panel_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_menu(cx);
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .child("\u{f0e7}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .child("Action"),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(9.))
+                                    .child(if worktree_quick_actions_open {
+                                        "\u{f077}"
+                                    } else {
+                                        "\u{f078}"
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("report-issue")
+                            .cursor_pointer()
+                            .text_color(rgb(theme.text_muted))
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_top_bar_worktree_quick_actions();
+                                cx.open_url("https://github.com/penso/arbor/issues/new");
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(13.))
+                                    .child("\u{f188}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .child("Report issue"),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+        let menu_open =
+            self.top_bar_quick_actions_open && self.selected_local_worktree_path().is_some();
+
+        if !menu_open {
+            return div();
+        }
+
+        let ide_has_launchers = !self.ide_launchers.is_empty();
+        let terminal_has_launchers = !self.terminal_launchers.is_empty();
+        let submenu = self.top_bar_quick_actions_submenu;
+        let ide_row_active = submenu == Some(QuickActionSubmenu::Ide);
+        let terminal_row_active = submenu == Some(QuickActionSubmenu::Terminal);
+
+        let mut overlay = div()
+            .absolute()
+            .right(px(16.))
+            .top(px(TITLEBAR_HEIGHT))
+            .mt(px(4.))
+            .child(
+                div()
+                    .w(px(192.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("quick-action-open-finder")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_worktree_quick_action(WorktreeQuickAction::OpenFinder, cx);
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(0xe5c07b))
+                                    .child("\u{f07b}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Open in Finder"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("quick-action-open-ide-submenu")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .text_color(rgb(if ide_has_launchers {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(ide_has_launchers, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_submenu(
+                                            QuickActionSubmenu::Ide,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(ide_row_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(12.))
+                                            .text_color(rgb(0x39a0ed))
+                                            .child("\u{f121}"),
+                                    )
+                                    .child(div().text_size(px(11.)).child("IDE")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if ide_has_launchers {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f054}"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("quick-action-open-terminal-submenu")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .text_color(rgb(if terminal_has_launchers {
+                                theme.text_primary
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(terminal_has_launchers, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_top_bar_worktree_quick_actions_submenu(
+                                            QuickActionSubmenu::Terminal,
+                                            cx,
+                                        );
+                                    }))
+                            })
+                            .when(terminal_row_active, |this| {
+                                this.bg(rgb(theme.panel_active_bg))
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(12.))
+                                            .text_color(rgb(0x68c38d))
+                                            .child("\u{f120}"),
+                                    )
+                                    .child(div().text_size(px(11.)).child("Terminal")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if terminal_has_launchers {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f054}"),
+                            ),
+                    )
+                    .child(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(rgb(theme.border)))
+                    .child(
+                        div()
+                            .id("quick-action-copy-path")
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_worktree_quick_action(WorktreeQuickAction::CopyPath, cx);
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("\u{f0c5}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Copy path"),
+                            ),
+                    ),
+            );
+
+        if let Some(submenu) = submenu {
+            let launchers: &[ExternalLauncher] = match submenu {
+                QuickActionSubmenu::Ide => &self.ide_launchers,
+                QuickActionSubmenu::Terminal => &self.terminal_launchers,
+            };
+            if launchers.is_empty() {
+                return overlay;
+            }
+            let submenu_top = match submenu {
+                QuickActionSubmenu::Ide => px(28.),
+                QuickActionSubmenu::Terminal => px(52.),
+            };
+
+            overlay = overlay.child(
+                div()
+                    .id("quick-action-launcher-submenu")
+                    .absolute()
+                    .right(px(200.))
+                    .top(submenu_top)
+                    .w(px(220.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .children(launchers.iter().enumerate().map(|(index, launcher)| {
+                        let launcher = *launcher;
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "quick-action-launcher-item".into(),
+                                index as u64,
+                            ))
+                            .h(px(24.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_worktree_external_launcher(submenu, index, cx);
+                            }))
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .flex_none()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_center()
+                                    .text_color(rgb(launcher.icon_color))
+                                    .child(launcher.icon),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(launcher.label),
+                            )
+                    })),
+            );
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.close_top_bar_worktree_quick_actions();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(overlay)
+    }
+
+    fn render_notice_toast(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(notice) = self.notice.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_error = notice_looks_like_error(&notice);
+        let background = if is_error {
+            theme.notice_bg
+        } else {
+            theme.chrome_bg
+        };
+        let text_color = if is_error {
+            theme.notice_text
+        } else {
+            theme.text_primary
+        };
+        let border_color = if is_error {
+            0xb95d5d
+        } else {
+            theme.accent
+        };
+        let icon = if is_error {
+            "\u{f06a}"
+        } else {
+            "\u{f05a}"
+        };
+        let icon_color = if is_error {
+            theme.notice_text
+        } else {
+            theme.accent
+        };
+
+        div()
+            .absolute()
+            .right(px(16.))
+            .bottom(px(36.))
+            .w(px(420.))
+            .max_w(px(420.))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(border_color))
+            .bg(rgb(background))
+            .px_2()
+            .py(px(8.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(12.))
+                            .text_color(rgb(icon_color))
+                            .child(icon),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(text_color))
+                            .child(notice),
+                    ),
+            )
+            .child(
+                div()
+                    .id("notice-toast-dismiss")
+                    .cursor_pointer()
+                    .font_family(FONT_MONO)
+                    .text_size(px(11.))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.notice = None;
+                        cx.notify();
+                    }))
+                    .child("\u{f00d}"),
+            )
     }
 
     fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5821,7 +6654,7 @@ impl ArborWindow {
                 for (wt_index, worktree) in repo_worktrees {
                     let is_active = self.active_worktree_index == Some(wt_index);
                     let first_char: String = worktree
-                        .label
+                        .branch
                         .chars()
                         .next()
                         .unwrap_or('?')
@@ -6041,7 +6874,7 @@ impl ArborWindow {
                                                 // Worktree count badge
                                                 .child(
                                                     div()
-                                                        .text_size(px(9.))
+                                                        .text_sm()
                                                         .text_color(rgb(theme.text_disabled))
                                                         .child(format!(
                                                             "{}",
@@ -6061,14 +6894,14 @@ impl ArborWindow {
                                         .child(
                                             div()
                                                 .id(("repository-add-worktree", repository_index))
-                                                .size(px(18.))
+                                                .size(px(20.))
                                                 .rounded_sm()
                                                 .cursor_pointer()
                                                 .flex_none()
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
-                                                .text_xs()
+                                                .text_sm()
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(theme.text_muted))
                                                 .child("+")
@@ -6101,7 +6934,9 @@ impl ArborWindow {
                                                 let diff_summary = worktree.diff_summary;
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
-                                                let show_name = worktree.label != worktree.branch;
+                                                let is_primary = worktree.is_primary_checkout;
+                                                let wt_label = worktree.label.clone();
+                                                let wt_branch = worktree.branch.clone();
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
@@ -6109,32 +6944,56 @@ impl ArborWindow {
                                                 };
                                                 div()
                                                     .id(("worktree-row", index))
+                                                    .group("wt-row")
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
                                                     .flex()
                                                     .items_center()
-                                                    .gap_1()
-                                                    .h(px(40.))
                                                     .on_click(
                                                         cx.listener(move |this, _, window, cx| {
                                                             this.select_worktree(index, window, cx)
                                                         }),
                                                     )
-                                                    // Activity dot outside the cell
+                                                    // X delete button in 24px left column (hidden until row hover)
                                                     .child(
                                                         div()
                                                             .flex_none()
-                                                            .w(px(20.))
+                                                            .w(px(24.))
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
-                                                            .when_some(agent_dot_color, |this, color| {
+                                                            .when(!is_primary, |this| {
                                                                 this.child(
                                                                     div()
-                                                                        .flex_none()
-                                                                        .size(px(6.))
-                                                                        .rounded_full()
-                                                                        .bg(rgb(color)),
+                                                                        .id(("worktree-delete", index))
+                                                                        .w(px(18.))
+                                                                        .h(px(18.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .font_family(FONT_MONO)
+                                                                        .text_size(px(16.))
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
+                                                                        .invisible()
+                                                                        .group_hover("wt-row", |s| s.visible())
+                                                                        .child("\u{f00d}")
+                                                                        .on_mouse_down(
+                                                                            MouseButton::Left,
+                                                                            cx.listener({
+                                                                                let wt_label = wt_label.clone();
+                                                                                let wt_branch = wt_branch.clone();
+                                                                                move |this, _: &MouseDownEvent, _, cx| {
+                                                                                    cx.stop_propagation();
+                                                                                    this.open_delete_modal(
+                                                                                        DeleteTarget::Worktree(index),
+                                                                                        wt_label.clone(),
+                                                                                        wt_branch.clone(),
+                                                                                        cx,
+                                                                                    );
+                                                                                }
+                                                                            }),
+                                                                        ),
                                                                 )
                                                             }),
                                                     )
@@ -6155,112 +7014,73 @@ impl ArborWindow {
                                                         .py_1()
                                                         .flex()
                                                         .flex_col()
+                                                        .gap(px(1.))
                                                         .justify_center()
                                                         .when(is_active, |this| {
                                                             this.bg(rgb(theme.panel_active_bg))
                                                         })
-                                                    .child(
-                                                        div().min_w_0().flex_1().when(
-                                                            show_name,
-                                                            |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .min_w_0()
-                                                                        .overflow_hidden()
-                                                                        .whitespace_nowrap()
-                                                                        .text_ellipsis()
-                                                                        .text_xs()
-                                                                        .font_weight(
-                                                                            FontWeight::SEMIBOLD,
-                                                                        )
-                                                                        .text_color(rgb(
-                                                                            theme.text_primary,
-                                                                        ))
-                                                                        .child(
-                                                                            worktree
-                                                                                .label
-                                                                                .clone(),
-                                                                        ),
-                                                                )
-                                                            },
-                                                        ),
-                                                    )
+                                                    // Line 1: [icon] [spinner] [name] ... [+- lines] [time ago]
                                                     .child(
                                                         div()
-                                                            .min_w_0()
                                                             .flex()
                                                             .items_center()
-                                                            .justify_between()
-                                                            .gap_2()
+                                                            .gap_1()
+                                                            // Git branch icon
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .text_size(px(10.))
+                                                                    .text_color(rgb(theme.text_muted))
+                                                                    .child("\u{e725}"),
+                                                            )
+                                                            // Activity spinner dot
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .w(px(8.))
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .when_some(agent_dot_color, |this, color| {
+                                                                        this.child(
+                                                                            div()
+                                                                                .flex_none()
+                                                                                .size(px(6.))
+                                                                                .rounded_full()
+                                                                                .bg(rgb(color)),
+                                                                        )
+                                                                    }),
+                                                            )
+                                                            // Name/label
                                                             .child(
                                                                 div()
                                                                     .min_w_0()
+                                                                    .flex_1()
                                                                     .overflow_hidden()
                                                                     .whitespace_nowrap()
                                                                     .text_ellipsis()
                                                                     .text_xs()
-                                                                    .text_color(rgb(theme.text_disabled))
+                                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                                    .text_color(rgb(theme.text_primary))
                                                                     .child(worktree.branch.clone()),
                                                             )
+                                                            // Right side: [+- lines] [time ago]
                                                             .child({
                                                                 let summary =
                                                                     diff_summary.unwrap_or_default();
                                                                 let show_diff_summary =
                                                                     summary.additions > 0
                                                                         || summary.deletions > 0;
-                                                                let mut details = div()
+                                                                let mut right = div()
                                                                     .flex_none()
                                                                     .flex()
                                                                     .items_center()
-                                                                    .justify_end()
                                                                     .gap_1();
-
-                                                                if let Some(pr_number) = pr_number {
-                                                                    let pr_text =
-                                                                        format!("#{pr_number}");
-                                                                    if let Some(pr_url) =
-                                                                        pr_url.clone()
-                                                                    {
-                                                                        details = details.child(
-                                                                            div()
-                                                                                .id((
-                                                                                    "worktree-pr-link",
-                                                                                    index,
-                                                                                ))
-                                                                                .cursor_pointer()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    theme.accent,
-                                                                                ))
-                                                                                .child(pr_text)
-                                                                                .on_click(
-                                                                                    cx.listener(
-                                                                                        move |this, _, _, cx| {
-                                                                                            this.open_external_url(
-                                                                                                &pr_url,
-                                                                                                cx,
-                                                                                            );
-                                                                                            cx.stop_propagation();
-                                                                                        },
-                                                                                    ),
-                                                                                ),
-                                                                        );
-                                                                    } else {
-                                                                        details = details.child(
-                                                                            div()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    theme.accent,
-                                                                                ))
-                                                                                .child(pr_text),
-                                                                        );
-                                                                    }
-                                                                }
 
                                                                 if self.worktree_stats_loading
                                                                     && diff_summary.is_none()
                                                                 {
-                                                                    details = details.child(
+                                                                    right = right.child(
                                                                         div()
                                                                             .text_xs()
                                                                             .text_color(rgb(
@@ -6269,7 +7089,7 @@ impl ArborWindow {
                                                                             .child("..."),
                                                                     );
                                                                 } else if show_diff_summary {
-                                                                    details = details
+                                                                    right = right
                                                                         .child(
                                                                             div()
                                                                                 .text_xs()
@@ -6297,7 +7117,7 @@ impl ArborWindow {
                                                                 }
 
                                                                 if let Some(activity_ms) = worktree.last_activity_unix_ms {
-                                                                    details = details.child(
+                                                                    right = right.child(
                                                                         div()
                                                                             .text_xs()
                                                                             .text_color(rgb(
@@ -6307,7 +7127,62 @@ impl ArborWindow {
                                                                     );
                                                                 }
 
-                                                                details
+                                                                right
+                                                            }),
+                                                    )
+                                                    // Line 2: [agent task or dir name] ... [PR number]
+                                                    .child(
+                                                        div()
+                                                            .pl(px(22.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .flex_1()
+                                                                    .overflow_hidden()
+                                                                    .whitespace_nowrap()
+                                                                    .text_ellipsis()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(theme.text_disabled))
+                                                                    .child(
+                                                                        worktree
+                                                                            .agent_task
+                                                                            .clone()
+                                                                            .unwrap_or_else(|| worktree.label.clone()),
+                                                                    ),
+                                                            )
+                                                            .when_some(pr_number, |this, pr_num| {
+                                                                let pr_text = format!("#{pr_num}");
+                                                                if let Some(pr_url) = pr_url.clone() {
+                                                                    this.child(
+                                                                        div()
+                                                                            .id(("worktree-pr-link", index))
+                                                                            .cursor_pointer()
+                                                                            .flex_none()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(theme.accent))
+                                                                            .child(pr_text)
+                                                                            .on_click(cx.listener(
+                                                                                move |this, _, _, cx| {
+                                                                                    this.open_external_url(
+                                                                                        &pr_url,
+                                                                                        cx,
+                                                                                    );
+                                                                                    cx.stop_propagation();
+                                                                                },
+                                                                            )),
+                                                                    )
+                                                                } else {
+                                                                    this.child(
+                                                                        div()
+                                                                            .flex_none()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(theme.accent))
+                                                                            .child(pr_text),
+                                                                    )
+                                                                }
                                                             }),
                                                     )
                                                     )
@@ -6318,13 +7193,14 @@ impl ArborWindow {
                                 .when(!repo_outposts.is_empty(), |group| {
                                     group.child(
                                         div()
-                                            .pl(px(8.))
                                             .flex()
                                             .flex_col()
                                             .gap_1()
                                             .children(
                                                 repo_outposts.into_iter().map(|(outpost_index, outpost)| {
                                                     let is_active = self.active_outpost_index == Some(outpost_index);
+                                                    let op_label = outpost.label.clone();
+                                                    let op_branch = outpost.branch.clone();
                                                     let status_color = match outpost.status {
                                                         arbor_core::outpost::OutpostStatus::Available => theme.accent,
                                                         arbor_core::outpost::OutpostStatus::Unreachable => 0xeb6f92,
@@ -6332,33 +7208,85 @@ impl ArborWindow {
                                                     };
                                                     div()
                                                         .id(("outpost-row", outpost_index))
+                                                        .group("op-row")
                                                         .font_family(FONT_MONO)
                                                         .cursor_pointer()
-                                                        .rounded_sm()
-                                                        .border_1()
-                                                        .border_color(rgb(if is_active { theme.accent } else { theme.border }))
-                                                        .bg(rgb(theme.panel_bg))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .h(px(40.))
                                                         .flex()
-                                                        .flex_col()
-                                                        .justify_center()
-                                                        .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                                                        .items_center()
                                                         .on_click(cx.listener(move |this, _, window, cx| {
                                                             this.select_outpost(outpost_index, window, cx);
                                                         }))
+                                                        // X delete button in 24px left column (hidden until row hover)
+                                                        .child(
+                                                            div()
+                                                                .flex_none()
+                                                                .w(px(24.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .child(
+                                                                    div()
+                                                                        .id(("outpost-delete", outpost_index))
+                                                                        .w(px(18.))
+                                                                        .h(px(18.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .font_family(FONT_MONO)
+                                                                        .text_size(px(16.))
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
+                                                                        .invisible()
+                                                                        .group_hover("op-row", |s| s.visible())
+                                                                        .child("\u{f00d}")
+                                                                        .on_mouse_down(
+                                                                            MouseButton::Left,
+                                                                            cx.listener({
+                                                                                let op_label = op_label.clone();
+                                                                                let op_branch = op_branch.clone();
+                                                                                move |this, _: &MouseDownEvent, _, cx| {
+                                                                                    cx.stop_propagation();
+                                                                                    this.open_delete_modal(
+                                                                                        DeleteTarget::Outpost(outpost_index),
+                                                                                        op_label.clone(),
+                                                                                        op_branch.clone(),
+                                                                                        cx,
+                                                                                    );
+                                                                                }
+                                                                            }),
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(rgb(if is_active { theme.accent } else { theme.border }))
+                                                            .bg(rgb(theme.panel_bg))
+                                                            .px_2()
+                                                            .py_1()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(1.))
+                                                            .justify_center()
+                                                            .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
+                                                        // Line 1: [icon] [name] ... [@hostname]
                                                         .child(
                                                             div()
                                                                 .flex()
                                                                 .items_center()
                                                                 .gap_1()
+                                                                // Globe icon
                                                                 .child(
                                                                     div()
-                                                                        .text_sm()
+                                                                        .flex_none()
+                                                                        .text_size(px(10.))
                                                                         .text_color(rgb(status_color))
                                                                         .child("\u{f0ac}"),
                                                                 )
+                                                                // Name/label
                                                                 .child(
                                                                     div()
                                                                         .min_w_0()
@@ -6370,47 +7298,35 @@ impl ArborWindow {
                                                                         .font_weight(FontWeight::SEMIBOLD)
                                                                         .text_color(rgb(theme.text_primary))
                                                                         .child(outpost.label.clone()),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .pl(px(14.))
-                                                                .min_w_0()
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_between()
-                                                                .gap_2()
-                                                                .child(
-                                                                    div()
-                                                                        .min_w_0()
-                                                                        .overflow_hidden()
-                                                                        .whitespace_nowrap()
-                                                                        .text_ellipsis()
-                                                                        .text_xs()
-                                                                        .text_color(rgb(theme.text_disabled))
-                                                                        .child(outpost.branch.clone()),
                                                                 )
+                                                                // Right side: @hostname
                                                                 .child(
                                                                     div()
                                                                         .flex_none()
                                                                         .text_xs()
                                                                         .text_color(rgb(theme.text_muted))
                                                                         .child(format!("@{}", outpost.hostname)),
-                                                                )
+                                                                ),
+                                                        )
+                                                        // Line 2: [branch name]
+                                                        .child(
+                                                            div()
+                                                                .pl(px(14.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
                                                                 .child(
                                                                     div()
-                                                                        .id(("outpost-remove", outpost_index))
-                                                                        .flex_none()
-                                                                        .cursor_pointer()
+                                                                        .min_w_0()
+                                                                        .flex_1()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
                                                                         .text_xs()
-                                                                        .text_color(rgb(theme.text_muted))
-                                                                        .hover(|style| style.text_color(rgb(theme.text_primary)))
-                                                                        .ml_1()
-                                                                        .child("\u{f00d}")
-                                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                                            this.remove_outpost(outpost_index, cx);
-                                                                        })),
+                                                                        .text_color(rgb(theme.text_disabled))
+                                                                        .child(outpost.branch.clone()),
                                                                 ),
+                                                        )
                                                         )
                                                 }),
                                             ),
@@ -6428,7 +7344,7 @@ impl ArborWindow {
                     .items_center()
                     .gap_2()
                     .child(
-                        action_button(theme, "open-add-repository", "+ Add Repo", false, false)
+                        action_button(theme, "open-add-repository", "Add Repo", false, false)
                             .flex_1()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_add_repository_picker(cx);
@@ -7996,6 +8912,185 @@ impl ArborWindow {
             )
     }
 
+    fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.delete_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_worktree = matches!(modal.target, DeleteTarget::Worktree(_));
+        let title = if is_worktree {
+            "Delete Worktree"
+        } else {
+            "Remove Outpost"
+        };
+        let delete_disabled = modal.is_deleting;
+        let delete_label = if modal.is_deleting {
+            "Deleting..."
+        } else if is_worktree {
+            "Delete"
+        } else {
+            "Remove"
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(440.))
+                    .max_w(px(440.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // Header
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(title),
+                            )
+                            .child(
+                                action_button(theme, "close-delete-modal", "Close", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_delete_modal(cx);
+                                    })),
+                            ),
+                    )
+                    // Label
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format!("{}: {}", if is_worktree { "Worktree" } else { "Outpost" }, modal.label)),
+                    )
+                    // Unpushed commits warning (worktrees only)
+                    .when(is_worktree, |this| {
+                        match modal.has_unpushed {
+                            None => this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Checking for unpushed commits..."),
+                            ),
+                            Some(true) => this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xe5c07b))
+                                    .child("\u{f071} This worktree has unpushed commits that will be lost."),
+                            ),
+                            Some(false) => this,
+                        }
+                    })
+                    // Branch deletion checkbox (worktrees only)
+                    .when(is_worktree && !modal.branch.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("delete-branch-checkbox")
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_1()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(modal) = this.delete_modal.as_mut() {
+                                        modal.delete_branch = !modal.delete_branch;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(14.))
+                                        .h(px(14.))
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .when(modal.delete_branch, |this| {
+                                            this.bg(rgb(theme.accent))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(theme.sidebar_bg))
+                                                        .child("\u{f00c}"),
+                                                )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(format!("Also delete branch `{}`", modal.branch)),
+                                ),
+                        )
+                    })
+                    // Error display
+                    .when_some(modal.error.clone(), |this, err| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xeb6f92))
+                                .child(err),
+                        )
+                    })
+                    // Buttons
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                action_button(theme, "delete-cancel", "Cancel", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_delete_modal(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("delete-confirm")
+                                    .cursor_pointer()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(rgb(0xeb6f92))
+                                    .bg(rgb(theme.panel_bg))
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgb(0xeb6f92))
+                                    .when(delete_disabled, |this| {
+                                        this.opacity(0.5).cursor_default()
+                                    })
+                                    .when(!delete_disabled, |this| {
+                                        this.hover(|s| s.bg(rgb(0xeb6f92)).text_color(rgb(theme.sidebar_bg)))
+                                    })
+                                    .child(delete_label)
+                                    .when(!delete_disabled, |this| {
+                                        this.on_click(cx.listener(|this, _, _, cx| {
+                                            this.execute_delete(cx);
+                                        }))
+                                    }),
+                            ),
+                    ),
+            )
+    }
+
     fn render_manage_hosts_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_hosts_modal.clone() else {
             return div();
@@ -8492,6 +9587,7 @@ impl WorktreeSummary {
             pr_url: None,
             diff_summary: None,
             agent_state: None,
+            agent_task: None,
             last_activity_unix_ms,
         }
     }
@@ -8556,14 +9652,6 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
-            .child(div().when_some(self.notice.clone(), |this, notice| {
-                this.px_3()
-                    .py_2()
-                    .bg(rgb(theme.notice_bg))
-                    .text_color(rgb(theme.notice_text))
-                    .text_xs()
-                    .child(notice)
-            }))
             .child(
                 div()
                     .flex_1()
@@ -8590,7 +9678,10 @@ impl Render for ArborWindow {
                     .child(self.render_right_pane(cx)),
             )
             .child(self.render_status_bar())
+            .child(self.render_top_bar_worktree_quick_actions_menu(cx))
+            .child(self.render_notice_toast(cx))
             .child(self.render_create_modal(cx))
+            .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .when(
                 self.quit_overlay_until
@@ -8668,8 +9759,7 @@ fn process_agent_ws_message(
                         "waiting" => AgentState::Waiting,
                         _ => return,
                     };
-                    let updated_at =
-                        session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+                    let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
                     let entries = vec![(cwd.to_owned(), state, updated_at)];
                     let _ = this.update(cx, |this, cx| {
                         apply_agent_ws_update(this, &entries);
@@ -8702,24 +9792,19 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
             .filter(|wt_path| cwd_path.starts_with(wt_path))
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
-        if let Some(matched_path) = best_match {
-            if let Some(worktree) = app
-                .worktrees
-                .iter_mut()
-                .find(|w| &w.path == matched_path)
-            {
-                tracing::debug!(
-                    cwd = %cwd,
-                    worktree = %worktree.path.display(),
-                    ?state,
-                    "agent activity matched"
-                );
-                worktree.agent_state = Some(*state);
-                if let Some(ts) = updated_at {
-                    worktree.last_activity_unix_ms = Some(
-                        worktree.last_activity_unix_ms.unwrap_or(0).max(*ts),
-                    );
-                }
+        if let Some(matched_path) = best_match
+            && let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path)
+        {
+            tracing::debug!(
+                cwd = %cwd,
+                worktree = %worktree.path.display(),
+                ?state,
+                "agent activity matched"
+            );
+            worktree.agent_state = Some(*state);
+            if let Some(ts) = updated_at {
+                worktree.last_activity_unix_ms =
+                    Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
             }
         }
     }
@@ -10265,6 +11350,22 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     format!("{truncated}\u{2026}")
 }
 
+fn notice_looks_like_error(notice: &str) -> bool {
+    let lower = notice.to_ascii_lowercase();
+    [
+        "error",
+        "failed",
+        "invalid",
+        "cannot",
+        "could not",
+        "missing",
+        "not found",
+        "denied",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn action_button(
     theme: ThemePalette,
     id: impl Into<ElementId>,
@@ -10566,6 +11667,203 @@ fn truncate_middle_text(input: &str, max_chars: usize) -> String {
     output.push('…');
     output.extend(chars.iter().skip(tail_start));
     output
+}
+
+fn run_launch_command(command: &mut Command, operation: &str) -> Result<(), String> {
+    let output = run_command_output(command, operation)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure_message(operation, &output))
+    }
+}
+
+fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in Finder")?;
+        return Ok("opened worktree in Finder".to_owned());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in file manager")?;
+        return Ok("opened worktree in file manager".to_owned());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        command.arg(worktree_path);
+        run_launch_command(&mut command, "open worktree in File Explorer")?;
+        return Ok("opened worktree in File Explorer".to_owned());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening this worktree in a file manager is not supported on this platform".to_owned())
+}
+
+fn open_worktree_with_external_launcher(
+    worktree_path: &Path,
+    launcher: ExternalLauncher,
+) -> Result<String, String> {
+    match launcher.kind {
+        ExternalLauncherKind::Command(command_name) => {
+            let mut command = Command::new(command_name);
+            command.arg(worktree_path);
+            run_launch_command(
+                &mut command,
+                &format!("open worktree with {}", launcher.label),
+            )?;
+        },
+        ExternalLauncherKind::MacApp(app_name) => {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(app_name).arg(worktree_path);
+            run_launch_command(
+                &mut command,
+                &format!("open worktree in {}", launcher.label),
+            )?;
+        },
+    }
+
+    Ok(format!("opened worktree in {}", launcher.label))
+}
+
+fn command_exists_on_path(command_name: &str) -> bool {
+    let Some(path_env) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&path_env).any(|directory| directory.join(command_name).is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_app_bundle_exists(app_name: &str) -> bool {
+    let launch_services_status = Command::new("open")
+        .arg("-Ra")
+        .arg(app_name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if matches!(launch_services_status, Ok(status) if status.success()) {
+        return true;
+    }
+
+    // Fallback for environments where LaunchServices lookup is unavailable.
+    let bundle = format!("{app_name}.app");
+    [
+        "/Applications",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .chain(
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .into_iter()
+            .map(|home| home.join("Applications")),
+    )
+    .any(|base| base.join(&bundle).exists())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_app_bundle_exists(_: &str) -> bool {
+    false
+}
+
+fn detect_external_launcher(
+    label: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    mac_app: Option<&'static str>,
+    command: Option<&'static str>,
+) -> Option<ExternalLauncher> {
+    if let Some(app_name) = mac_app
+        && mac_app_bundle_exists(app_name)
+    {
+        return Some(ExternalLauncher {
+            label,
+            icon,
+            icon_color,
+            kind: ExternalLauncherKind::MacApp(app_name),
+        });
+    }
+
+    if let Some(command_name) = command
+        && command_exists_on_path(command_name)
+    {
+        return Some(ExternalLauncher {
+            label,
+            icon,
+            icon_color,
+            kind: ExternalLauncherKind::Command(command_name),
+        });
+    }
+
+    None
+}
+
+fn detect_ide_launchers() -> Vec<ExternalLauncher> {
+    [
+        (
+            "VS Code",
+            "\u{e70c}",
+            0x2f80ed,
+            Some("Visual Studio Code"),
+            Some("code"),
+        ),
+        (
+            "VS Code Insiders",
+            "\u{e70c}",
+            0x4f9fff,
+            Some("Visual Studio Code - Insiders"),
+            Some("code-insiders"),
+        ),
+        ("Cursor", "Cu", 0x6ca6ff, Some("Cursor"), Some("cursor")),
+        ("Zed", "Ze", 0x59a6ff, Some("Zed"), Some("zed")),
+        (
+            "Windsurf",
+            "Ws",
+            0x3cb9fc,
+            Some("Windsurf"),
+            Some("windsurf"),
+        ),
+        ("VSCodium", "Vc", 0x23a8f2, Some("VSCodium"), Some("codium")),
+    ]
+    .into_iter()
+    .filter_map(|(label, icon, icon_color, mac_app, command)| {
+        detect_external_launcher(label, icon, icon_color, mac_app, command)
+    })
+    .collect()
+}
+
+fn detect_terminal_launchers() -> Vec<ExternalLauncher> {
+    [
+        ("Terminal", "Tm", 0x7ecf95, Some("Terminal"), None),
+        ("iTerm", "iT", 0x8ad1ec, Some("iTerm"), Some("iterm2")),
+        ("iTerm2", "i2", 0x8ad1ec, Some("iTerm2"), Some("iterm2")),
+        ("Ghostty", "Gh", 0xbf8cf8, Some("Ghostty"), Some("ghostty")),
+        (
+            "Alacritty",
+            "Al",
+            0xf0a168,
+            Some("Alacritty"),
+            Some("alacritty"),
+        ),
+        ("Warp", "Wp", 0x6f8dff, Some("Warp"), Some("warp")),
+        ("WezTerm", "Wz", 0x6dc5ff, Some("WezTerm"), Some("wezterm")),
+        ("Kitty", "Kt", 0xc89fff, Some("kitty"), Some("kitty")),
+    ]
+    .into_iter()
+    .filter_map(|(label, icon, icon_color, mac_app, command)| {
+        detect_external_launcher(label, icon, icon_color, mac_app, command)
+    })
+    .collect()
 }
 
 fn run_command_output(
