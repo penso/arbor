@@ -1,10 +1,8 @@
 use {
     gix::status::{UntrackedFiles, index_worktree::iter::Summary},
     std::{
-        collections::HashMap,
         fmt, fs,
         path::{Path, PathBuf},
-        process::Command,
     },
     thiserror::Error,
 };
@@ -58,13 +56,12 @@ pub enum ChangesError {
     OpenRepository { path: PathBuf, message: String },
     #[error("failed to read git status in `{path}`: {message}")]
     Status { path: PathBuf, message: String },
-    #[error("failed to run git command in `{path}`: {message}")]
-    GitCommand { path: PathBuf, message: String },
+    #[error("failed to compute diff in `{path}`: {message}")]
+    Diff { path: PathBuf, message: String },
 }
 
 pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError> {
     let repository = open_repository(repo_path)?;
-    let summary_by_path = diff_line_summary_by_path(repo_path)?;
 
     let status_iter = repository
         .status(gix::progress::Discard)
@@ -91,12 +88,16 @@ pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError>
             continue;
         };
 
-        let path = PathBuf::from(String::from_utf8_lossy(item.rela_path().as_ref()).into_owned());
-        let line_summary = summary_by_path.get(&path).copied().unwrap_or_default();
+        let rela_path_str = String::from_utf8_lossy(item.rela_path().as_ref()).into_owned();
+        let path = PathBuf::from(&rela_path_str);
+        let kind = summary_to_change_kind(summary);
+
+        let line_summary =
+            compute_line_stats_for_file(repo_path, &rela_path_str, kind, &repository);
 
         files.push(ChangedFile {
             path,
-            kind: summary_to_change_kind(summary),
+            kind,
             additions: line_summary.additions,
             deletions: line_summary.deletions,
         });
@@ -113,48 +114,82 @@ pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError>
 }
 
 pub fn diff_line_summary(repo_path: &Path) -> Result<DiffLineSummary, ChangesError> {
+    let files = changed_files(repo_path)?;
     let mut summary = DiffLineSummary::default();
-    for line_summary in diff_line_summary_by_path(repo_path)?.values() {
-        summary.additions += line_summary.additions;
-        summary.deletions += line_summary.deletions;
+    for file in &files {
+        summary.additions += file.additions;
+        summary.deletions += file.deletions;
     }
-
     Ok(summary)
 }
 
-fn diff_line_summary_by_path(
+/// Read a blob from HEAD by relative path. Returns `None` if the file
+/// doesn't exist at HEAD (e.g. newly added files or initial commit).
+fn read_head_blob(repository: &gix::Repository, rela_path: &str) -> Option<Vec<u8>> {
+    let spec = format!("HEAD:{rela_path}");
+    let object = repository.rev_parse_single(spec.as_str()).ok()?;
+    let blob = object.object().ok()?;
+    Some(blob.data.to_vec())
+}
+
+/// Compute line-level additions/deletions for a single file.
+fn compute_line_stats_for_file(
     repo_path: &Path,
-) -> Result<HashMap<PathBuf, DiffLineSummary>, ChangesError> {
-    let mut summary_by_path = parse_numstat_output_by_path(&run_git_command(repo_path, &[
-        "diff",
-        "--numstat",
-        "HEAD",
-        "--",
-    ])?);
+    rela_path: &str,
+    kind: ChangeKind,
+    repository: &gix::Repository,
+) -> DiffLineSummary {
+    match kind {
+        ChangeKind::Added | ChangeKind::IntentToAdd => {
+            let abs_path = repo_path.join(rela_path);
+            let Ok(contents) = fs::read(&abs_path) else {
+                return DiffLineSummary::default();
+            };
+            DiffLineSummary {
+                additions: count_lines(&contents),
+                deletions: 0,
+            }
+        },
+        ChangeKind::Removed => {
+            let old_bytes = read_head_blob(repository, rela_path).unwrap_or_default();
+            DiffLineSummary {
+                additions: 0,
+                deletions: count_lines(&old_bytes),
+            }
+        },
+        ChangeKind::Modified
+        | ChangeKind::TypeChange
+        | ChangeKind::Renamed
+        | ChangeKind::Copied
+        | ChangeKind::Conflict => {
+            let old_bytes = read_head_blob(repository, rela_path).unwrap_or_default();
+            let abs_path = repo_path.join(rela_path);
+            let new_bytes = fs::read(&abs_path).unwrap_or_default();
+            diff_line_stats(&old_bytes, &new_bytes)
+        },
+    }
+}
 
-    let untracked_output = run_git_command_bytes(repo_path, &[
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ])?;
+/// Count added/removed lines between two byte slices using imara-diff.
+fn diff_line_stats(old: &[u8], new: &[u8]) -> DiffLineSummary {
+    use gix_diff::blob::v2::{Algorithm, Diff, InternedInput};
 
-    for relative_path in untracked_output.split(|byte| *byte == b'\0') {
-        if relative_path.is_empty() {
-            continue;
-        }
+    let input = InternedInput::new(old, new);
+    let diff = Diff::compute(Algorithm::Histogram, &input);
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
 
-        let relative = String::from_utf8_lossy(relative_path).into_owned();
-        let absolute_path = repo_path.join(&relative);
-        let Ok(contents) = fs::read(&absolute_path) else {
-            continue;
-        };
-
-        let entry = summary_by_path.entry(PathBuf::from(relative)).or_default();
-        entry.additions += count_lines(&contents);
+    for hunk in diff.hunks() {
+        let before_len = (hunk.before.end - hunk.before.start) as usize;
+        let after_len = (hunk.after.end - hunk.after.start) as usize;
+        deletions += before_len;
+        additions += after_len;
     }
 
-    Ok(summary_by_path)
+    DiffLineSummary {
+        additions,
+        deletions,
+    }
 }
 
 fn open_repository(path: &Path) -> Result<gix::Repository, ChangesError> {
@@ -183,68 +218,6 @@ fn summary_to_change_kind(summary: Summary) -> ChangeKind {
         Summary::Conflict => ChangeKind::Conflict,
         Summary::IntentToAdd => ChangeKind::IntentToAdd,
     }
-}
-
-fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String, ChangesError> {
-    let output = run_git_command_bytes(repo_path, args)?;
-    Ok(String::from_utf8_lossy(&output).into_owned())
-}
-
-fn run_git_command_bytes(repo_path: &Path, args: &[&str]) -> Result<Vec<u8>, ChangesError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .output()
-        .map_err(|error| ChangesError::GitCommand {
-            path: repo_path.to_path_buf(),
-            message: format!("failed to execute git {}: {error}", args.join(" ")),
-        })?;
-
-    if output.status.success() {
-        return Ok(output.stdout);
-    }
-
-    Err(ChangesError::GitCommand {
-        path: repo_path.to_path_buf(),
-        message: format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr),
-        ),
-    })
-}
-
-fn parse_numstat_output_by_path(output: &str) -> HashMap<PathBuf, DiffLineSummary> {
-    let mut summary_by_path = HashMap::new();
-
-    for line in output.lines() {
-        let mut columns = line.split('\t');
-        let Some(added_column) = columns.next() else {
-            continue;
-        };
-        let Some(removed_column) = columns.next() else {
-            continue;
-        };
-        let Some(path_column) = columns.next() else {
-            continue;
-        };
-
-        let additions = added_column.parse::<usize>().unwrap_or(0);
-        let deletions = removed_column.parse::<usize>().unwrap_or(0);
-        if additions == 0 && deletions == 0 {
-            continue;
-        }
-
-        let path = PathBuf::from(path_column);
-        let entry = summary_by_path
-            .entry(path)
-            .or_insert_with(DiffLineSummary::default);
-        entry.additions += additions;
-        entry.deletions += deletions;
-    }
-
-    summary_by_path
 }
 
 fn count_lines(contents: &[u8]) -> usize {

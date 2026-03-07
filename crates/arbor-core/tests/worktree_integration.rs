@@ -1,9 +1,6 @@
 #![allow(clippy::expect_used)]
 
-use {
-    arbor_core::worktree,
-    std::{fs, path::Path, process::Command},
-};
+use {arbor_core::worktree, std::fs};
 
 #[test]
 fn lists_real_git_worktrees() {
@@ -11,25 +8,27 @@ fn lists_real_git_worktrees() {
     let repo_path = temp_dir.path().join("repo");
     let feature_path = temp_dir.path().join("feature-worktree");
 
-    fs::create_dir_all(&repo_path).expect("repo dir should be created");
-
-    run_git(&repo_path, &["init", "--initial-branch=main"]);
-    run_git(&repo_path, &["config", "user.email", "tests@example.com"]);
-    run_git(&repo_path, &["config", "user.name", "Arbor Tests"]);
+    // Initialize a git repo with an initial commit using git2.
+    let repo = git2::Repository::init(&repo_path).expect("repo should be initialized");
+    setup_git2_config(&repo);
 
     fs::write(repo_path.join("README.md"), "# Arbor\n").expect("test file should be written");
-    run_git(&repo_path, &["add", "README.md"]);
-    run_git(&repo_path, &["commit", "-m", "initial commit"]);
+    create_initial_commit(&repo, "initial commit");
 
-    run_git(&repo_path, &[
-        "worktree",
-        "add",
-        "-b",
-        "feature",
-        feature_path
-            .to_str()
-            .expect("feature path should be valid UTF-8"),
-    ]);
+    // Create a linked worktree with a new branch.
+    let head_commit = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .expect("HEAD should resolve");
+    let branch = repo
+        .branch("feature", &head_commit, false)
+        .expect("branch should be created");
+
+    let mut opts = git2::WorktreeAddOptions::new();
+    let branch_ref = branch.into_reference();
+    opts.reference(Some(&branch_ref));
+    repo.worktree("feature-worktree", &feature_path, Some(&opts))
+        .expect("worktree should be added");
 
     let worktrees = worktree::list(&repo_path).expect("worktree list should succeed");
     let repo_path = fs::canonicalize(repo_path).expect("repo path should resolve");
@@ -54,21 +53,29 @@ fn lists_real_git_worktrees() {
     );
 }
 
-fn run_git(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("git command should execute");
+fn setup_git2_config(repo: &git2::Repository) {
+    let mut config = repo.config().expect("config should be accessible");
+    config
+        .set_str("user.email", "tests@example.com")
+        .expect("email should be set");
+    config
+        .set_str("user.name", "Arbor Tests")
+        .expect("name should be set");
+    config
+        .set_str("init.defaultBranch", "main")
+        .expect("default branch should be set");
+}
 
-    if output.status.success() {
-        return;
-    }
+fn create_initial_commit(repo: &git2::Repository, message: &str) {
+    let mut index = repo.index().expect("index should be accessible");
+    index
+        .add_all(["."], git2::IndexAddOption::DEFAULT, None)
+        .expect("files should be added");
+    index.write().expect("index should be written");
+    let tree_oid = index.write_tree().expect("tree should be written");
+    let tree = repo.find_tree(tree_oid).expect("tree should be found");
+    let sig = repo.signature().expect("signature should be created");
 
-    panic!(
-        "git command failed: git {}\nstdout: {}\nstderr: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
+        .expect("commit should be created");
 }

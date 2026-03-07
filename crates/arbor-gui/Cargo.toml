@@ -21,17 +21,21 @@ arbor-ssh = { path = "../arbor-ssh" }
 arbor-terminal-emulator = { path = "../arbor-terminal-emulator" }
 config = { workspace = true }
 futures = { workspace = true }
+git2 = { workspace = true }
+gix = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }
 gpui = { workspace = true }
 gpui_http_client = { workspace = true }
 imara-diff = { workspace = true }
 notify-rust = { workspace = true }
+octocrab = { workspace = true }
 portable-pty = { workspace = true }
 ropey = { workspace = true }
 serde = { workspace = true }
 smol = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
+tokio = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

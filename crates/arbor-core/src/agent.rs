@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{collections::HashSet, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
@@ -10,59 +10,27 @@ const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "opencode"];
 
 /// Detect working directories of running AI tool processes.
 ///
-/// Runs `pgrep` to find PIDs, then `lsof` to resolve their cwds.
+/// Uses the `sysinfo` crate to enumerate processes in-process,
+/// avoiding subprocess calls to `pgrep` and `lsof`.
 pub fn detect_agent_cwds() -> HashSet<PathBuf> {
-    let mut pids = Vec::new();
-    for name in AGENT_PROCESS_NAMES {
-        if let Ok(output) = Command::new("pgrep").arg("-x").arg(name).output()
-            && output.status.success()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Ok(pid) = line.trim().parse::<u32>() {
-                    pids.push(pid);
-                }
-            }
-        }
-    }
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
-    if pids.is_empty() {
-        return HashSet::new();
-    }
+    let system = System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_processes(ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always)),
+    );
 
-    let pid_args: Vec<String> = pids.iter().map(|pid| pid.to_string()).collect();
-    let mut lsof_args = vec!["-a", "-d", "cwd", "-F", "pn"];
-    for pid_arg in &pid_args {
-        lsof_args.push("-p");
-        lsof_args.push(pid_arg);
-    }
-
-    let Ok(output) = Command::new("lsof").args(&lsof_args).output() else {
-        return HashSet::new();
-    };
-
-    if !output.status.success() {
-        return HashSet::new();
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_lsof_output(&stdout)
-}
-
-/// Parse lsof `-F pn` output into a set of directory paths.
-///
-/// The format is lines starting with `p` (PID) or `n` (name/path).
-/// We collect all `n`-prefixed lines as cwd paths.
-pub fn parse_lsof_output(output: &str) -> HashSet<PathBuf> {
     let mut cwds = HashSet::new();
-    for line in output.lines() {
-        if let Some(path_str) = line.strip_prefix('n') {
-            let path = PathBuf::from(path_str);
-            if path.is_absolute() {
-                cwds.insert(path);
-            }
+    for process in system.processes().values() {
+        let name = process.name().to_string_lossy();
+        if AGENT_PROCESS_NAMES.iter().any(|agent| *agent == name)
+            && let Some(cwd) = process.cwd()
+            && cwd.is_absolute()
+        {
+            cwds.insert(cwd.to_path_buf());
         }
     }
+
     cwds
 }
 
@@ -104,37 +72,6 @@ pub fn worktrees_with_agents(
 #[cfg(test)]
 mod tests {
     use {super::*, std::path::Path};
-
-    #[test]
-    fn parse_lsof_output_extracts_paths() {
-        let output = "p12345\nn/Users/dev/project\np67890\nn/Users/dev/other\n";
-        let cwds = parse_lsof_output(output);
-        assert_eq!(cwds.len(), 2);
-        assert!(cwds.contains(Path::new("/Users/dev/project")));
-        assert!(cwds.contains(Path::new("/Users/dev/other")));
-    }
-
-    #[test]
-    fn parse_lsof_output_ignores_non_path_lines() {
-        let output = "p12345\nf4\nn/Users/dev/project\n";
-        let cwds = parse_lsof_output(output);
-        assert_eq!(cwds.len(), 1);
-        assert!(cwds.contains(Path::new("/Users/dev/project")));
-    }
-
-    #[test]
-    fn parse_lsof_output_empty() {
-        let cwds = parse_lsof_output("");
-        assert!(cwds.is_empty());
-    }
-
-    #[test]
-    fn parse_lsof_output_ignores_relative_paths() {
-        let output = "p12345\nnrelative/path\nn/absolute/path\n";
-        let cwds = parse_lsof_output(output);
-        assert_eq!(cwds.len(), 1);
-        assert!(cwds.contains(Path::new("/absolute/path")));
-    }
 
     #[test]
     fn worktrees_with_agents_exact_match() {

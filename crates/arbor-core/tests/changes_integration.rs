@@ -2,7 +2,7 @@
 
 use {
     arbor_core::changes::{self, ChangeKind},
-    std::{fs, path::Path, process::Command},
+    std::{fs, path::Path},
 };
 
 #[test]
@@ -10,14 +10,11 @@ fn reports_modified_and_untracked_files() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let repo_path = temp_dir.path().join("repo");
 
-    fs::create_dir_all(&repo_path).expect("repo dir should be created");
-    run_git(&repo_path, &["init", "--initial-branch=main"]);
-    run_git(&repo_path, &["config", "user.email", "tests@example.com"]);
-    run_git(&repo_path, &["config", "user.name", "Arbor Tests"]);
+    let repo = git2::Repository::init(&repo_path).expect("repo should be initialized");
+    setup_git2_config(&repo);
 
     fs::write(repo_path.join("tracked.txt"), "hello\n").expect("tracked file should be written");
-    run_git(&repo_path, &["add", "tracked.txt"]);
-    run_git(&repo_path, &["commit", "-m", "initial commit"]);
+    create_initial_commit(&repo, "initial commit");
 
     fs::write(repo_path.join("tracked.txt"), "hello from arbor\n")
         .expect("tracked file should be modified");
@@ -43,15 +40,12 @@ fn reports_line_level_diff_summary() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let repo_path = temp_dir.path().join("repo");
 
-    fs::create_dir_all(&repo_path).expect("repo dir should be created");
-    run_git(&repo_path, &["init", "--initial-branch=main"]);
-    run_git(&repo_path, &["config", "user.email", "tests@example.com"]);
-    run_git(&repo_path, &["config", "user.name", "Arbor Tests"]);
+    let repo = git2::Repository::init(&repo_path).expect("repo should be initialized");
+    setup_git2_config(&repo);
 
     fs::write(repo_path.join("tracked.txt"), "line-a\nline-b\n")
         .expect("tracked file should be written");
-    run_git(&repo_path, &["add", "tracked.txt"]);
-    run_git(&repo_path, &["commit", "-m", "initial commit"]);
+    create_initial_commit(&repo, "initial commit");
 
     fs::write(repo_path.join("tracked.txt"), "line-a\nline-c\nline-d\n")
         .expect("tracked file should be modified");
@@ -72,21 +66,26 @@ fn reports_line_level_diff_summary() {
     );
 }
 
-fn run_git(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("git command should execute");
+fn setup_git2_config(repo: &git2::Repository) {
+    let mut config = repo.config().expect("config should be accessible");
+    config
+        .set_str("user.email", "tests@example.com")
+        .expect("email should be set");
+    config
+        .set_str("user.name", "Arbor Tests")
+        .expect("name should be set");
+}
 
-    if output.status.success() {
-        return;
-    }
+fn create_initial_commit(repo: &git2::Repository, message: &str) {
+    let mut index = repo.index().expect("index should be accessible");
+    index
+        .add_all(["."], git2::IndexAddOption::DEFAULT, None)
+        .expect("files should be added");
+    index.write().expect("index should be written");
+    let tree_oid = index.write_tree().expect("tree should be written");
+    let tree = repo.find_tree(tree_oid).expect("tree should be found");
+    let sig = repo.signature().expect("signature should be created");
 
-    panic!(
-        "git command failed: git {}\nstdout: {}\nstderr: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])
+        .expect("commit should be created");
 }

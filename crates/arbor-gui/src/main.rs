@@ -11603,45 +11603,26 @@ fn read_head_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8
     let relative = git_relative_path(file_path)?;
     let object_spec = format!("HEAD:{relative}");
 
-    let exists_status = create_command("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .args(["cat-file", "-e", object_spec.as_str()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| {
-            format!(
-                "failed to check git object `{object_spec}` in `{}`: {error}",
-                worktree_path.display()
-            )
-        })?;
+    let repo = gix::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
 
-    if !exists_status.success() {
-        return Ok(Vec::new());
-    }
+    let object_id = match repo.rev_parse_single(object_spec.as_str()) {
+        Ok(id) => id,
+        Err(_) => return Ok(Vec::new()), // file does not exist at HEAD
+    };
 
-    let output = create_command("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .args(["show", object_spec.as_str()])
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to read `{relative}` at HEAD in `{}`: {error}",
-                worktree_path.display()
-            )
-        })?;
+    let object = object_id.object().map_err(|error| {
+        format!(
+            "failed to read `{relative}` at HEAD in `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "failed to read `{relative}` at HEAD in `{}`: {}",
-            worktree_path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    Ok(output.stdout)
+    Ok(object.data.to_vec())
 }
 
 fn read_worktree_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8>, String> {
@@ -13491,17 +13472,6 @@ fn command_exists_on_path(command_name: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn mac_app_bundle_exists(app_name: &str) -> bool {
-    let launch_services_status = create_command("open")
-        .arg("-Ra")
-        .arg(app_name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if matches!(launch_services_status, Ok(status) if status.success()) {
-        return true;
-    }
-
-    // Fallback for environments where LaunchServices lookup is unavailable.
     let bundle = format!("{app_name}.app");
     [
         "/Applications",
@@ -13640,14 +13610,6 @@ fn command_failure_message(operation: &str, output: &std::process::Output) -> St
     }
 }
 
-fn first_non_empty_output_line(buffer: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(buffer);
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 fn auto_commit_subject(changed_files: &[ChangedFile]) -> String {
     if changed_files.len() == 1 {
         let file_label = changed_files[0]
@@ -13707,120 +13669,176 @@ fn run_git_commit_for_worktree(
         return Err("nothing to commit".to_owned());
     }
 
-    let mut add_command = create_command("git");
-    add_command.arg("-C").arg(worktree_path).args(["add", "-A"]);
-    let add_output = run_command_output(&mut add_command, "git add")?;
-    if !add_output.status.success() {
-        return Err(command_failure_message("git add", &add_output));
+    let repo = git2::Repository::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
+
+    // Stage all changes (equivalent to `git add -A`).
+    let mut index = repo
+        .index()
+        .map_err(|error| format!("failed to read index: {error}"))?;
+    index
+        .add_all(["."], git2::IndexAddOption::DEFAULT, None)
+        .map_err(|error| format!("failed to stage changes: {error}"))?;
+    // Also remove files that were deleted from the worktree.
+    index
+        .update_all(["."], None)
+        .map_err(|error| format!("failed to update index: {error}"))?;
+    index
+        .write()
+        .map_err(|error| format!("failed to write index: {error}"))?;
+
+    let tree_oid = index
+        .write_tree()
+        .map_err(|error| format!("failed to write tree: {error}"))?;
+    let tree = repo
+        .find_tree(tree_oid)
+        .map_err(|error| format!("failed to find tree: {error}"))?;
+
+    // Check if there's actually anything to commit.
+    if let Ok(head_commit) = repo.head().and_then(|h| h.peel_to_commit())
+        && head_commit.tree_id() == tree_oid
+    {
+        return Err("nothing to commit".to_owned());
     }
 
     let subject = auto_commit_subject(changed_files);
     let body = auto_commit_body(changed_files);
-    let mut commit_command = create_command("git");
-    commit_command
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("commit")
-        .arg("-m")
-        .arg(subject.as_str())
-        .arg("-m")
-        .arg(body.as_str());
+    let message = format!("{subject}\n\n{body}");
 
-    let commit_output = run_command_output(&mut commit_command, "git commit")?;
-    if !commit_output.status.success() {
-        let failure = command_failure_message("git commit", &commit_output);
-        if failure.to_ascii_lowercase().contains("nothing to commit") {
-            return Err("nothing to commit".to_owned());
-        }
-        return Err(failure);
-    }
+    let sig = repo
+        .signature()
+        .map_err(|error| format!("failed to create signature: {error}"))?;
 
-    let summary = first_non_empty_output_line(&commit_output.stdout)
-        .or_else(|| first_non_empty_output_line(&commit_output.stderr))
-        .unwrap_or_else(|| subject.clone());
-    Ok(format!("commit complete: {summary}"))
+    let parent_commits: Vec<git2::Commit<'_>> = match repo.head().and_then(|h| h.peel_to_commit()) {
+        Ok(commit) => vec![commit],
+        Err(_) => vec![], // initial commit
+    };
+    let parents: Vec<&git2::Commit<'_>> = parent_commits.iter().collect();
+
+    repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)
+        .map_err(|error| format!("failed to create commit: {error}"))?;
+
+    Ok(format!("commit complete: {subject}"))
 }
 
 fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, String> {
-    let mut push_command = create_command("git");
-    push_command
-        .arg("-C")
-        .arg(worktree_path)
-        .args(["push", "--set-upstream", "origin", "HEAD"]);
-    let output = run_command_output(&mut push_command, "git push")?;
-    if !output.status.success() {
-        return Err(command_failure_message("git push", &output));
-    }
+    let repo = git2::Repository::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
 
-    let summary = first_non_empty_output_line(&output.stderr)
-        .or_else(|| first_non_empty_output_line(&output.stdout))
-        .unwrap_or_else(|| "pushed current branch".to_owned());
-    Ok(format!("push complete: {summary}"))
+    let head_ref = repo
+        .head()
+        .map_err(|error| format!("failed to read HEAD: {error}"))?;
+    let branch_name = head_ref
+        .shorthand()
+        .ok_or_else(|| "cannot push detached HEAD".to_owned())?
+        .to_owned();
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+
+    let mut remote = repo
+        .find_remote("origin")
+        .map_err(|error| format!("failed to find remote 'origin': {error}"))?;
+
+    // Set up SSH authentication callbacks.
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(|_url, username_from_url, allowed_types| {
+        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+            let username = username_from_url.unwrap_or("git");
+            git2::Cred::ssh_key_from_agent(username)
+        } else if allowed_types.contains(git2::CredentialType::DEFAULT) {
+            git2::Cred::default()
+        } else {
+            Err(git2::Error::from_str(
+                "no suitable credential type available",
+            ))
+        }
+    });
+
+    let mut push_options = git2::PushOptions::new();
+    push_options.remote_callbacks(callbacks);
+
+    remote
+        .push(&[&refspec], Some(&mut push_options))
+        .map_err(|error| format!("push failed: {error}"))?;
+
+    // Set upstream tracking branch.
+    let mut config = repo
+        .config()
+        .map_err(|error| format!("failed to read config: {error}"))?;
+    let _ = config.set_str(&format!("branch.{branch_name}.remote"), "origin");
+    let _ = config.set_str(
+        &format!("branch.{branch_name}.merge"),
+        &format!("refs/heads/{branch_name}"),
+    );
+
+    Ok(format!(
+        "push complete: {branch_name} -> origin/{branch_name}"
+    ))
 }
 
 fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, String> {
-    let mut command = create_command("git");
-    command
-        .arg("-C")
-        .arg(worktree_path)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"]);
-    let output = run_command_output(&mut command, "git rev-parse")?;
-    if !output.status.success() {
-        return Err(command_failure_message("git rev-parse", &output));
-    }
+    let repo = gix::open(worktree_path).map_err(|error| {
+        format!(
+            "failed to open repository at `{}`: {error}",
+            worktree_path.display()
+        )
+    })?;
 
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if branch.is_empty() || branch == "HEAD" {
-        return Err("cannot create a PR from detached HEAD".to_owned());
-    }
+    let head_ref = repo
+        .head_ref()
+        .map_err(|error| format!("failed to read HEAD: {error}"))?;
 
-    Ok(branch)
+    match head_ref {
+        Some(reference) => {
+            let name = reference.name().shorten().to_string();
+            if name.is_empty() {
+                return Err("cannot create a PR from detached HEAD".to_owned());
+            }
+            Ok(name)
+        },
+        None => Err("cannot create a PR from detached HEAD".to_owned()),
+    }
 }
 
 fn git_has_tracking_branch(worktree_path: &Path) -> bool {
-    let output = create_command("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .args([
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ])
-        .output();
+    let Ok(repo) = gix::open(worktree_path) else {
+        return false;
+    };
+    let Ok(Some(head_ref)) = repo.head_ref() else {
+        return false;
+    };
 
-    matches!(output, Ok(output) if output.status.success())
+    let branch_name = head_ref.name().shorten().to_string();
+    let config = repo.config_snapshot();
+    config
+        .string(format!("branch.{branch_name}.remote"))
+        .is_some()
+        && config
+            .string(format!("branch.{branch_name}.merge"))
+            .is_some()
 }
 
 fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
-    let output = create_command("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .args([
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ])
-        .output()
-        .ok()?;
+    let repo = gix::open(worktree_path).ok()?;
+    let reference = repo.find_reference("refs/remotes/origin/HEAD").ok()?;
+    let target = reference.target();
+    let target_name = target.try_name()?.to_string();
+    let short = target_name
+        .strip_prefix("refs/remotes/origin/")
+        .unwrap_or(&target_name);
 
-    if !output.status.success() {
+    if short.is_empty() {
         return None;
     }
 
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let base = trimmed.strip_prefix("origin/").unwrap_or(trimmed);
-    if base.is_empty() {
-        return None;
-    }
-
-    Some(base.to_owned())
+    Some(short.to_owned())
 }
 
 fn run_create_pr_for_worktree(
@@ -13832,35 +13850,45 @@ fn run_create_pr_for_worktree(
     }
 
     let branch = git_branch_name_for_worktree(worktree_path)?;
-    let mut command = create_command("gh");
-    command
-        .current_dir(worktree_path)
-        .arg("pr")
-        .arg("create")
-        .arg("--fill")
-        .arg("--head")
-        .arg(branch.as_str());
+    let base_branch = git_default_base_branch(worktree_path).unwrap_or_else(|| "main".to_owned());
 
-    if let Some(base_branch) = git_default_base_branch(worktree_path) {
-        command.arg("--base").arg(base_branch);
-    }
-    if let Some(repo_slug) = repo_slug {
-        command.arg("--repo").arg(repo_slug);
-    }
+    let slug = repo_slug
+        .map(str::to_owned)
+        .or_else(|| github_repo_slug_for_repo(worktree_path))
+        .ok_or_else(|| "could not determine GitHub repository slug".to_owned())?;
 
-    let output = run_command_output(&mut command, "gh pr create")?;
-    if !output.status.success() {
-        return Err(command_failure_message("gh pr create", &output));
-    }
+    let (owner, repo_name) = slug
+        .split_once('/')
+        .ok_or_else(|| format!("invalid repository slug: {slug}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}\n{stderr}");
-    if let Some(url) = extract_first_url(&combined) {
-        return Ok(format!("created PR: {url}"));
-    }
+    // Read the first commit message on the branch as PR title.
+    let title = branch.replace(['-', '_'], " ");
 
-    Ok("pull request created".to_owned())
+    let owner = owner.to_owned();
+    let repo_name = repo_name.to_owned();
+
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|error| format!("failed to create runtime: {error}"))?;
+
+    rt.block_on(async {
+        let token = env::var("GITHUB_TOKEN")
+            .map_err(|_| "GITHUB_TOKEN environment variable not set".to_owned())?;
+
+        let octocrab = octocrab::Octocrab::builder()
+            .personal_token(token)
+            .build()
+            .map_err(|error| format!("failed to create GitHub client: {error}"))?;
+
+        let pr = octocrab
+            .pulls(&owner, &repo_name)
+            .create(&title, &branch, &base_branch)
+            .send()
+            .await
+            .map_err(|error| format!("failed to create pull request: {error}"))?;
+
+        let url = pr.html_url.map(|u| u.to_string()).unwrap_or_default();
+        Ok::<String, String>(format!("created PR: {url}"))
+    })
 }
 
 fn extract_first_url(text: &str) -> Option<String> {
@@ -13888,24 +13916,14 @@ fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
 }
 
 fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
-    let output = create_command("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
+    let repo = gix::open(repo_root).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    let url = remote.url(gix::remote::Direction::Fetch)?;
+    let url_str = url.to_bstring().to_string();
+    if url_str.is_empty() {
         return None;
     }
-
-    let remote = String::from_utf8(output.stdout).ok()?;
-    let trimmed = remote.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    Some(trimmed.to_owned())
+    Some(url_str)
 }
 
 fn github_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
@@ -13966,48 +13984,40 @@ fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
 }
 
 fn github_pr_number_by_tracking_branch(worktree_path: &Path) -> Option<u64> {
-    let output = create_command("gh")
-        .current_dir(worktree_path)
-        .args(["pr", "view", "--json", "number", "--jq", ".number // empty"])
-        .output()
-        .ok()?;
-
-    parse_github_pr_number_output(output)
+    let branch = git_branch_name_for_worktree(worktree_path).ok()?;
+    github_pr_number_by_head_branch(worktree_path, &branch)
 }
 
 fn github_pr_number_by_head_branch(worktree_path: &Path, branch: &str) -> Option<u64> {
-    let output = create_command("gh")
-        .current_dir(worktree_path)
-        .args([
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "number",
-            "--jq",
-            ".[0].number // empty",
-        ])
-        .output()
-        .ok()?;
+    let slug = github_repo_slug_for_repo(worktree_path)?;
+    let (owner, repo_name) = slug.split_once('/')?;
 
-    parse_github_pr_number_output(output)
-}
+    let owner = owner.to_owned();
+    let repo_name = repo_name.to_owned();
+    let branch = branch.to_owned();
 
-fn parse_github_pr_number_output(output: std::process::Output) -> Option<u64> {
-    if !output.status.success() {
-        return None;
-    }
+    let rt = tokio::runtime::Runtime::new().ok()?;
 
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+    rt.block_on(async {
+        let token = env::var("GITHUB_TOKEN").ok()?;
 
-    trimmed.parse::<u64>().ok()
+        let octocrab = octocrab::Octocrab::builder()
+            .personal_token(token)
+            .build()
+            .ok()?;
+
+        let page = octocrab
+            .pulls(&owner, &repo_name)
+            .list()
+            .head(format!("{owner}:{branch}"))
+            .state(octocrab::params::State::All)
+            .per_page(1)
+            .send()
+            .await
+            .ok()?;
+
+        page.items.first().map(|pr| pr.number)
+    })
 }
 
 fn github_pr_url(repo_slug: &str, pr_number: u64) -> String {

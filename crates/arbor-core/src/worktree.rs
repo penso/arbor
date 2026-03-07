@@ -2,7 +2,6 @@ use {
     std::{
         fs,
         path::{Path, PathBuf},
-        process::{Command, Output},
         time::SystemTime,
     },
     thiserror::Error,
@@ -28,250 +27,225 @@ pub struct AddWorktreeOptions<'a> {
 
 #[derive(Debug, Error)]
 pub enum WorktreeError {
-    #[error("failed to execute git: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("git returned non-UTF8 output: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
-    #[error("git command failed: {0}")]
-    GitCommandFailed(String),
-    #[error("invalid `git worktree list --porcelain` output: {0}")]
-    InvalidPorcelain(String),
+    #[error("failed to open git repository: {0}")]
+    OpenRepository(String),
+    #[error("git operation failed: {0}")]
+    GitOperationFailed(String),
+    #[error("invalid worktree data: {0}")]
+    InvalidWorktreeData(String),
 }
 
+/// Find the root of the repository (the main worktree path).
+///
+/// Uses `gix::discover` to find and open the repository, then reads the
+/// worktree list to find the primary worktree.
 pub fn repo_root(path: &Path) -> Result<PathBuf, WorktreeError> {
-    // Use `git worktree list` and take the first entry, which is always the
-    // main worktree.  This avoids `--show-toplevel` which returns the current
-    // worktree's path and would make linked worktrees look like separate repos.
     let worktrees = list(path)?;
     if let Some(main) = worktrees.first() {
         return Ok(main.path.clone());
     }
 
-    // Fallback for the unlikely case of an empty list.
-    let output = run_git_capture(path, &["rev-parse", "--show-toplevel"])?;
-    let toplevel = String::from_utf8(output.stdout)?.trim().to_owned();
-
-    if toplevel.is_empty() {
-        return Err(WorktreeError::InvalidPorcelain(
-            "empty repository root returned by git".to_owned(),
-        ));
-    }
-
-    // Detect linked worktrees: --git-common-dir returns ".git" in the main
-    // repo but an absolute path to the main repo's .git dir in a worktree.
-    let common_output = run_git_capture(path, &["rev-parse", "--git-common-dir"])?;
-    let common_dir = String::from_utf8(common_output.stdout)?.trim().to_owned();
-
-    if common_dir.is_empty() || common_dir == ".git" {
-        return Ok(PathBuf::from(toplevel));
-    }
-
-    // Resolve the common dir to an absolute path (it may be relative to the
-    // worktree's git dir).
-    let common_path = {
-        let p = PathBuf::from(&common_dir);
-        if p.is_relative() {
-            let git_dir_output = run_git_capture(path, &["rev-parse", "--git-dir"])?;
-            let git_dir = String::from_utf8(git_dir_output.stdout)?.trim().to_owned();
-            canonicalize_if_possible(PathBuf::from(git_dir).join(p))
-        } else {
-            canonicalize_if_possible(p)
-        }
-    };
-
-    // The main repo root is the parent of the common .git dir.
-    match common_path.parent() {
-        Some(parent) => Ok(parent.to_path_buf()),
-        None => Ok(PathBuf::from(toplevel)),
+    // Fallback: use gix to discover the repo root.
+    let repo = open_gix_repo(path)?;
+    match repo.workdir() {
+        Some(work_dir) => Ok(work_dir.to_path_buf()),
+        None => Err(WorktreeError::InvalidWorktreeData(
+            "repository has no working directory".to_owned(),
+        )),
     }
 }
 
+/// List all worktrees in the repository.
+///
+/// Opens the repository with `git2` and enumerates worktrees by reading
+/// the `.git/worktrees/` directory structure and the main worktree.
 pub fn list(path: &Path) -> Result<Vec<Worktree>, WorktreeError> {
-    let output = run_git_capture(path, &["worktree", "list", "--porcelain"])?;
-    let stdout = String::from_utf8(output.stdout)?;
-    parse_porcelain(&stdout)
-}
-
-pub fn add(
-    repo_path: &Path,
-    worktree_path: &Path,
-    options: AddWorktreeOptions<'_>,
-) -> Result<(), WorktreeError> {
-    let mut command = base_git_command(repo_path);
-    command.arg("worktree").arg("add");
-
-    if options.force {
-        command.arg("--force");
-    }
-
-    if options.detach {
-        command.arg("--detach");
-    }
-
-    if let Some(branch) = options.branch {
-        command.arg("-b").arg(branch);
-    }
-
-    command.arg(worktree_path);
-
-    run_git_no_output(command)
-}
-
-pub fn remove(repo_path: &Path, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
-    let mut command = base_git_command(repo_path);
-    command.arg("worktree").arg("remove");
-
-    if force {
-        command.arg("--force");
-    }
-
-    command.arg(worktree_path);
-
-    run_git_no_output(command)
-}
-
-fn parse_porcelain(output: &str) -> Result<Vec<Worktree>, WorktreeError> {
+    let repo = open_git2_repo(path)?;
     let mut worktrees = Vec::new();
-    let mut current: Option<Worktree> = None;
 
-    for line in output.lines() {
-        if line.is_empty() {
-            if let Some(worktree) = current.take() {
-                worktrees.push(worktree);
-            }
+    // The main worktree is always first.
+    let main_worktree = build_main_worktree(&repo)?;
+    worktrees.push(main_worktree);
+
+    // List linked worktrees via git2.
+    let worktree_names = repo.worktrees().map_err(|error| {
+        WorktreeError::GitOperationFailed(format!("failed to list worktrees: {error}"))
+    })?;
+
+    for name_bytes in &worktree_names {
+        let Some(name) = name_bytes else {
             continue;
+        };
+        if let Some(wt) = build_linked_worktree(&repo, name) {
+            worktrees.push(wt);
         }
-
-        let (field, value) = split_field(line);
-
-        if field == "worktree" {
-            if let Some(worktree) = current.take() {
-                worktrees.push(worktree);
-            }
-
-            let path = value.ok_or_else(|| {
-                WorktreeError::InvalidPorcelain("missing path after `worktree`".to_owned())
-            })?;
-
-            current = Some(Worktree {
-                path: PathBuf::from(path),
-                ..Worktree::default()
-            });
-            continue;
-        }
-
-        let worktree = current.as_mut().ok_or_else(|| {
-            WorktreeError::InvalidPorcelain(format!("field appeared before `worktree`: `{line}`"))
-        })?;
-
-        match field {
-            "HEAD" => {
-                worktree.head = value.map(str::to_owned);
-            },
-            "branch" => {
-                worktree.branch = value.map(str::to_owned);
-            },
-            "bare" => {
-                worktree.is_bare = true;
-            },
-            "detached" => {
-                worktree.is_detached = true;
-            },
-            "locked" => {
-                worktree.lock_reason = value.map(str::to_owned);
-            },
-            "prunable" => {
-                worktree.prune_reason = value.map(str::to_owned);
-            },
-            _ => {},
-        }
-    }
-
-    if let Some(worktree) = current.take() {
-        worktrees.push(worktree);
     }
 
     Ok(worktrees)
 }
 
-fn split_field(line: &str) -> (&str, Option<&str>) {
-    if let Some((field, value)) = line.split_once(' ') {
-        return (field, Some(value));
+/// Create a new worktree.
+pub fn add(
+    repo_path: &Path,
+    worktree_path: &Path,
+    options: AddWorktreeOptions<'_>,
+) -> Result<(), WorktreeError> {
+    let repo = open_git2_repo(repo_path)?;
+
+    if options.detach {
+        // For detached worktrees, use git2 to create a worktree from HEAD
+        // without a branch reference.
+        let head_commit = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|error| {
+                WorktreeError::GitOperationFailed(format!("failed to resolve HEAD: {error}"))
+            })?;
+
+        let name = worktree_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "worktree".to_owned());
+
+        let mut opts = git2::WorktreeAddOptions::new();
+        let reference = repo.find_reference("HEAD").map_err(|error| {
+            WorktreeError::GitOperationFailed(format!("failed to find HEAD: {error}"))
+        })?;
+        opts.reference(Some(&reference));
+
+        repo.worktree(&name, worktree_path, Some(&opts))
+            .map_err(|error| {
+                WorktreeError::GitOperationFailed(format!("failed to add worktree: {error}"))
+            })?;
+
+        // Detach HEAD in the new worktree
+        let wt_repo = git2::Repository::open(worktree_path).map_err(|error| {
+            WorktreeError::GitOperationFailed(format!("failed to open new worktree: {error}"))
+        })?;
+        wt_repo
+            .set_head_detached(head_commit.id())
+            .map_err(|error| {
+                WorktreeError::GitOperationFailed(format!("failed to detach HEAD: {error}"))
+            })?;
+    } else if let Some(branch_name) = options.branch {
+        // Create a new branch and worktree.
+        let head_commit = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|error| {
+                WorktreeError::GitOperationFailed(format!("failed to resolve HEAD: {error}"))
+            })?;
+
+        let branch = repo
+            .branch(branch_name, &head_commit, options.force)
+            .map_err(|error| {
+                WorktreeError::GitOperationFailed(format!(
+                    "failed to create branch `{branch_name}`: {error}"
+                ))
+            })?;
+
+        let name = worktree_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| branch_name.to_owned());
+
+        let mut opts = git2::WorktreeAddOptions::new();
+        let branch_ref = branch.into_reference();
+        opts.reference(Some(&branch_ref));
+
+        repo.worktree(&name, worktree_path, Some(&opts))
+            .map_err(|error| {
+                WorktreeError::GitOperationFailed(format!("failed to add worktree: {error}"))
+            })?;
+    } else {
+        // Add worktree without a new branch (checkout existing branch).
+        let name = worktree_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "worktree".to_owned());
+
+        repo.worktree(&name, worktree_path, None).map_err(|error| {
+            WorktreeError::GitOperationFailed(format!("failed to add worktree: {error}"))
+        })?;
     }
 
-    (line, None)
-}
-
-fn run_git_capture(path: &Path, args: &[&str]) -> Result<Output, WorktreeError> {
-    let mut command = base_git_command(path);
-    command.args(args);
-
-    let output = command.output()?;
-    ensure_success(output)
-}
-
-fn run_git_no_output(mut command: Command) -> Result<(), WorktreeError> {
-    let output = command.output()?;
-    let _output = ensure_success(output)?;
     Ok(())
 }
 
-fn base_git_command(path: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(path);
-    command
-}
+/// Remove a worktree.
+pub fn remove(repo_path: &Path, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
+    let repo = open_git2_repo(repo_path)?;
 
-fn ensure_success(output: Output) -> Result<Output, WorktreeError> {
-    if output.status.success() {
-        return Ok(output);
+    // Find the worktree name by matching its path.
+    let worktree_names = repo.worktrees().map_err(|error| {
+        WorktreeError::GitOperationFailed(format!("failed to list worktrees: {error}"))
+    })?;
+
+    let canonical_target = canonicalize_if_possible(worktree_path.to_path_buf());
+
+    for name_bytes in &worktree_names {
+        let Some(name) = name_bytes else {
+            continue;
+        };
+
+        let Ok(wt) = repo.find_worktree(name) else {
+            continue;
+        };
+
+        let wt_path = canonicalize_if_possible(wt.path().to_path_buf());
+        if wt_path == canonical_target {
+            let mut prune_opts = git2::WorktreePruneOptions::new();
+            prune_opts.valid(true).working_tree(true);
+            if force {
+                prune_opts.locked(true);
+            }
+            wt.prune(Some(&mut prune_opts)).map_err(|error| {
+                WorktreeError::GitOperationFailed(format!("failed to remove worktree: {error}"))
+            })?;
+
+            // Also remove the worktree directory if it still exists.
+            if worktree_path.exists() {
+                let _ = fs::remove_dir_all(worktree_path);
+            }
+
+            return Ok(());
+        }
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    let message = if stderr.is_empty() {
-        format!("process exited with status {}", output.status)
-    } else {
-        stderr
-    };
-
-    Err(WorktreeError::GitCommandFailed(message))
+    Err(WorktreeError::GitOperationFailed(format!(
+        "worktree not found: {}",
+        worktree_path.display()
+    )))
 }
 
 /// Returns `true` if the worktree at `path` has commits that haven't been
 /// pushed to any remote tracking branch.
-///
-/// First tries `git log @{u}..HEAD` (upstream comparison).  If there is no
-/// upstream (fresh branch that was never pushed), falls back to
-/// `git log --oneline --not --remotes` which shows commits not reachable
-/// from any remote ref.
 pub fn has_unpushed_commits(path: &Path) -> bool {
+    let Ok(repo) = gix::open(path) else {
+        return false;
+    };
+
     // Try upstream comparison first.
-    let mut cmd = base_git_command(path);
-    cmd.args(["log", "@{u}..HEAD", "--oneline"]);
-    if let Ok(output) = cmd.output()
-        && output.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return !stdout.trim().is_empty();
+    if let Some(has_unpushed) = check_unpushed_vs_upstream(&repo) {
+        return has_unpushed;
     }
 
-    // No upstream — check for commits not on any remote branch.
-    let mut cmd2 = base_git_command(path);
-    cmd2.args(["log", "--oneline", "--not", "--remotes"]);
-    match cmd2.output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            !stdout.trim().is_empty()
-        },
-        _ => false,
-    }
+    // No upstream — check for commits not reachable from any remote ref.
+    check_unpushed_vs_all_remotes(&repo).unwrap_or(false)
 }
 
-/// Deletes a local branch using `git branch -D`.
+/// Deletes a local branch.
 pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<(), WorktreeError> {
-    let mut command = base_git_command(repo_path);
-    command.args(["branch", "-D", branch]);
-    run_git_no_output(command)
+    let repo = open_git2_repo(repo_path)?;
+    let mut branch_ref = repo
+        .find_branch(branch, git2::BranchType::Local)
+        .map_err(|error| {
+            WorktreeError::GitOperationFailed(format!("failed to find branch `{branch}`: {error}"))
+        })?;
+    branch_ref.delete().map_err(|error| {
+        WorktreeError::GitOperationFailed(format!("failed to delete branch `{branch}`: {error}"))
+    })?;
+    Ok(())
 }
 
 /// Strips `refs/heads/` prefix from a full git branch ref.
@@ -332,9 +306,6 @@ pub fn resolve_git_dir(worktree_path: &Path) -> Option<PathBuf> {
 
 /// Returns the most recent modification time (as unix milliseconds) among
 /// key git bookkeeping files: `index`, `logs/HEAD`, and `HEAD`.
-///
-/// This covers essentially all git write operations (commits, staging,
-/// checkouts, rebases, merges, etc.) without spawning any processes.
 pub fn last_git_activity_ms(worktree_path: &Path) -> Option<u64> {
     let git_dir = resolve_git_dir(worktree_path)?;
     let candidates = [
@@ -355,34 +326,182 @@ pub fn last_git_activity_ms(worktree_path: &Path) -> Option<u64> {
         .max()
 }
 
+// --- Private helpers ---
+
+fn open_gix_repo(path: &Path) -> Result<gix::Repository, WorktreeError> {
+    match gix::open(path) {
+        Ok(repo) => Ok(repo),
+        Err(open_err) => gix::discover(path).map_err(|discover_err| {
+            WorktreeError::OpenRepository(format!(
+                "open error: {open_err}; discover error: {discover_err}"
+            ))
+        }),
+    }
+}
+
+fn open_git2_repo(path: &Path) -> Result<git2::Repository, WorktreeError> {
+    git2::Repository::discover(path).map_err(|error| {
+        WorktreeError::OpenRepository(format!(
+            "failed to open repository at `{}`: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Build the main worktree entry from a git2 repository.
+fn build_main_worktree(repo: &git2::Repository) -> Result<Worktree, WorktreeError> {
+    let work_dir = repo.workdir().ok_or_else(|| {
+        WorktreeError::InvalidWorktreeData("repository has no working directory".to_owned())
+    })?;
+
+    let head = repo
+        .head()
+        .ok()
+        .and_then(|h| h.target().map(|oid| oid.to_string()));
+
+    let branch = repo
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.name().map(str::to_owned));
+
+    let is_bare = repo.is_bare();
+
+    let is_detached = repo.head_detached().unwrap_or(false);
+
+    Ok(Worktree {
+        path: work_dir.to_path_buf(),
+        head,
+        branch,
+        is_bare,
+        is_detached,
+        lock_reason: None,
+        prune_reason: None,
+    })
+}
+
+/// Build a linked worktree entry by name.
+fn build_linked_worktree(repo: &git2::Repository, name: &str) -> Option<Worktree> {
+    let wt = repo.find_worktree(name).ok()?;
+    let wt_path = wt.path().to_path_buf();
+
+    // Open the worktree as its own repository to read HEAD/branch.
+    let wt_repo = git2::Repository::open(&wt_path).ok()?;
+
+    let head = wt_repo
+        .head()
+        .ok()
+        .and_then(|h| h.target().map(|oid| oid.to_string()));
+
+    let branch = wt_repo
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.name().map(str::to_owned));
+
+    let is_detached = wt_repo.head_detached().unwrap_or(false);
+
+    let lock_reason = match wt.is_locked() {
+        Ok(git2::WorktreeLockStatus::Locked(reason)) => Some(reason.unwrap_or_default()),
+        Ok(git2::WorktreeLockStatus::Unlocked) | Err(_) => None,
+    };
+
+    // Check if prunable.
+    let is_prunable = wt.validate().is_err();
+
+    let prune_reason = if is_prunable {
+        Some("stale checkout".to_owned())
+    } else {
+        None
+    };
+
+    Some(Worktree {
+        path: wt_path,
+        head,
+        branch,
+        is_bare: false,
+        is_detached,
+        lock_reason,
+        prune_reason,
+    })
+}
+
+/// Check if HEAD has commits not reachable from the upstream tracking branch.
+fn check_unpushed_vs_upstream(repo: &gix::Repository) -> Option<bool> {
+    let head_ref = repo.head_ref().ok()??;
+    let head_id = head_ref.id();
+
+    let branch_name = head_ref.name().shorten().to_string();
+    let remote_name = repo
+        .config_snapshot()
+        .string(format!("branch.{branch_name}.remote"))
+        .map(|s| s.to_string())?;
+    let merge_ref = repo
+        .config_snapshot()
+        .string(format!("branch.{branch_name}.merge"))
+        .map(|s| s.to_string())?;
+
+    // Convert refs/heads/foo -> refs/remotes/origin/foo
+    let remote_branch = merge_ref.strip_prefix("refs/heads/")?;
+    let upstream_ref_name = format!("refs/remotes/{remote_name}/{remote_branch}");
+
+    let upstream_id = repo.find_reference(&upstream_ref_name).ok()?.id();
+
+    if head_id == upstream_id {
+        return Some(false);
+    }
+
+    // Check if HEAD is an ancestor of upstream (meaning nothing to push).
+    let repo2 = open_git2_from_gix(repo).ok()?;
+    let head_oid = git2::Oid::from_bytes(head_id.as_bytes()).ok()?;
+    let upstream_oid = git2::Oid::from_bytes(upstream_id.as_bytes()).ok()?;
+
+    // If upstream is an ancestor of head, there are unpushed commits.
+    // If head == upstream or head is ancestor of upstream, nothing to push.
+    let is_ancestor = repo2
+        .graph_descendant_of(head_oid, upstream_oid)
+        .unwrap_or(false);
+    Some(is_ancestor)
+}
+
+/// Check if HEAD has commits not reachable from any remote ref.
+fn check_unpushed_vs_all_remotes(repo: &gix::Repository) -> Option<bool> {
+    let head_id = repo.head_id().ok()?;
+    let repo2 = open_git2_from_gix(repo).ok()?;
+    let head_oid = git2::Oid::from_bytes(head_id.as_bytes()).ok()?;
+
+    // Collect all remote tracking ref OIDs.
+    let references = repo2.references_glob("refs/remotes/*").ok()?;
+    for reference in references.flatten() {
+        if let Some(remote_oid) = reference.target() {
+            if remote_oid == head_oid {
+                return Some(false);
+            }
+            if repo2
+                .graph_descendant_of(remote_oid, head_oid)
+                .unwrap_or(false)
+            {
+                return Some(false);
+            }
+        }
+    }
+
+    Some(true)
+}
+
+fn open_git2_from_gix(repo: &gix::Repository) -> Result<git2::Repository, WorktreeError> {
+    git2::Repository::open(repo.git_dir()).map_err(|error| {
+        WorktreeError::OpenRepository(format!("failed to open with git2: {error}"))
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use crate::worktree::parse_porcelain;
-
     #[test]
-    fn parses_multiple_worktrees() {
-        let input = "worktree /tmp/repo\nHEAD aaaabbbb\nbranch refs/heads/main\n\nworktree /tmp/repo-feature\nHEAD ccccdddd\ndetached\nlocked branch in use\nprunable stale checkout\n\n";
-
-        let parsed = parse_porcelain(input).expect("porcelain should parse");
-
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].path.to_string_lossy(), "/tmp/repo");
-        assert_eq!(parsed[0].branch.as_deref(), Some("refs/heads/main"));
-        assert_eq!(parsed[1].path.to_string_lossy(), "/tmp/repo-feature");
-        assert!(parsed[1].is_detached);
-        assert_eq!(parsed[1].lock_reason.as_deref(), Some("branch in use"));
-        assert_eq!(parsed[1].prune_reason.as_deref(), Some("stale checkout"));
-    }
-
-    #[test]
-    fn rejects_fields_before_worktree_header() {
-        let input = "HEAD aaaabbbb\nbranch refs/heads/main\n";
-        let error = parse_porcelain(input).expect_err("invalid output should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("field appeared before `worktree`")
-        );
+    fn short_branch_strips_prefix() {
+        assert_eq!(super::short_branch("refs/heads/main"), "main");
+        assert_eq!(super::short_branch("main"), "main");
+        assert_eq!(super::short_branch("refs/heads/feature/foo"), "feature/foo");
     }
 }
