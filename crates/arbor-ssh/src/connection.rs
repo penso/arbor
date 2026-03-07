@@ -80,9 +80,7 @@ impl SshConnection {
         command: &str,
     ) -> Result<RemoteCommandOutput, RemoteError> {
         let auth_sock = std::env::var("SSH_AUTH_SOCK").map_err(|_| {
-            RemoteError::Command(
-                "SSH_AUTH_SOCK is not set; cannot forward SSH agent".to_owned(),
-            )
+            RemoteError::Command("SSH_AUTH_SOCK is not set; cannot forward SSH agent".to_owned())
         })?;
 
         self.session.enable_accept_agent_forward(true);
@@ -278,10 +276,10 @@ impl Default for SshConnectionPool {
 }
 
 fn shellexpand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
     }
     path.to_owned()
 }

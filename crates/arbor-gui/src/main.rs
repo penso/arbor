@@ -89,6 +89,9 @@ const DIFF_HUNK_CONTEXT_LINES: usize = 3;
 const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
 const TAB_ICON_LOGS: &str = "\u{f4ed}";
+const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
+const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
+const GIT_ACTION_ICON_PR: &str = "\u{f126}";
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 
 fn terminal_mono_font(cx: &App) -> gpui::Font {
@@ -122,6 +125,7 @@ fn terminal_mono_font(cx: &App) -> gpui::Font {
 
 actions!(arbor, [
     RequestQuit,
+    ImmediateQuit,
     NewWindow,
     SpawnTerminal,
     CloseActiveTerminal,
@@ -192,6 +196,7 @@ enum TerminalState {
 
 #[derive(Clone)]
 enum OutpostTerminalRuntime {
+    #[allow(dead_code)]
     RemoteDaemon {
         daemon: HttpTerminalDaemon,
     },
@@ -216,9 +221,12 @@ impl SshTerminalShell {
         rows: u16,
         remote_path: &str,
     ) -> Result<Self, String> {
-        let shell =
-            arbor_ssh::shell::SshShell::open(connection.session(), u32::from(cols), u32::from(rows))
-                .map_err(|e| format!("failed to open SSH shell: {e}"))?;
+        let shell = arbor_ssh::shell::SshShell::open(
+            connection.session(),
+            u32::from(cols),
+            u32::from(rows),
+        )
+        .map_err(|e| format!("failed to open SSH shell: {e}"))?;
 
         // Send cd command to navigate to the outpost directory
         shell
@@ -294,7 +302,11 @@ impl SshTerminalShell {
             output,
             styled_lines,
             cursor,
-            exit_code: if is_closed { Some(0) } else { None },
+            exit_code: if is_closed {
+                Some(0)
+            } else {
+                None
+            },
         }
     }
 
@@ -317,8 +329,7 @@ impl SshTerminalShell {
     }
 
     fn generation(&self) -> u64 {
-        self.generation
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn close(&self) {
@@ -346,6 +357,13 @@ enum CenterTab {
 enum RightPaneTab {
     Changes,
     FileTree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitActionKind {
+    Commit,
+    Push,
+    CreatePullRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -552,6 +570,7 @@ struct ArborWindow {
     manage_hosts_modal: Option<ManageHostsModal>,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
+    git_action_in_flight: Option<GitActionKind>,
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
     notice: Option<String>,
@@ -643,6 +662,7 @@ impl ArborWindow {
                     manage_hosts_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
+                    git_action_in_flight: None,
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notice: Some(format!("failed to read current directory: {error}")),
@@ -716,6 +736,7 @@ impl ArborWindow {
                     manage_hosts_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
+                    git_action_in_flight: None,
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
                     notice: Some(format!("failed to resolve git repository root: {error}")),
@@ -900,6 +921,7 @@ impl ArborWindow {
             manage_hosts_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
+            git_action_in_flight: None,
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             worktree_nav_back: Vec::new(),
@@ -1124,8 +1146,7 @@ impl ArborWindow {
             .collect();
         if self.remote_hosts != next_remote_hosts {
             self.remote_hosts = next_remote_hosts;
-            self.outposts =
-                load_outpost_summaries(self.outpost_store.as_ref(), &self.remote_hosts);
+            self.outposts = load_outpost_summaries(self.outpost_store.as_ref(), &self.remote_hosts);
             changed = true;
         }
 
@@ -1503,7 +1524,8 @@ impl ArborWindow {
                                 changed = true;
                             },
                             Err(error) => {
-                                self.notice = Some(format!("failed to resize outpost terminal: {error}"));
+                                self.notice =
+                                    Some(format!("failed to resize outpost terminal: {error}"));
                             },
                         }
                     }
@@ -1944,6 +1966,10 @@ impl ArborWindow {
             .map(|worktree| worktree.path.as_path())
     }
 
+    fn can_run_local_git_actions(&self) -> bool {
+        self.active_outpost_index.is_none() && self.selected_worktree_path().is_some()
+    }
+
     fn active_worktree(&self) -> Option<&WorktreeSummary> {
         self.active_worktree_index
             .and_then(|index| self.worktrees.get(index))
@@ -1977,9 +2003,11 @@ impl ArborWindow {
                 self.terminals.iter().any(|session| {
                     session.id == *session_id
                         && session.worktree_path.as_path() == worktree_path
-                        && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
-                            matches!(rt, TerminalRuntime::Outpost(_))
-                        })
+                        && is_outpost
+                            == session
+                                .runtime
+                                .as_ref()
+                                .is_some_and(|rt| matches!(rt, TerminalRuntime::Outpost(_)))
                 })
             })
             .or_else(|| {
@@ -1987,9 +2015,11 @@ impl ArborWindow {
                     .iter()
                     .find(|session| {
                         session.worktree_path.as_path() == worktree_path
-                            && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
-                                matches!(rt, TerminalRuntime::Outpost(_))
-                            })
+                            && is_outpost
+                                == session
+                                    .runtime
+                                    .as_ref()
+                                    .is_some_and(|rt| matches!(rt, TerminalRuntime::Outpost(_)))
                     })
                     .map(|session| session.id)
             })
@@ -2006,9 +2036,11 @@ impl ArborWindow {
             .iter()
             .filter(|session| {
                 session.worktree_path.as_path() == worktree_path
-                    && is_outpost == session.runtime.as_ref().is_some_and(|rt| {
-                        matches!(rt, TerminalRuntime::Outpost(_))
-                    })
+                    && is_outpost
+                        == session
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|rt| matches!(rt, TerminalRuntime::Outpost(_)))
             })
             .collect()
     }
@@ -2373,12 +2405,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn select_outpost(
-        &mut self,
-        index: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
         self.changed_files.clear();
@@ -2403,10 +2430,10 @@ impl ArborWindow {
 
         if self.active_outpost_index == Some(outpost_index) {
             self.active_outpost_index = None;
-        } else if let Some(active) = self.active_outpost_index {
-            if active > outpost_index {
-                self.active_outpost_index = Some(active - 1);
-            }
+        } else if let Some(active) = self.active_outpost_index
+            && active > outpost_index
+        {
+            self.active_outpost_index = Some(active - 1);
         }
 
         cx.notify();
@@ -2488,8 +2515,7 @@ impl ArborWindow {
                             "cd {remote_path} && git diff --numstat HEAD 2>/dev/null"
                         ))
                         .map_err(|e| format!("{e}"))?;
-                    let numstat_map =
-                        parse_remote_numstat_output(&numstat_output.stdout);
+                    let numstat_map = parse_remote_numstat_output(&numstat_output.stdout);
 
                     let mut files = Vec::new();
                     for line in status_output.stdout.lines() {
@@ -2503,10 +2529,8 @@ impl ArborWindow {
                         }
                         let path = PathBuf::from(path_str);
                         let kind = porcelain_status_to_change_kind(xy);
-                        let (additions, deletions) = numstat_map
-                            .get(&path)
-                            .copied()
-                            .unwrap_or((0, 0));
+                        let (additions, deletions) =
+                            numstat_map.get(&path).copied().unwrap_or((0, 0));
                         files.push(ChangedFile {
                             path,
                             kind,
@@ -2521,15 +2545,160 @@ impl ArborWindow {
 
             let _ = this.update(cx, |this, cx| {
                 if this.active_outpost_index.is_some() {
-                    match result {
-                        Ok(files) => {
-                            this.changed_files = files;
-                            this.sync_selected_changed_file();
-                        },
-                        Err(_) => {},
+                    if let Ok(files) = result {
+                        this.changed_files = files;
+                        this.sync_selected_changed_file();
                     }
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    fn run_commit_action(&mut self, cx: &mut Context<Self>) {
+        if self.git_action_in_flight.is_some() {
+            return;
+        }
+
+        if self.active_outpost_index.is_some() {
+            self.notice = Some("git actions are only available for local worktrees".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before committing".to_owned());
+            cx.notify();
+            return;
+        };
+
+        if self.changed_files.is_empty() {
+            self.notice = Some("nothing to commit".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let changed_files = self.changed_files.clone();
+        self.git_action_in_flight = Some(GitActionKind::Commit);
+        self.notice = Some("running git commit".to_owned());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                run_git_commit_for_worktree(worktree_path.as_path(), &changed_files)
+            });
+            let result = result.await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.git_action_in_flight = None;
+                match result {
+                    Ok(message) => {
+                        this.notice = Some(message);
+                        let _ = this.reload_changed_files();
+                        this.refresh_worktree_diff_summaries(cx);
+                        this.refresh_worktree_pull_requests(cx);
+                    },
+                    Err(error) => {
+                        this.notice = Some(error);
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn run_push_action(&mut self, cx: &mut Context<Self>) {
+        if self.git_action_in_flight.is_some() {
+            return;
+        }
+
+        if self.active_outpost_index.is_some() {
+            self.notice = Some("git actions are only available for local worktrees".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before pushing".to_owned());
+            cx.notify();
+            return;
+        };
+
+        self.git_action_in_flight = Some(GitActionKind::Push);
+        self.notice = Some("running git push".to_owned());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { run_git_push_for_worktree(worktree_path.as_path()) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.git_action_in_flight = None;
+                match result {
+                    Ok(message) => {
+                        this.notice = Some(message);
+                        this.refresh_worktree_pull_requests(cx);
+                    },
+                    Err(error) => {
+                        this.notice = Some(error);
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn run_create_pr_action(&mut self, cx: &mut Context<Self>) {
+        if self.git_action_in_flight.is_some() {
+            return;
+        }
+
+        if self.active_outpost_index.is_some() {
+            self.notice = Some("git actions are only available for local worktrees".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before creating a PR".to_owned());
+            cx.notify();
+            return;
+        };
+
+        let repo_slug = self
+            .github_repo_slug
+            .clone()
+            .or_else(|| github_repo_slug_for_repo(worktree_path.as_path()));
+
+        self.git_action_in_flight = Some(GitActionKind::CreatePullRequest);
+        self.notice = Some("running gh pr create".to_owned());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                run_create_pr_for_worktree(worktree_path.as_path(), repo_slug.as_deref())
+            });
+            let result = result.await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.git_action_in_flight = None;
+                match result {
+                    Ok(message) => {
+                        if let Some(url) = extract_first_url(&message) {
+                            this.open_external_url(&url, cx);
+                        }
+                        this.notice = Some(message);
+                        this.refresh_worktree_pull_requests(cx);
+                    },
+                    Err(error) => {
+                        this.notice = Some(error);
+                    },
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -3132,10 +3301,8 @@ impl ArborWindow {
                             this.notice =
                                 Some(format!("outpost `{outpost_name}` created on {host_name}"));
                         }
-                        this.outposts = load_outpost_summaries(
-                            this.outpost_store.as_ref(),
-                            &this.remote_hosts,
-                        );
+                        this.outposts =
+                            load_outpost_summaries(this.outpost_store.as_ref(), &this.remote_hosts);
                         this.create_modal = None;
                     },
                     Err(error) => {
@@ -3187,9 +3354,7 @@ impl ArborWindow {
                     },
                     "tab" => {
                         self.update_manage_hosts_modal_input(
-                            HostsModalInputEvent::MoveActiveField(
-                                event.keystroke.modifiers.shift,
-                            ),
+                            HostsModalInputEvent::MoveActiveField(event.keystroke.modifiers.shift),
                             cx,
                         );
                         cx.stop_propagation();
@@ -3201,10 +3366,7 @@ impl ArborWindow {
                         return;
                     },
                     "backspace" => {
-                        self.update_manage_hosts_modal_input(
-                            HostsModalInputEvent::Backspace,
-                            cx,
-                        );
+                        self.update_manage_hosts_modal_input(HostsModalInputEvent::Backspace, cx);
                         cx.stop_propagation();
                         return;
                     },
@@ -3216,24 +3378,16 @@ impl ArborWindow {
                 }
 
                 if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                    self.update_manage_hosts_modal_input(
-                        HostsModalInputEvent::ClearError,
-                        cx,
-                    );
+                    self.update_manage_hosts_modal_input(HostsModalInputEvent::ClearError, cx);
                     self.update_manage_hosts_modal_input(
                         HostsModalInputEvent::Append(key_char.to_owned()),
                         cx,
                     );
                     cx.stop_propagation();
                 }
-            } else {
-                match event.keystroke.key.as_str() {
-                    "escape" => {
-                        self.close_manage_hosts_modal(cx);
-                        cx.stop_propagation();
-                    },
-                    _ => {},
-                }
+            } else if event.keystroke.key.as_str() == "escape" {
+                self.close_manage_hosts_modal(cx);
+                cx.stop_propagation();
             }
             return;
         }
@@ -3285,10 +3439,7 @@ impl ArborWindow {
             "backspace" => {
                 match active_tab {
                     CreateModalTab::LocalWorktree => {
-                        self.update_create_worktree_modal_input(
-                            ModalInputEvent::Backspace,
-                            cx,
-                        );
+                        self.update_create_worktree_modal_input(ModalInputEvent::Backspace, cx);
                     },
                     CreateModalTab::RemoteOutpost => {
                         self.update_create_outpost_modal_input(
@@ -3301,21 +3452,20 @@ impl ArborWindow {
                 return;
             },
             "left" | "right" => {
-                if active_tab == CreateModalTab::RemoteOutpost {
-                    if self
+                if active_tab == CreateModalTab::RemoteOutpost
+                    && self
                         .create_modal
                         .as_ref()
                         .map(|m| m.outpost_active_field == CreateOutpostField::HostSelector)
                         .unwrap_or(false)
-                    {
-                        let reverse = event.keystroke.key.as_str() == "left";
-                        self.update_create_outpost_modal_input(
-                            OutpostModalInputEvent::CycleHost(reverse),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        return;
-                    }
+                {
+                    let reverse = event.keystroke.key.as_str() == "left";
+                    self.update_create_outpost_modal_input(
+                        OutpostModalInputEvent::CycleHost(reverse),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
                 }
             },
             _ => {},
@@ -3335,10 +3485,7 @@ impl ArborWindow {
                     );
                 },
                 CreateModalTab::RemoteOutpost => {
-                    self.update_create_outpost_modal_input(
-                        OutpostModalInputEvent::ClearError,
-                        cx,
-                    );
+                    self.update_create_outpost_modal_input(OutpostModalInputEvent::ClearError, cx);
                     self.update_create_outpost_modal_input(
                         OutpostModalInputEvent::Append(key_char.to_owned()),
                         cx,
@@ -3556,6 +3703,10 @@ impl ArborWindow {
             });
         })
         .detach();
+    }
+
+    fn action_immediate_quit(&mut self, _: &ImmediateQuit, _: &mut Window, cx: &mut Context<Self>) {
+        cx.quit();
     }
 
     fn action_view_logs(&mut self, _: &ViewLogs, _: &mut Window, cx: &mut Context<Self>) {
@@ -3786,7 +3937,8 @@ impl ArborWindow {
                         arbor_mosh::MoshShell::spawn(handshake, 120, 35).map_err(|error| {
                             format!("mosh-client failed, falling back to SSH: {error}")
                         })
-                    })();
+                    })(
+                    );
 
                     match mosh_result {
                         Ok(mosh) => {
@@ -3803,9 +3955,8 @@ impl ArborWindow {
                     }
                 },
                 Err(error) => {
-                    self.notice = Some(format!(
-                        "SSH connection failed for mosh handshake: {error}",
-                    ));
+                    self.notice =
+                        Some(format!("SSH connection failed for mosh handshake: {error}",));
                 },
             }
         } else if host.mosh == Some(true) {
@@ -3824,12 +3975,7 @@ impl ArborWindow {
                         let connection = guard
                             .as_ref()
                             .ok_or_else(|| "SSH connection not available".to_owned())?;
-                        SshTerminalShell::open(
-                            connection,
-                            120,
-                            35,
-                            &outpost.remote_path,
-                        )
+                        SshTerminalShell::open(connection, 120, 35, &outpost.remote_path)
                     })();
 
                     match ssh_result {
@@ -4416,9 +4562,7 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.create_modal.is_some()
-            || self.manage_hosts_modal.is_some()
-        {
+        if self.create_modal.is_some() || self.manage_hosts_modal.is_some() {
             return;
         }
 
@@ -6052,106 +6196,180 @@ impl ArborWindow {
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let selected_path = self.selected_changed_file.clone();
-        div().flex_1().min_h_0().flex().flex_col().child(
-            div()
-                .id("changes-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .scrollbar_width(px(10.))
-                .flex()
-                .flex_col()
-                .font_family(FONT_MONO)
-                .p_1()
-                .children(self.changed_files.iter().map(|change| {
-                    let is_selected = selected_path
-                        .as_ref()
-                        .is_some_and(|selected| selected.as_path() == change.path.as_path());
-                    let status_color = match change.kind {
-                        ChangeKind::Added => 0xa6e3a1,
-                        ChangeKind::Modified => 0xf9e2af,
-                        ChangeKind::Removed => 0xf38ba8,
-                        ChangeKind::Renamed => 0x89dceb,
-                        ChangeKind::Copied => 0x74c7ec,
-                        ChangeKind::TypeChange => 0xcba6f7,
-                        ChangeKind::Conflict => 0xf38ba8,
-                        ChangeKind::IntentToAdd => 0x94e2d5,
-                    };
-                    let path_color = match change.kind {
-                        ChangeKind::Added => 0x8fd7ad,
-                        ChangeKind::Removed => 0xf2a4b7,
-                        ChangeKind::Modified => 0xd9d7cf,
-                        ChangeKind::Renamed => 0x8ecae6,
-                        ChangeKind::Copied => 0x91d7e3,
-                        ChangeKind::TypeChange => 0xc4b1ee,
-                        ChangeKind::Conflict => 0xf38ba8,
-                        ChangeKind::IntentToAdd => 0x94e2d5,
-                    };
-                    let show_line_stats = change.additions > 0 || change.deletions > 0;
-                    let display_path = truncate_middle_path_for_width(
-                        change.path.as_path(),
-                        self.right_pane_width,
-                    );
-                    let file_path = change.path.clone();
+        let can_run_actions = self.can_run_local_git_actions();
+        let is_busy = self.git_action_in_flight.is_some();
+        let commit_enabled = can_run_actions && !is_busy && !self.changed_files.is_empty();
+        let push_enabled = can_run_actions && !is_busy;
+        let pr_enabled = can_run_actions && !is_busy;
 
-                    div()
-                        .h(px(24.))
-                        .pl(px(4.))
-                        .pr_1()
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                this.select_changed_file(file_path.clone(), cx);
-                                this.open_diff_tab_for_selected_file(cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.))
-                                .text_color(rgb(status_color))
-                                .child(change_code(change.kind)),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_xs()
-                                .text_color(rgb(path_color))
-                                .child(display_path),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .gap_1()
-                                .when(show_line_stats, |this| {
-                                    this.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(0x72d69c))
-                                            .child(format!("+{}", change.additions)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(0xeb6f92))
-                                            .child(format!("-{}", change.deletions)),
-                                    )
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(32.))
+                    .px_1()
+                    .gap_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                git_action_button(
+                                    theme,
+                                    "changes-action-commit",
+                                    GIT_ACTION_ICON_COMMIT,
+                                    "Commit",
+                                    commit_enabled,
+                                    self.git_action_in_flight == Some(GitActionKind::Commit),
+                                )
+                                .when(commit_enabled, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        this.run_commit_action(cx);
+                                    }))
                                 }),
-                        )
-                })),
-        )
+                            )
+                            .child(
+                                git_action_button(
+                                    theme,
+                                    "changes-action-push",
+                                    GIT_ACTION_ICON_PUSH,
+                                    "Push",
+                                    push_enabled,
+                                    self.git_action_in_flight == Some(GitActionKind::Push),
+                                )
+                                .when(push_enabled, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        this.run_push_action(cx);
+                                    }))
+                                }),
+                            )
+                            .child(
+                                git_action_button(
+                                    theme,
+                                    "changes-action-pr",
+                                    GIT_ACTION_ICON_PR,
+                                    "Create PR",
+                                    pr_enabled,
+                                    self.git_action_in_flight
+                                        == Some(GitActionKind::CreatePullRequest),
+                                )
+                                .when(pr_enabled, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        this.run_create_pr_action(cx);
+                                    }))
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("changes-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(10.))
+                    .flex()
+                    .flex_col()
+                    .font_family(FONT_MONO)
+                    .p_1()
+                    .children(self.changed_files.iter().map(|change| {
+                        let is_selected = selected_path
+                            .as_ref()
+                            .is_some_and(|selected| selected.as_path() == change.path.as_path());
+                        let status_color = match change.kind {
+                            ChangeKind::Added => 0xa6e3a1,
+                            ChangeKind::Modified => 0xf9e2af,
+                            ChangeKind::Removed => 0xf38ba8,
+                            ChangeKind::Renamed => 0x89dceb,
+                            ChangeKind::Copied => 0x74c7ec,
+                            ChangeKind::TypeChange => 0xcba6f7,
+                            ChangeKind::Conflict => 0xf38ba8,
+                            ChangeKind::IntentToAdd => 0x94e2d5,
+                        };
+                        let path_color = match change.kind {
+                            ChangeKind::Added => 0x8fd7ad,
+                            ChangeKind::Removed => 0xf2a4b7,
+                            ChangeKind::Modified => 0xd9d7cf,
+                            ChangeKind::Renamed => 0x8ecae6,
+                            ChangeKind::Copied => 0x91d7e3,
+                            ChangeKind::TypeChange => 0xc4b1ee,
+                            ChangeKind::Conflict => 0xf38ba8,
+                            ChangeKind::IntentToAdd => 0x94e2d5,
+                        };
+                        let show_line_stats = change.additions > 0 || change.deletions > 0;
+                        let display_path = truncate_middle_path_for_width(
+                            change.path.as_path(),
+                            self.right_pane_width,
+                        );
+                        let file_path = change.path.clone();
+
+                        div()
+                            .h(px(24.))
+                            .pl(px(4.))
+                            .pr_1()
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(is_selected, |this| this.bg(rgb(theme.panel_active_bg)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    this.select_changed_file(file_path.clone(), cx);
+                                    this.open_diff_tab_for_selected_file(cx);
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(status_color))
+                                    .child(change_code(change.kind)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .text_color(rgb(path_color))
+                                    .child(display_path),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap_1()
+                                    .when(show_line_stats, |this| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x72d69c))
+                                                .child(format!("+{}", change.additions)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0xeb6f92))
+                                                .child(format!("-{}", change.deletions)),
+                                        )
+                                    }),
+                            )
+                    })),
+            )
     }
 
     fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
@@ -6328,8 +6546,7 @@ impl ArborWindow {
         let target_path_preview =
             preview_managed_worktree_path(modal.repository_path.trim(), modal.worktree_name.trim())
                 .unwrap_or_else(|_| "-".to_owned());
-        let repository_active =
-            modal.worktree_active_field == CreateWorktreeField::RepositoryPath;
+        let repository_active = modal.worktree_active_field == CreateWorktreeField::RepositoryPath;
         let worktree_active = modal.worktree_active_field == CreateWorktreeField::WorktreeName;
         let worktree_create_disabled = modal.is_creating
             || modal.repository_path.trim().is_empty()
@@ -6434,12 +6651,12 @@ impl ArborWindow {
                                     })
                                     .child("Local Worktree")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(modal) = this.create_modal.as_mut() {
-                                            if !modal.is_creating {
-                                                modal.tab = CreateModalTab::LocalWorktree;
-                                                modal.error = None;
-                                                cx.notify();
-                                            }
+                                        if let Some(modal) = this.create_modal.as_mut()
+                                            && !modal.is_creating
+                                        {
+                                            modal.tab = CreateModalTab::LocalWorktree;
+                                            modal.error = None;
+                                            cx.notify();
                                         }
                                     })),
                             )
@@ -6463,12 +6680,12 @@ impl ArborWindow {
                                         })
                                         .child("Remote Outpost")
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(modal) = this.create_modal.as_mut() {
-                                                if !modal.is_creating {
-                                                    modal.tab = CreateModalTab::RemoteOutpost;
-                                                    modal.error = None;
-                                                    cx.notify();
-                                                }
+                                            if let Some(modal) = this.create_modal.as_mut()
+                                                && !modal.is_creating
+                                            {
+                                                modal.tab = CreateModalTab::RemoteOutpost;
+                                                modal.error = None;
+                                                cx.notify();
                                             }
                                         })),
                                 )
@@ -7330,6 +7547,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_collapse_all_repositories))
             .on_action(cx.listener(Self::action_view_logs))
             .on_action(cx.listener(Self::action_request_quit))
+            .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
             .child(div().h(px(1.)).bg(rgb(theme.chrome_border)))
             .child(div().when_some(self.notice.clone(), |this, notice| {
@@ -8535,6 +8753,54 @@ fn action_button(
         .child(label.into())
 }
 
+fn git_action_button(
+    theme: ThemePalette,
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    label: &'static str,
+    enabled: bool,
+    active: bool,
+) -> Stateful<Div> {
+    let background = if active {
+        theme.panel_active_bg
+    } else {
+        theme.panel_bg
+    };
+    let icon_color = if active {
+        theme.accent
+    } else if enabled {
+        theme.text_muted
+    } else {
+        theme.text_disabled
+    };
+    let text_color = if enabled || active {
+        theme.text_primary
+    } else {
+        theme.text_disabled
+    };
+
+    div()
+        .id(id)
+        .h(px(24.))
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(background))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .when(enabled, |this| this.cursor_pointer())
+        .child(
+            div()
+                .font_family(FONT_MONO)
+                .text_size(px(13.))
+                .text_color(rgb(icon_color))
+                .child(icon),
+        )
+        .child(div().text_xs().text_color(rgb(text_color)).child(label))
+}
+
 fn modal_input_field(
     theme: ThemePalette,
     id: impl Into<ElementId>,
@@ -8671,6 +8937,267 @@ fn truncate_middle_text(input: &str, max_chars: usize) -> String {
     output.push('…');
     output.extend(chars.iter().skip(tail_start));
     output
+}
+
+fn run_command_output(
+    command: &mut Command,
+    operation: &str,
+) -> Result<std::process::Output, String> {
+    command
+        .output()
+        .map_err(|error| format!("failed to run {operation}: {error}"))
+}
+
+fn command_failure_message(operation: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        return format!("{operation} failed: {stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !stdout.is_empty() {
+        return format!("{operation} failed: {stdout}");
+    }
+
+    match output.status.code() {
+        Some(code) => format!("{operation} failed with exit code {code}"),
+        None => format!("{operation} failed"),
+    }
+}
+
+fn first_non_empty_output_line(buffer: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(buffer);
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn auto_commit_subject(changed_files: &[ChangedFile]) -> String {
+    if changed_files.len() == 1 {
+        let file_label = changed_files[0]
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| changed_files[0].path.display().to_string());
+        return format!("chore: update {file_label}");
+    }
+
+    let has_added = changed_files
+        .iter()
+        .any(|change| matches!(change.kind, ChangeKind::Added | ChangeKind::IntentToAdd));
+    let has_removed = changed_files
+        .iter()
+        .any(|change| matches!(change.kind, ChangeKind::Removed));
+    let has_renamed = changed_files
+        .iter()
+        .any(|change| matches!(change.kind, ChangeKind::Renamed));
+    let verb = if has_added && !has_removed && !has_renamed {
+        "add"
+    } else if has_removed && !has_added && !has_renamed {
+        "remove"
+    } else if has_renamed && !has_added && !has_removed {
+        "rename"
+    } else {
+        "update"
+    };
+
+    format!("chore: {verb} {} files", changed_files.len())
+}
+
+fn auto_commit_body(changed_files: &[ChangedFile]) -> String {
+    let mut lines = vec!["Auto-generated by Arbor.".to_owned(), String::new()];
+
+    for change in changed_files.iter().take(12) {
+        let mut line = format!("- {} {}", change_code(change.kind), change.path.display());
+        if change.additions > 0 || change.deletions > 0 {
+            line.push_str(&format!(" (+{} -{})", change.additions, change.deletions));
+        }
+        lines.push(line);
+    }
+
+    if changed_files.len() > 12 {
+        lines.push(format!("- ... and {} more", changed_files.len() - 12));
+    }
+
+    lines.join("\n")
+}
+
+fn run_git_commit_for_worktree(
+    worktree_path: &Path,
+    changed_files: &[ChangedFile],
+) -> Result<String, String> {
+    if changed_files.is_empty() {
+        return Err("nothing to commit".to_owned());
+    }
+
+    let mut add_command = Command::new("git");
+    add_command.arg("-C").arg(worktree_path).args(["add", "-A"]);
+    let add_output = run_command_output(&mut add_command, "git add")?;
+    if !add_output.status.success() {
+        return Err(command_failure_message("git add", &add_output));
+    }
+
+    let subject = auto_commit_subject(changed_files);
+    let body = auto_commit_body(changed_files);
+    let mut commit_command = Command::new("git");
+    commit_command
+        .arg("-C")
+        .arg(worktree_path)
+        .arg("commit")
+        .arg("-m")
+        .arg(subject.as_str())
+        .arg("-m")
+        .arg(body.as_str());
+
+    let commit_output = run_command_output(&mut commit_command, "git commit")?;
+    if !commit_output.status.success() {
+        let failure = command_failure_message("git commit", &commit_output);
+        if failure.to_ascii_lowercase().contains("nothing to commit") {
+            return Err("nothing to commit".to_owned());
+        }
+        return Err(failure);
+    }
+
+    let summary = first_non_empty_output_line(&commit_output.stdout)
+        .or_else(|| first_non_empty_output_line(&commit_output.stderr))
+        .unwrap_or_else(|| subject.clone());
+    Ok(format!("commit complete: {summary}"))
+}
+
+fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, String> {
+    let mut push_command = Command::new("git");
+    push_command
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["push", "--set-upstream", "origin", "HEAD"]);
+    let output = run_command_output(&mut push_command, "git push")?;
+    if !output.status.success() {
+        return Err(command_failure_message("git push", &output));
+    }
+
+    let summary = first_non_empty_output_line(&output.stderr)
+        .or_else(|| first_non_empty_output_line(&output.stdout))
+        .unwrap_or_else(|| "pushed current branch".to_owned());
+    Ok(format!("push complete: {summary}"))
+}
+
+fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"]);
+    let output = run_command_output(&mut command, "git rev-parse")?;
+    if !output.status.success() {
+        return Err(command_failure_message("git rev-parse", &output));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err("cannot create a PR from detached HEAD".to_owned());
+    }
+
+    Ok(branch)
+}
+
+fn git_has_tracking_branch(worktree_path: &Path) -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ])
+        .output();
+
+    matches!(output, Ok(output) if output.status.success())
+}
+
+fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let base = trimmed.strip_prefix("origin/").unwrap_or(trimmed);
+    if base.is_empty() {
+        return None;
+    }
+
+    Some(base.to_owned())
+}
+
+fn run_create_pr_for_worktree(
+    worktree_path: &Path,
+    repo_slug: Option<&str>,
+) -> Result<String, String> {
+    if !git_has_tracking_branch(worktree_path) {
+        return Err("push the branch before creating a PR".to_owned());
+    }
+
+    let branch = git_branch_name_for_worktree(worktree_path)?;
+    let mut command = Command::new("gh");
+    command
+        .current_dir(worktree_path)
+        .arg("pr")
+        .arg("create")
+        .arg("--fill")
+        .arg("--head")
+        .arg(branch.as_str());
+
+    if let Some(base_branch) = git_default_base_branch(worktree_path) {
+        command.arg("--base").arg(base_branch);
+    }
+    if let Some(repo_slug) = repo_slug {
+        command.arg("--repo").arg(repo_slug);
+    }
+
+    let output = run_command_output(&mut command, "gh pr create")?;
+    if !output.status.success() {
+        return Err(command_failure_message("gh pr create", &output));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    if let Some(url) = extract_first_url(&combined) {
+        return Ok(format!("created PR: {url}"));
+    }
+
+    Ok("pull request created".to_owned())
+}
+
+fn extract_first_url(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let trimmed =
+            token.trim_matches(|character: char| matches!(character, '"' | '\'' | ',' | '.'));
+        if trimmed.starts_with("https://") {
+            Some(trimmed.to_owned())
+        } else {
+            None
+        }
+    })
 }
 
 fn github_repo_slug_for_repo(repo_root: &Path) -> Option<String> {
@@ -9846,7 +10373,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
             items: vec![
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Quit Arbor", RequestQuit),
+                MenuItem::action("Quit Arbor", ImmediateQuit),
             ],
         },
         Menu {
@@ -9859,6 +10386,8 @@ fn install_app_menu_and_keys(cx: &mut App) {
                 MenuItem::action("New Terminal Tab", SpawnTerminal),
                 MenuItem::action("Close Terminal Tab", CloseActiveTerminal),
                 MenuItem::action("New Worktree", OpenCreateWorktree),
+                MenuItem::separator(),
+                MenuItem::action("Quit Arbor", ImmediateQuit),
             ],
         },
         Menu {
@@ -9992,13 +10521,16 @@ fn main() {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use crate::{
-        DiffLineKind, TerminalSession, TerminalState, build_side_by_side_diff_lines,
-        styled_lines_for_session,
-        terminal_backend::{
-            TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+    use {
+        crate::{
+            DiffLineKind, TerminalSession, TerminalState, auto_commit_body, auto_commit_subject,
+            build_side_by_side_diff_lines, extract_first_url, styled_lines_for_session,
+            terminal_backend::{
+                TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+            },
+            theme::ThemeKind,
         },
-        theme::ThemeKind,
+        arbor_core::changes::{ChangeKind, ChangedFile},
     };
 
     fn session_with_styled_line(
@@ -10307,6 +10839,42 @@ mod tests {
         let input = "src/main.rs";
         let truncated = crate::truncate_middle_text(input, 32);
         assert_eq!(truncated, input);
+    }
+
+    #[test]
+    fn auto_commit_subject_uses_filename_for_single_change() {
+        let changed_files = vec![ChangedFile {
+            path: std::path::PathBuf::from("src/main.rs"),
+            kind: ChangeKind::Modified,
+            additions: 4,
+            deletions: 1,
+        }];
+
+        let subject = auto_commit_subject(&changed_files);
+        assert_eq!(subject, "chore: update main.rs");
+    }
+
+    #[test]
+    fn auto_commit_body_includes_stats_and_overflow_line() {
+        let changed_files = (0..13)
+            .map(|index| ChangedFile {
+                path: std::path::PathBuf::from(format!("src/file-{index}.rs")),
+                kind: ChangeKind::Modified,
+                additions: index + 1,
+                deletions: index,
+            })
+            .collect::<Vec<_>>();
+
+        let body = auto_commit_body(&changed_files);
+        assert!(body.contains("Auto-generated by Arbor."));
+        assert!(body.contains("- M src/file-0.rs (+1 -0)"));
+        assert!(body.contains("- ... and 1 more"));
+    }
+
+    #[test]
+    fn extract_first_url_ignores_punctuation() {
+        let url = extract_first_url("created PR: https://github.com/acme/repo/pull/42.");
+        assert_eq!(url.as_deref(), Some("https://github.com/acme/repo/pull/42"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use {
-    arbor_core::{outpost::RemoteHost, remote::RemoteTransport},
     crate::MoshError,
+    arbor_core::{outpost::RemoteHost, remote::RemoteTransport},
 };
 
 #[derive(Debug, Clone)]
@@ -14,10 +14,7 @@ pub fn start_mosh_server(
     connection: &dyn RemoteTransport,
     host: &RemoteHost,
 ) -> Result<MoshHandshakeResult, MoshError> {
-    let server_binary = host
-        .mosh_server_path
-        .as_deref()
-        .unwrap_or("mosh-server");
+    let server_binary = host.mosh_server_path.as_deref().unwrap_or("mosh-server");
 
     let command = format!("{server_binary} new -s");
 
@@ -32,8 +29,7 @@ pub fn start_mosh_server(
         }
         return Err(MoshError::ServerStartFailed(format!(
             "exit code {:?}: {}",
-            output.exit_code,
-            stderr,
+            output.exit_code, stderr,
         )));
     }
 
@@ -47,10 +43,9 @@ fn parse_mosh_connect(stdout: &str, hostname: &str) -> Result<MoshHandshakeResul
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 2 {
                 let port: u16 = parts[0].parse().map_err(|error| {
-                    MoshError::HandshakeParseFailed(format!(
-                        "invalid port `{}`: {error}",
-                        parts[0],
-                    ))
+                    MoshError::HandshakeParseFailed(
+                        format!("invalid port `{}`: {error}", parts[0],),
+                    )
                 })?;
                 let key = parts[1].to_owned();
                 return Ok(MoshHandshakeResult {
@@ -75,7 +70,10 @@ mod tests {
     fn parses_standard_mosh_connect_line() {
         let stdout = "MOSH CONNECT 60001 AbCdEfGh12345678901234\n";
         let result = parse_mosh_connect(stdout, "build.example.com");
-        let handshake = result.expect("should parse");
+        let handshake = match result {
+            Ok(handshake) => handshake,
+            Err(error) => panic!("should parse: {error}"),
+        };
         assert_eq!(handshake.port, 60001);
         assert_eq!(handshake.key, "AbCdEfGh12345678901234");
         assert_eq!(handshake.hostname, "build.example.com");
@@ -92,7 +90,10 @@ mod tests {
             \n\
             MOSH CONNECT 60002 ZzYyXxWwVvUu99887766\n";
         let result = parse_mosh_connect(stdout, "server.local");
-        let handshake = result.expect("should parse with preamble");
+        let handshake = match result {
+            Ok(handshake) => handshake,
+            Err(error) => panic!("should parse with preamble: {error}"),
+        };
         assert_eq!(handshake.port, 60002);
         assert_eq!(handshake.key, "ZzYyXxWwVvUu99887766");
     }
@@ -115,7 +116,10 @@ mod tests {
     fn parses_with_leading_whitespace() {
         let stdout = "  MOSH CONNECT 60003 KeyWithSpaces123  \n";
         let result = parse_mosh_connect(stdout, "host");
-        let handshake = result.expect("should handle leading/trailing whitespace");
+        let handshake = match result {
+            Ok(handshake) => handshake,
+            Err(error) => panic!("should handle leading/trailing whitespace: {error}"),
+        };
         assert_eq!(handshake.port, 60003);
         assert_eq!(handshake.key, "KeyWithSpaces123");
     }
