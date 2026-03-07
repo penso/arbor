@@ -10,6 +10,7 @@ type Worktree = {
   path: string;
   branch: string;
   is_primary_checkout: boolean;
+  last_activity_unix_ms: number | null;
 };
 
 type TerminalState = "running" | "completed" | "failed";
@@ -150,7 +151,8 @@ function parseWorktrees(value: unknown): Worktree[] {
       repo_root: repoRoot,
       path,
       branch,
-      is_primary_checkout: isPrimaryCheckout
+      is_primary_checkout: isPrimaryCheckout,
+      last_activity_unix_ms: readNumber(item["last_activity_unix_ms"])
     });
   }
 
@@ -688,10 +690,13 @@ function renderWorktreesPanel(): HTMLElement {
     });
 
     const label = createElement("span", "list-label", worktree.path);
+    const activity = worktree.last_activity_unix_ms !== null
+      ? ` · ${formatSessionAge(worktree.last_activity_unix_ms)}`
+      : "";
     const meta = createElement(
       "span",
       "list-meta",
-      `${worktree.branch}${worktree.is_primary_checkout ? " (primary)" : ""}`
+      `${worktree.branch}${worktree.is_primary_checkout ? " (primary)" : ""}${activity}`
     );
     button.append(label, meta);
     item.append(button);

@@ -159,6 +159,7 @@ struct WorktreeSummary {
     pr_url: Option<String>,
     diff_summary: Option<changes::DiffLineSummary>,
     agent_state: Option<AgentState>,
+    last_activity_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1787,6 +1788,15 @@ impl ArborWindow {
                     .map(|state| (worktree.path.clone(), state))
             })
             .collect();
+        let previous_activity: HashMap<PathBuf, u64> = self
+            .worktrees
+            .iter()
+            .filter_map(|worktree| {
+                worktree
+                    .last_activity_unix_ms
+                    .map(|ts| (worktree.path.clone(), ts))
+            })
+            .collect();
 
         let mut refresh_errors = Vec::new();
         let mut next_worktrees = Vec::new();
@@ -1811,6 +1821,13 @@ impl ArborWindow {
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
             worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
+            // Take the max of fresh git-based timestamp and previous value
+            // (which may include agent activity).
+            let prev = previous_activity.get(&worktree.path).copied();
+            worktree.last_activity_unix_ms = match (worktree.last_activity_unix_ms, prev) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
         }
 
         let rows_changed = worktree_rows_changed(&self.worktrees, &next_worktrees);
@@ -5702,6 +5719,17 @@ impl ArborWindow {
                                                                         );
                                                                 }
 
+                                                                if let Some(activity_ms) = worktree.last_activity_unix_ms {
+                                                                    details = details.child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(
+                                                                                theme.text_disabled,
+                                                                            ))
+                                                                            .child(format_relative_time(activity_ms)),
+                                                                    );
+                                                                }
+
                                                                 details
                                                             }),
                                                     )
@@ -7726,6 +7754,8 @@ impl WorktreeSummary {
             .unwrap_or_else(|| "-".to_owned());
         let is_primary_checkout = entry.path.as_path() == repo_root;
 
+        let last_activity_unix_ms = worktree::last_git_activity_ms(&entry.path);
+
         Self {
             repo_root: repo_root.to_path_buf(),
             path: entry.path.clone(),
@@ -7736,6 +7766,7 @@ impl WorktreeSummary {
             pr_url: None,
             diff_summary: None,
             agent_state: None,
+            last_activity_unix_ms,
         }
     }
 }
@@ -7882,7 +7913,7 @@ fn process_agent_ws_message(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let entries: Vec<(String, AgentState)> = sessions
+            let entries: Vec<(String, AgentState, Option<u64>)> = sessions
                 .iter()
                 .filter_map(|s| {
                     let cwd = s.get("cwd")?.as_str()?;
@@ -7892,7 +7923,8 @@ fn process_agent_ws_message(
                         "waiting" => AgentState::Waiting,
                         _ => return None,
                     };
-                    Some((cwd.to_owned(), state))
+                    let updated_at = s.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+                    Some((cwd.to_owned(), state, updated_at))
                 })
                 .collect();
             let _ = this.update(cx, |this, cx| {
@@ -7910,7 +7942,9 @@ fn process_agent_ws_message(
                         "waiting" => AgentState::Waiting,
                         _ => return,
                     };
-                    let entries = vec![(cwd.to_owned(), state)];
+                    let updated_at =
+                        session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+                    let entries = vec![(cwd.to_owned(), state, updated_at)];
                     let _ = this.update(cx, |this, cx| {
                         apply_agent_ws_update(this, &entries);
                         cx.notify();
@@ -7922,7 +7956,7 @@ fn process_agent_ws_message(
     }
 }
 
-fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState)]) {
+fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState, Option<u64>)]) {
     tracing::debug!(count = entries.len(), "agent WS snapshot received");
     for worktree in &mut app.worktrees {
         worktree.agent_state = None;
@@ -7930,10 +7964,10 @@ fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState
     apply_agent_ws_update(app, entries);
 }
 
-fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState)]) {
+fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, Option<u64>)]) {
     let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
 
-    for (cwd, state) in entries {
+    for (cwd, state, updated_at) in entries {
         let cwd_path = Path::new(cwd);
         // Find the most specific (longest) worktree path that is a prefix of this cwd,
         // same logic as worktrees_with_agents().
@@ -7955,6 +7989,11 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState)]
                     "agent activity matched"
                 );
                 worktree.agent_state = Some(*state);
+                if let Some(ts) = updated_at {
+                    worktree.last_activity_unix_ms = Some(
+                        worktree.last_activity_unix_ms.unwrap_or(0).max(*ts),
+                    );
+                }
             }
         }
     }
@@ -8037,6 +8076,29 @@ fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary])
             || left.branch != right.branch
             || left.is_primary_checkout != right.is_primary_checkout
     })
+}
+
+fn format_relative_time(unix_ms: u64) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let age_secs = now_ms.saturating_sub(unix_ms) / 1000;
+
+    if age_secs < 60 {
+        return "just now".to_owned();
+    }
+    let minutes = age_secs / 60;
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    format!("{days}d ago")
 }
 
 fn terminal_tab_title(session: &TerminalSession) -> String {

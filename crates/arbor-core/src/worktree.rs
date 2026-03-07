@@ -1,7 +1,9 @@
 use {
     std::{
+        fs,
         path::{Path, PathBuf},
         process::{Command, Output},
+        time::SystemTime,
     },
     thiserror::Error,
 };
@@ -263,6 +265,57 @@ pub fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
         Ok(canonical) => canonical,
         Err(_) => path,
     }
+}
+
+/// Resolves the actual `.git` directory for a worktree path.
+///
+/// For the main worktree this is simply `<path>/.git`.  For linked worktrees
+/// the `.git` entry is a file containing `gitdir: <path>` pointing to a
+/// directory inside the main repo's `.git/worktrees/` folder.
+pub fn resolve_git_dir(worktree_path: &Path) -> Option<PathBuf> {
+    let dot_git = worktree_path.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if dot_git.is_file() {
+        let content = fs::read_to_string(&dot_git).ok()?;
+        let gitdir = content.strip_prefix("gitdir: ")?.trim();
+        let gitdir_path = PathBuf::from(gitdir);
+        let resolved = if gitdir_path.is_relative() {
+            worktree_path.join(gitdir_path)
+        } else {
+            gitdir_path
+        };
+        if resolved.is_dir() {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+/// Returns the most recent modification time (as unix milliseconds) among
+/// key git bookkeeping files: `index`, `logs/HEAD`, and `HEAD`.
+///
+/// This covers essentially all git write operations (commits, staging,
+/// checkouts, rebases, merges, etc.) without spawning any processes.
+pub fn last_git_activity_ms(worktree_path: &Path) -> Option<u64> {
+    let git_dir = resolve_git_dir(worktree_path)?;
+    let candidates = [
+        git_dir.join("index"),
+        git_dir.join("logs").join("HEAD"),
+        git_dir.join("HEAD"),
+    ];
+
+    candidates
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok()?.modified().ok())
+        .filter_map(|mtime| {
+            mtime
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_millis() as u64)
+        })
+        .max()
 }
 
 #[cfg(test)]

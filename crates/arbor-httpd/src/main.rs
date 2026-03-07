@@ -99,6 +99,7 @@ struct WorktreeDto {
     path: String,
     branch: String,
     is_primary_checkout: bool,
+    last_activity_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +282,8 @@ async fn list_worktrees(
         match worktree::list(&repository_root) {
             Ok(entries) => {
                 for entry in entries {
+                    let last_activity_unix_ms =
+                        worktree::last_git_activity_ms(&entry.path);
                     worktrees.push(WorktreeDto {
                         repo_root: repository_root.display().to_string(),
                         path: entry.path.display().to_string(),
@@ -290,6 +293,7 @@ async fn list_worktrees(
                             .map(short_branch)
                             .unwrap_or_else(|| "-".to_owned()),
                         is_primary_checkout: entry.path.as_path() == repository_root,
+                        last_activity_unix_ms,
                     });
                 }
             },
