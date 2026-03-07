@@ -33,10 +33,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
       - name: Add Rust targets
@@ -49,13 +49,15 @@ jobs:
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-apple-darwin
       - name: Package macOS app
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           mkdir -p dist
           lipo -create \
             target/aarch64-apple-darwin/release/Arbor \
             target/x86_64-apple-darwin/release/Arbor \
             -output dist/Arbor
-          ./scripts/ci/package-macos.sh "${{ github.ref_name }}" "universal2-apple-darwin" "dist/Arbor" "dist"
+          ./scripts/ci/package-macos.sh "$TAG" "universal2-apple-darwin" "dist/Arbor" "dist"
       - name: Import signing certificate
         if: ${{ secrets.MACOS_CERTIFICATE != '' }}
         env:
@@ -129,8 +131,9 @@ jobs:
           rm -f "$RUNNER_TEMP/notarization.zip"
       - name: Re-create distributable archive
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
           ARCHIVE_NAME="Arbor-${TAG}-universal2-apple-darwin.app.zip"
           rm -f "dist/${ARCHIVE_NAME}"
           /usr/bin/ditto -c -k --keepParent --norsrc "dist/Arbor.app" "dist/${ARCHIVE_NAME}"
@@ -141,7 +144,7 @@ jobs:
           if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
             security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-macos
           path: dist/*.zip
@@ -160,10 +163,10 @@ jobs:
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
       - name: Install Linux x86_64 GUI dependencies
@@ -203,22 +206,29 @@ jobs:
             zlib1g-dev:arm64
       - name: Add Rust target
         shell: bash
-        run: rustup target add "${{ matrix.target }}"
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
       - name: Build Linux binary
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+          if [[ "$TARGET" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
             export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
             export PKG_CONFIG_ALLOW_CROSS=1
           fi
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "${{ matrix.target }}"
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "$TARGET"
       - name: Package Linux app
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          ./scripts/ci/package-linux.sh "${{ github.ref_name }}" "${{ matrix.target }}" "target/${{ matrix.target }}/release/Arbor" "dist"
-      - uses: actions/upload-artifact@v4
+          ./scripts/ci/package-linux.sh "$TAG" "$TARGET" "target/${TARGET}/release/Arbor" "dist"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-linux-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -231,10 +241,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
       - name: Add Rust target
@@ -242,10 +252,12 @@ jobs:
       - name: Build Windows binary
         run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
       - name: Package Windows app
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           New-Item -Path dist -ItemType Directory -Force | Out-Null
-          .\scripts\ci\package-windows.ps1 -Tag "${{ github.ref_name }}" -TargetTriple "x86_64-pc-windows-msvc" -BinaryPath "target\x86_64-pc-windows-msvc\release\Arbor.exe" -OutputDir "dist"
-      - uses: actions/upload-artifact@v4
+          .\scripts\ci\package-windows.ps1 -Tag "$env:TAG" -TargetTriple "x86_64-pc-windows-msvc" -BinaryPath "target\x86_64-pc-windows-msvc\release\Arbor.exe" -OutputDir "dist"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-windows
           path: dist/*.zip
@@ -258,10 +270,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           pattern: release-*
@@ -286,10 +298,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-macos
           path: dist

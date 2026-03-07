@@ -19,6 +19,9 @@ lint: lockfile-check
 test:
     cargo +{{nightly_toolchain}} test --workspace --all-features
 
+zizmor:
+    zizmor .github/workflows/
+
 ci: format-check lint test
 
 run:
