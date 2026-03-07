@@ -5324,6 +5324,44 @@ impl ArborWindow {
                             .child(centered_title),
                     ),
             )
+            // Right group: report issue button
+            .child(
+                div()
+                    .absolute()
+                    .right(px(16.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("report-issue")
+                            .cursor_pointer()
+                            .text_color(rgb(theme.text_muted))
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .on_click(cx.listener(|_this, _, _window, cx| {
+                                cx.open_url("https://github.com/penso/arbor/issues/new");
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(13.))
+                                    .child("\u{f188}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .child("Report issue"),
+                            ),
+                    ),
+            )
     }
 
     fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
