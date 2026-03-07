@@ -455,6 +455,52 @@ enum PresetsModalInputEvent {
     ClearError,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoPreset {
+    name: String,
+    icon: String,
+    command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoPresetModalField {
+    Icon,
+    Name,
+    Command,
+}
+
+impl RepoPresetModalField {
+    const ORDER: [Self; 3] = [Self::Icon, Self::Name, Self::Command];
+
+    fn next(self) -> Self {
+        let index = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(index + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let index = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(index + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManageRepoPresetsModal {
+    editing_index: Option<usize>,
+    icon: String,
+    name: String,
+    command: String,
+    active_field: RepoPresetModalField,
+    error: Option<String>,
+}
+
+enum RepoPresetsModalInputEvent {
+    SetActiveField(RepoPresetModalField),
+    MoveActiveField(bool),
+    Backspace,
+    Append(String),
+    ClearError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GitActionKind {
     Commit,
@@ -750,6 +796,8 @@ struct ArborWindow {
     manage_presets_modal: Option<ManagePresetsModal>,
     agent_presets: Vec<AgentPreset>,
     active_preset_tab: Option<AgentPresetKind>,
+    repo_presets: Vec<RepoPreset>,
+    manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
@@ -926,6 +974,8 @@ impl ArborWindow {
                     manage_presets_modal: None,
                     agent_presets,
                     active_preset_tab: None,
+                    repo_presets: Vec::new(),
+                    manage_repo_presets_modal: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -1144,6 +1194,8 @@ impl ArborWindow {
             manage_presets_modal: None,
             agent_presets,
             active_preset_tab: None,
+            repo_presets: Vec::new(),
+            manage_repo_presets_modal: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
@@ -1180,6 +1232,7 @@ impl ArborWindow {
         };
 
         app.refresh_worktrees(cx);
+        app.refresh_repo_config_if_changed(cx);
         app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
         let _ = app.ensure_selected_worktree_terminal();
         app.sync_daemon_session_store(cx);
@@ -1292,7 +1345,10 @@ impl ArborWindow {
                 })
                 .await;
 
-                let updated = this.update(cx, |this, cx| this.refresh_config_if_changed(cx));
+                let updated = this.update(cx, |this, cx| {
+                    this.refresh_config_if_changed(cx);
+                    this.refresh_repo_config_if_changed(cx);
+                });
                 if updated.is_err() {
                     break;
                 }
@@ -1413,6 +1469,36 @@ impl ArborWindow {
         if changed {
             cx.notify();
         }
+    }
+
+    fn refresh_repo_config_if_changed(&mut self, cx: &mut Context<Self>) {
+        let next_presets = self.load_all_repo_presets();
+        if self.repo_presets != next_presets {
+            self.repo_presets = next_presets;
+            cx.notify();
+        }
+    }
+
+    fn load_all_repo_presets(&self) -> Vec<RepoPreset> {
+        let mut presets = load_repo_presets(&self.repo_root);
+        if let Some(wt_path) = self.selected_worktree_path()
+            && wt_path != self.repo_root.as_path()
+        {
+            for wt_preset in load_repo_presets(wt_path) {
+                if !presets.iter().any(|p| p.name == wt_preset.name) {
+                    presets.push(wt_preset);
+                }
+            }
+        }
+        presets
+    }
+
+    /// Returns the directory where repo preset edits should be saved.
+    /// Prefers the selected worktree path, falls back to repo_root.
+    fn active_arbor_toml_dir(&self) -> PathBuf {
+        self.selected_worktree_path()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.repo_root.clone())
     }
 
     fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
@@ -2975,6 +3061,7 @@ impl ArborWindow {
             .iter()
             .position(|worktree| worktree.repo_root == repository.root);
         self.refresh_worktrees(cx);
+        self.refresh_repo_config_if_changed(cx);
         self.focus_terminal_on_next_render = true;
         cx.notify();
     }
@@ -4271,6 +4358,226 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn launch_repo_preset(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preset) = self.repo_presets.get(index) else {
+            return;
+        };
+        let command = preset.command.trim().to_owned();
+        let name = preset.name.clone();
+        if command.is_empty() {
+            self.notice = Some(format!("{name} preset command is empty"));
+            cx.notify();
+            return;
+        }
+
+        let terminal_count_before = self.terminals.len();
+        self.spawn_terminal_session(window, cx);
+        if self.terminals.len() <= terminal_count_before {
+            return;
+        }
+
+        let Some(session_id) = self.terminals.last().map(|session| session.id) else {
+            return;
+        };
+
+        let input = format!("{command}\n");
+        if let Err(error) = self.write_input_to_terminal(session_id, input.as_bytes()) {
+            self.notice = Some(format!("failed to run {name} preset: {error}"));
+            cx.notify();
+            return;
+        }
+
+        if let Some(session) = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.last_command = Some(command);
+            session.pending_command.clear();
+            session.updated_at_unix_ms = current_unix_timestamp_millis();
+        }
+
+        self.sync_daemon_session_store(cx);
+        cx.notify();
+    }
+
+    fn open_manage_repo_presets_modal(
+        &mut self,
+        editing_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let (icon, name, command) = if let Some(index) = editing_index {
+            if let Some(preset) = self.repo_presets.get(index) {
+                (
+                    preset.icon.clone(),
+                    preset.name.clone(),
+                    preset.command.clone(),
+                )
+            } else {
+                return;
+            }
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+
+        self.manage_repo_presets_modal = Some(ManageRepoPresetsModal {
+            editing_index,
+            icon,
+            name,
+            command,
+            active_field: RepoPresetModalField::Icon,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn close_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
+        self.manage_repo_presets_modal = None;
+        cx.notify();
+    }
+
+    fn update_manage_repo_presets_modal_input(
+        &mut self,
+        input: RepoPresetsModalInputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut modal) = self.manage_repo_presets_modal.clone() else {
+            return;
+        };
+
+        match input {
+            RepoPresetsModalInputEvent::SetActiveField(field) => {
+                modal.active_field = field;
+            },
+            RepoPresetsModalInputEvent::MoveActiveField(reverse) => {
+                modal.active_field = if reverse {
+                    modal.active_field.prev()
+                } else {
+                    modal.active_field.next()
+                };
+            },
+            RepoPresetsModalInputEvent::Backspace => {
+                let field = match modal.active_field {
+                    RepoPresetModalField::Icon => &mut modal.icon,
+                    RepoPresetModalField::Name => &mut modal.name,
+                    RepoPresetModalField::Command => &mut modal.command,
+                };
+                let _ = field.pop();
+            },
+            RepoPresetsModalInputEvent::Append(text) => {
+                let field = match modal.active_field {
+                    RepoPresetModalField::Icon => &mut modal.icon,
+                    RepoPresetModalField::Name => &mut modal.name,
+                    RepoPresetModalField::Command => &mut modal.command,
+                };
+                field.push_str(&text);
+            },
+            RepoPresetsModalInputEvent::ClearError => {
+                modal.error = None;
+            },
+        }
+
+        self.manage_repo_presets_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn submit_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.manage_repo_presets_modal.clone() else {
+            return;
+        };
+
+        let name = modal.name.trim().to_owned();
+        let command = modal.command.trim().to_owned();
+        let icon = modal.icon.trim().to_owned();
+
+        if name.is_empty() {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some("Name is required.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+        if command.is_empty() {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some("Command is required.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+
+        let new_preset = RepoPreset {
+            name: name.clone(),
+            icon,
+            command,
+        };
+
+        if let Some(index) = modal.editing_index {
+            if let Some(preset) = self.repo_presets.get_mut(index) {
+                *preset = new_preset;
+            }
+        } else {
+            self.repo_presets.push(new_preset);
+        }
+
+        if let Err(error) = self.save_repo_presets() {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.manage_repo_presets_modal = None;
+        let action = if modal.editing_index.is_some() {
+            "updated"
+        } else {
+            "added"
+        };
+        self.notice = Some(format!("Preset \"{name}\" {action}."));
+        cx.notify();
+    }
+
+    fn delete_repo_preset(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.manage_repo_presets_modal.as_ref() else {
+            return;
+        };
+        let Some(index) = modal.editing_index else {
+            return;
+        };
+        let Some(preset) = self.repo_presets.get(index) else {
+            return;
+        };
+        let name = preset.name.clone();
+        let save_dir = self.active_arbor_toml_dir();
+
+        if let Err(error) = app_config::remove_repo_preset(&save_dir, &name) {
+            if let Some(m) = self.manage_repo_presets_modal.as_mut() {
+                m.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.repo_presets.remove(index);
+        self.manage_repo_presets_modal = None;
+        self.notice = Some(format!("Preset \"{name}\" removed."));
+        cx.notify();
+    }
+
+    fn save_repo_presets(&self) -> Result<(), String> {
+        let save_dir = self.active_arbor_toml_dir();
+        let presets: Vec<app_config::RepoPresetConfig> = self
+            .repo_presets
+            .iter()
+            .map(|p| app_config::RepoPresetConfig {
+                name: p.name.clone(),
+                icon: p.icon.clone(),
+                command: p.command.clone(),
+            })
+            .collect();
+        app_config::save_repo_presets(&save_dir, &presets)
+    }
+
     fn update_create_outpost_modal_input(
         &mut self,
         input: OutpostModalInputEvent,
@@ -4635,6 +4942,61 @@ impl ArborWindow {
                 self.update_manage_presets_modal_input(PresetsModalInputEvent::ClearError, cx);
                 self.update_manage_presets_modal_input(
                     PresetsModalInputEvent::Append(key_char.to_owned()),
+                    cx,
+                );
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.manage_repo_presets_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_manage_repo_presets_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "tab" => {
+                    self.update_manage_repo_presets_modal_input(
+                        RepoPresetsModalInputEvent::MoveActiveField(
+                            event.keystroke.modifiers.shift,
+                        ),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_manage_repo_presets_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "backspace" => {
+                    self.update_manage_repo_presets_modal_input(
+                        RepoPresetsModalInputEvent::Backspace,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+
+            if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
+                return;
+            }
+
+            if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                self.update_manage_repo_presets_modal_input(
+                    RepoPresetsModalInputEvent::ClearError,
+                    cx,
+                );
+                self.update_manage_repo_presets_modal_input(
+                    RepoPresetsModalInputEvent::Append(key_char.to_owned()),
                     cx,
                 );
                 cx.stop_propagation();
@@ -5867,6 +6229,7 @@ impl ArborWindow {
             || self.create_modal.is_some()
             || self.manage_hosts_modal.is_some()
             || self.manage_presets_modal.is_some()
+            || self.manage_repo_presets_modal.is_some()
         {
             return;
         }
@@ -8082,7 +8445,86 @@ impl ArborWindow {
                             .border_b_1()
                             .child(preset_button(AgentPresetKind::Codex))
                             .child(preset_button(AgentPresetKind::Claude))
-                            .child(preset_button(AgentPresetKind::OpenCode)),
+                            .child(preset_button(AgentPresetKind::OpenCode))
+                            .children(self.repo_presets.iter().enumerate().map(|(index, preset)| {
+                                let icon_text = preset.icon.clone();
+                                let name_text = preset.name.clone();
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("terminal-repo-preset-tab-{index}").into(),
+                                    ))
+                                    .cursor_pointer()
+                                    .h(px(22.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .border_b_1()
+                                    .border_color(rgb(theme.tab_bg))
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme.panel_active_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .line_height(px(14.))
+                                                    .child(if icon_text.is_empty() {
+                                                        "\u{f013}".to_owned()
+                                                    } else {
+                                                        icon_text
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .line_height(px(14.))
+                                                    .child(name_text),
+                                            ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                            this.launch_repo_preset(index, window, cx);
+                                        }),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                            this.open_manage_repo_presets_modal(Some(index), cx);
+                                        }),
+                                    )
+                            }))
+                            .child(
+                                div()
+                                    .id("terminal-repo-preset-add")
+                                    .cursor_pointer()
+                                    .h(px(22.))
+                                    .w(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme.text_muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme.panel_active_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .child("+")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                            this.open_manage_repo_presets_modal(None, cx);
+                                        }),
+                                    ),
+                            ),
                     ),
             )
             .child(
@@ -9977,6 +10419,197 @@ impl ArborWindow {
                     ),
             )
     }
+
+    fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.manage_repo_presets_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let is_editing = modal.editing_index.is_some();
+        let title = if is_editing {
+            "Edit Custom Preset"
+        } else {
+            "Add Custom Preset"
+        };
+        let save_disabled = modal.name.trim().is_empty() || modal.command.trim().is_empty();
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(620.))
+                    .max_w(px(620.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(title),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "close-manage-repo-presets",
+                                    "Close",
+                                    false,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_manage_repo_presets_modal(cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "repo-preset-icon-input",
+                            "Icon (emoji)",
+                            &modal.icon,
+                            "\u{f013}",
+                            modal.active_field == RepoPresetModalField::Icon,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_repo_presets_modal_input(
+                                RepoPresetsModalInputEvent::SetActiveField(
+                                    RepoPresetModalField::Icon,
+                                ),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "repo-preset-name-input",
+                            "Name",
+                            &modal.name,
+                            "my preset",
+                            modal.active_field == RepoPresetModalField::Name,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_repo_presets_modal_input(
+                                RepoPresetsModalInputEvent::SetActiveField(
+                                    RepoPresetModalField::Name,
+                                ),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        modal_input_field(
+                            theme,
+                            "repo-preset-command-input",
+                            "Command",
+                            &modal.command,
+                            "just run",
+                            modal.active_field == RepoPresetModalField::Command,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_manage_repo_presets_modal_input(
+                                RepoPresetsModalInputEvent::SetActiveField(
+                                    RepoPresetModalField::Command,
+                                ),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Typing tips"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("Tab: next field, Enter: save, Esc: close"),
+                            ),
+                    )
+                    .child(div().when_some(modal.error.clone(), |this, error| {
+                        this.rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0xa44949))
+                            .bg(rgb(0x4d2a2a))
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(0xffd7d7))
+                            .child(error)
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .when(is_editing, |this| {
+                                this.child(
+                                    action_button(
+                                        theme,
+                                        "repo-preset-delete",
+                                        "Delete",
+                                        true,
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.delete_repo_preset(cx);
+                                        },
+                                    )),
+                                )
+                            })
+                            .child(
+                                action_button(theme, "repo-preset-cancel", "Cancel", false, true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_manage_repo_presets_modal(cx);
+                                    })),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "repo-preset-save",
+                                    "Save",
+                                    !save_disabled,
+                                    save_disabled,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.submit_manage_repo_presets_modal(cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+    }
 }
 
 fn default_agent_presets() -> Vec<AgentPreset> {
@@ -10007,6 +10640,22 @@ fn normalize_agent_presets(configured: &[app_config::AgentPresetConfig]) -> Vec<
     }
 
     presets
+}
+
+fn load_repo_presets(repo_root: &Path) -> Vec<RepoPreset> {
+    let Some(config) = app_config::load_repo_config(repo_root) else {
+        return Vec::new();
+    };
+    config
+        .presets
+        .into_iter()
+        .filter(|p| !p.name.trim().is_empty() && !p.command.trim().is_empty())
+        .map(|p| RepoPreset {
+            name: p.name.trim().to_owned(),
+            icon: p.icon.trim().to_owned(),
+            command: p.command.trim().to_owned(),
+        })
+        .collect()
 }
 
 fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
@@ -10284,6 +10933,7 @@ impl Render for ArborWindow {
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))
+            .child(self.render_manage_repo_presets_modal(cx))
             .child(div().when_some(self.theme_toast.clone(), |this, toast| {
                 this.child(
                     div()

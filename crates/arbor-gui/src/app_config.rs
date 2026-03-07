@@ -214,6 +214,95 @@ pub fn remove_remote_host(name: &str) -> Result<(), String> {
         .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
+// ── Per-repository config (arbor.toml) ───────────────────────────────
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoConfig {
+    pub presets: Vec<RepoPresetConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoPresetConfig {
+    pub name: String,
+    pub icon: String,
+    pub command: String,
+}
+
+pub fn load_repo_config(repo_root: &Path) -> Option<RepoConfig> {
+    let path = repo_root.join("arbor.toml");
+    if !path.exists() {
+        return None;
+    }
+    let config: RepoConfig = Config::builder()
+        .add_source(File::from(path.as_path()).required(false))
+        .build()
+        .ok()
+        .and_then(|settings| settings.try_deserialize().ok())?;
+    Some(config)
+}
+
+pub fn save_repo_presets(repo_root: &Path, presets: &[RepoPresetConfig]) -> Result<(), String> {
+    let path = repo_root.join("arbor.toml");
+    let content = if path.exists() {
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?
+    } else {
+        String::new()
+    };
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+    doc.remove("presets");
+
+    if !presets.is_empty() {
+        let mut arr = toml_edit::ArrayOfTables::new();
+        for preset in presets {
+            let mut table = toml_edit::Table::new();
+            table.insert("name", toml_edit::value(&preset.name));
+            table.insert("icon", toml_edit::value(&preset.icon));
+            table.insert("command", toml_edit::value(&preset.command));
+            arr.push(table);
+        }
+        doc.insert("presets", toml_edit::Item::ArrayOfTables(arr));
+    }
+
+    fs::write(&path, doc.to_string())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+pub fn remove_repo_preset(repo_root: &Path, name: &str) -> Result<(), String> {
+    let path = repo_root.join("arbor.toml");
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+    if let Some(arr) = doc
+        .get_mut("presets")
+        .and_then(|v| v.as_array_of_tables_mut())
+    {
+        let mut index_to_remove = None;
+        for (i, table) in arr.iter().enumerate() {
+            if table.get("name").and_then(|v| v.as_str()) == Some(name) {
+                index_to_remove = Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = index_to_remove {
+            arr.remove(idx);
+        }
+        if arr.is_empty() {
+            doc.remove("presets");
+        }
+    }
+
+    fs::write(&path, doc.to_string())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
 pub fn save_agent_presets(presets: &[AgentPresetConfig]) -> Result<(), String> {
     let path = config_path();
     let content =
