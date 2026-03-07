@@ -21,6 +21,7 @@ gix-diff = { workspace = true, features = ["blob-experimental"] }
 gpui = { workspace = true }
 gpui_http_client = { workspace = true }
 imara-diff = { workspace = true }
+notify-rust = { workspace = true }
 portable-pty = { workspace = true }
 ropey = { workspace = true }
 serde = { workspace = true }
