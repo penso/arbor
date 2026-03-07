@@ -15,6 +15,18 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark
 # daemon_url = "http://127.0.0.1:8787" # arbor-httpd base URL
 # notifications = true
+#
+# [[agent_presets]]
+# key = "codex"     # codex | claude | opencode
+# command = "codex"
+#
+# [[agent_presets]]
+# key = "claude"
+# command = "claude"
+#
+# [[agent_presets]]
+# key = "opencode"
+# command = "opencode"
 
 # [[remote_hosts]]
 # name = "build-server"
@@ -35,7 +47,15 @@ pub struct ArborConfig {
     pub theme: Option<String>,
     pub daemon_url: Option<String>,
     pub notifications: Option<bool>,
+    pub agent_presets: Vec<AgentPresetConfig>,
     pub remote_hosts: Vec<RemoteHostConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AgentPresetConfig {
+    pub key: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -188,6 +208,31 @@ pub fn remove_remote_host(name: &str) -> Result<(), String> {
         if arr.is_empty() {
             doc.remove("remote_hosts");
         }
+    }
+
+    fs::write(&path, doc.to_string())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+pub fn save_agent_presets(presets: &[AgentPresetConfig]) -> Result<(), String> {
+    let path = config_path();
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+    doc.remove("agent_presets");
+
+    if !presets.is_empty() {
+        let mut arr = toml_edit::ArrayOfTables::new();
+        for preset in presets {
+            let mut table = toml_edit::Table::new();
+            table.insert("key", toml_edit::value(&preset.key));
+            table.insert("command", toml_edit::value(&preset.command));
+            arr.push(table);
+        }
+        doc.insert("agent_presets", toml_edit::Item::ArrayOfTables(arr));
     }
 
     fs::write(&path, doc.to_string())
