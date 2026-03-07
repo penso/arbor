@@ -91,6 +91,7 @@ const DIFF_HUNK_CONTEXT_LINES: usize = 3;
 const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
 const TAB_ICON_LOGS: &str = "\u{f4ed}";
+const TAB_ICON_FILE: &str = "\u{f15c}";
 const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
 const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
@@ -354,6 +355,7 @@ enum TerminalRuntime {
 enum CenterTab {
     Terminal(u64),
     Diff(u64),
+    FileView(u64),
     Logs,
 }
 
@@ -406,6 +408,16 @@ struct DiffSession {
     lines: Arc<[DiffLine]>,
     file_row_indices: HashMap<PathBuf, usize>,
     wrapped_columns: usize,
+    is_loading: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FileViewSession {
+    id: u64,
+    worktree_path: PathBuf,
+    file_path: PathBuf,
+    title: String,
+    lines: Arc<[String]>,
     is_loading: bool,
 }
 
@@ -553,6 +565,10 @@ struct ArborWindow {
     terminals: Vec<TerminalSession>,
     diff_sessions: Vec<DiffSession>,
     active_diff_session_id: Option<u64>,
+    file_view_sessions: Vec<FileViewSession>,
+    active_file_view_session_id: Option<u64>,
+    next_file_view_session_id: u64,
+    file_view_scroll_handle: UniformListScrollHandle,
     active_terminal_by_worktree: HashMap<PathBuf, u64>,
     next_terminal_id: u64,
     next_diff_session_id: u64,
@@ -644,6 +660,10 @@ impl ArborWindow {
                     terminals: Vec::new(),
                     diff_sessions: Vec::new(),
                     active_diff_session_id: None,
+                    file_view_sessions: Vec::new(),
+                    active_file_view_session_id: None,
+                    next_file_view_session_id: 1,
+                    file_view_scroll_handle: UniformListScrollHandle::new(),
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
@@ -721,6 +741,10 @@ impl ArborWindow {
                     terminals: Vec::new(),
                     diff_sessions: Vec::new(),
                     active_diff_session_id: None,
+                    file_view_sessions: Vec::new(),
+                    active_file_view_session_id: None,
+                    next_file_view_session_id: 1,
+                    file_view_scroll_handle: UniformListScrollHandle::new(),
                     active_terminal_by_worktree: HashMap::new(),
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
@@ -910,6 +934,10 @@ impl ArborWindow {
             terminals: Vec::new(),
             diff_sessions: Vec::new(),
             active_diff_session_id: None,
+            file_view_sessions: Vec::new(),
+            active_file_view_session_id: None,
+            next_file_view_session_id: 1,
+            file_view_scroll_handle: UniformListScrollHandle::new(),
             active_terminal_by_worktree: HashMap::new(),
             next_terminal_id: 1,
             next_diff_session_id: 1,
@@ -2294,6 +2322,17 @@ impl ArborWindow {
             }
         }
 
+        if let Some(fv_id) = self.active_file_view_session_id {
+            let worktree_path = self.selected_worktree_path()?;
+            if self
+                .file_view_sessions
+                .iter()
+                .any(|s| s.id == fv_id && s.worktree_path.as_path() == worktree_path)
+            {
+                return Some(CenterTab::FileView(fv_id));
+            }
+        }
+
         self.active_terminal_id_for_selected_worktree()
             .map(CenterTab::Terminal)
     }
@@ -2422,6 +2461,111 @@ impl ArborWindow {
         true
     }
 
+    fn selected_worktree_file_view_sessions(&self) -> Vec<&FileViewSession> {
+        let Some(worktree_path) = self.selected_worktree_path() else {
+            return Vec::new();
+        };
+
+        self.file_view_sessions
+            .iter()
+            .filter(|session| session.worktree_path.as_path() == worktree_path)
+            .collect()
+    }
+
+    fn open_file_view_tab(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            return;
+        };
+
+        // If a session already exists for this file+worktree, just activate it.
+        if let Some(existing) = self
+            .file_view_sessions
+            .iter()
+            .find(|s| s.worktree_path == worktree_path && s.file_path == file_path)
+        {
+            self.active_file_view_session_id = Some(existing.id);
+            self.active_diff_session_id = None;
+            self.logs_tab_active = false;
+            cx.notify();
+            return;
+        }
+
+        let session_id = self.next_file_view_session_id;
+        self.next_file_view_session_id += 1;
+
+        let title = file_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file_path.to_string_lossy().into_owned());
+
+        self.file_view_sessions.push(FileViewSession {
+            id: session_id,
+            worktree_path: worktree_path.clone(),
+            file_path: file_path.clone(),
+            title,
+            lines: Arc::from([]),
+            is_loading: true,
+        });
+        self.active_file_view_session_id = Some(session_id);
+        self.active_diff_session_id = None;
+        self.logs_tab_active = false;
+
+        let full_path = worktree_path.join(&file_path);
+        cx.spawn(async move |this, cx| {
+            let lines = cx
+                .background_spawn(async move {
+                    match fs::read_to_string(&full_path) {
+                        Ok(content) => content.lines().map(String::from).collect::<Vec<_>>(),
+                        Err(error) => {
+                            vec![format!("Error reading file: {error}")]
+                        },
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if let Some(session) = this
+                    .file_view_sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                {
+                    session.lines = Arc::from(lines);
+                    session.is_loading = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    fn select_file_view_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        if self.active_file_view_session_id == Some(session_id) && !self.logs_tab_active {
+            return;
+        }
+        self.active_file_view_session_id = Some(session_id);
+        self.active_diff_session_id = None;
+        self.logs_tab_active = false;
+        cx.notify();
+    }
+
+    fn close_file_view_session_by_id(&mut self, session_id: u64) -> bool {
+        let Some(index) = self
+            .file_view_sessions
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return false;
+        };
+
+        self.file_view_sessions.remove(index);
+        if self.active_file_view_session_id == Some(session_id) {
+            self.active_file_view_session_id = None;
+        }
+        true
+    }
+
     fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_center_tab_for_selected_worktree() {
             Some(CenterTab::Terminal(session_id)) => {
@@ -2435,6 +2579,11 @@ impl ArborWindow {
             },
             Some(CenterTab::Diff(diff_session_id)) => {
                 if self.close_diff_session_by_id(diff_session_id) {
+                    cx.notify();
+                }
+            },
+            Some(CenterTab::FileView(session_id)) => {
+                if self.close_file_view_session_by_id(session_id) {
                     cx.notify();
                 }
             },
@@ -2508,6 +2657,7 @@ impl ArborWindow {
         self.worktree_stats_loading = false;
         self.worktree_prs_loading = false;
         self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
         self.active_worktree_index = self
             .worktrees
             .iter()
@@ -3045,7 +3195,8 @@ impl ArborWindow {
     }
 
     fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.selected_file_tree_entry = Some(path);
+        self.selected_file_tree_entry = Some(path.clone());
+        self.open_file_view_tab(path, cx);
         cx.notify();
     }
 
@@ -4253,6 +4404,7 @@ impl ArborWindow {
         self.active_terminal_by_worktree
             .insert(worktree_path, session_id);
         self.active_diff_session_id = None;
+        self.active_file_view_session_id = None;
         self.logs_tab_active = false;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
@@ -4430,6 +4582,7 @@ impl ArborWindow {
             return;
         }
         self.active_diff_session_id = Some(session_id);
+        self.active_file_view_session_id = None;
         self.logs_tab_active = false;
         if let Some(selected_path) = self.selected_changed_file.clone()
             && !self.scroll_diff_to_file(selected_path.as_path())
@@ -5867,6 +6020,7 @@ impl ArborWindow {
         let theme = self.theme();
         let terminals = self.selected_worktree_terminals();
         let diff_sessions = self.selected_worktree_diff_sessions();
+        let file_view_sessions = self.selected_worktree_file_view_sessions();
         let mut tabs: Vec<CenterTab> = terminals
             .iter()
             .map(|session| CenterTab::Terminal(session.id))
@@ -5875,6 +6029,11 @@ impl ArborWindow {
             diff_sessions
                 .iter()
                 .map(|session| CenterTab::Diff(session.id)),
+        );
+        tabs.extend(
+            file_view_sessions
+                .iter()
+                .map(|session| CenterTab::FileView(session.id)),
         );
         if self.logs_tab_open {
             tabs.push(CenterTab::Logs);
@@ -5888,6 +6047,10 @@ impl ArborWindow {
             active_tab = tabs.first().copied();
             self.active_diff_session_id = match active_tab {
                 Some(CenterTab::Diff(diff_id)) => Some(diff_id),
+                _ => None,
+            };
+            self.active_file_view_session_id = match active_tab {
+                Some(CenterTab::FileView(fv_id)) => Some(fv_id),
                 _ => None,
             };
         }
@@ -5907,6 +6070,14 @@ impl ArborWindow {
                 .diff_sessions
                 .iter()
                 .find(|session| session.id == diff_id)
+                .cloned(),
+            _ => None,
+        };
+        let active_file_view_session = match active_tab {
+            Some(CenterTab::FileView(fv_id)) => self
+                .file_view_sessions
+                .iter()
+                .find(|session| session.id == fv_id)
                 .cloned(),
             _ => None,
         };
@@ -5972,6 +6143,15 @@ impl ArborWindow {
                                             .unwrap_or_else(|| "diff".to_owned()),
                                         false,
                                     ),
+                                    CenterTab::FileView(fv_id) => (
+                                        TAB_ICON_FILE,
+                                        self.file_view_sessions
+                                            .iter()
+                                            .find(|session| session.id == fv_id)
+                                            .map(|s| s.title.clone())
+                                            .unwrap_or_else(|| "file".to_owned()),
+                                        false,
+                                    ),
                                     CenterTab::Logs => (
                                         TAB_ICON_LOGS,
                                         "Logs".to_owned(),
@@ -5981,6 +6161,7 @@ impl ArborWindow {
                                 let tab_id = match tab {
                                     CenterTab::Terminal(id) => ("center-tab-terminal", id),
                                     CenterTab::Diff(id) => ("center-tab-diff", id),
+                                    CenterTab::FileView(id) => ("center-tab-fileview", id),
                                     CenterTab::Logs => ("center-tab-logs", 0),
                                 };
 
@@ -6028,6 +6209,7 @@ impl ArborWindow {
                                             .id(match tab {
                                                 CenterTab::Terminal(id) => ("tab-close-terminal", id),
                                                 CenterTab::Diff(id) => ("tab-close-diff", id),
+                                                CenterTab::FileView(id) => ("tab-close-fileview", id),
                                                 CenterTab::Logs => ("tab-close-logs", 0),
                                             })
                                             .absolute()
@@ -6063,6 +6245,11 @@ impl ArborWindow {
                                                                 cx.notify();
                                                             }
                                                         },
+                                                        CenterTab::FileView(fv_id) => {
+                                                            if this.close_file_view_session_by_id(fv_id) {
+                                                                cx.notify();
+                                                            }
+                                                        },
                                                         CenterTab::Logs => {
                                                             this.logs_tab_open = false;
                                                             this.logs_tab_active = false;
@@ -6090,15 +6277,20 @@ impl ArborWindow {
                                     .on_click(cx.listener(move |this, _, window, cx| match tab {
                                         CenterTab::Terminal(session_id) => {
                                             this.logs_tab_active = false;
+                                            this.active_file_view_session_id = None;
                                             this.select_terminal(session_id, window, cx);
                                         },
                                         CenterTab::Diff(diff_id) => {
                                             this.logs_tab_active = false;
                                             this.select_diff_tab(diff_id, cx);
                                         },
+                                        CenterTab::FileView(fv_id) => {
+                                            this.select_file_view_tab(fv_id, cx);
+                                        },
                                         CenterTab::Logs => {
                                             this.logs_tab_active = true;
                                             this.active_diff_session_id = None;
+                                            this.active_file_view_session_id = None;
                                             cx.notify();
                                         },
                                     }))
@@ -6142,7 +6334,7 @@ impl ArborWindow {
                     .min_h_0()
                     .bg(rgb(theme.terminal_bg))
                     .when(
-                        active_terminal.is_none() && active_diff_session.is_none() && active_tab != Some(CenterTab::Logs),
+                        active_terminal.is_none() && active_diff_session.is_none() && active_file_view_session.is_none() && active_tab != Some(CenterTab::Logs),
                         |this| {
                             this.child(
                                 div()
@@ -6258,6 +6450,15 @@ impl ArborWindow {
                             &self.diff_scroll_handle,
                             mono_font,
                             diff_cell_width,
+                        ))
+                    })
+                    .when_some(active_file_view_session, |this, session| {
+                        let mono_font = terminal_mono_font(cx);
+                        this.child(render_file_view_session(
+                            session,
+                            theme,
+                            &self.file_view_scroll_handle,
+                            mono_font,
                         ))
                     })
                     .when(active_tab == Some(CenterTab::Logs), |this| {
@@ -8569,6 +8770,138 @@ fn render_log_row(entry: &log_layer::LogEntry, index: usize, theme: ThemePalette
                         .map(|(key, value)| format!("{key}={value}"))
                         .collect();
                     format!("{} {}", entry.message, fields_str.join(" "))
+                }),
+        )
+}
+
+fn render_file_view_session(
+    session: FileViewSession,
+    theme: ThemePalette,
+    scroll_handle: &UniformListScrollHandle,
+    mono_font: gpui::Font,
+) -> Div {
+    let path_label = session.file_path.to_string_lossy().into_owned();
+    let line_count = session.lines.len();
+    let is_loading = session.is_loading;
+    let session_id = session.id;
+
+    div()
+        .h_full()
+        .w_full()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(28.))
+                .px_3()
+                .bg(rgb(theme.tab_active_bg))
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .font(mono_font.clone())
+                        .text_size(px(DIFF_FONT_SIZE_PX))
+                        .text_color(rgb(theme.text_muted))
+                        .child(path_label),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_disabled))
+                        .child(if is_loading {
+                            "loading...".to_owned()
+                        } else {
+                            format!("{line_count} lines")
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id(("file-view-scroll", session_id))
+                .flex_1()
+                .min_h_0()
+                .bg(rgb(theme.terminal_bg))
+                .when(is_loading, |this| {
+                    this.child(
+                        div()
+                            .h_full()
+                            .w_full()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .text_sm()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Loading file..."),
+                    )
+                })
+                .when(!is_loading, |this| {
+                    let lines = session.lines.clone();
+                    let scroll_handle = scroll_handle.clone();
+                    let mono_font = mono_font.clone();
+                    let line_number_width = line_count.to_string().len().max(3);
+                    this.child(
+                        div()
+                            .size_full()
+                            .min_w_0()
+                            .flex()
+                            .child(
+                                uniform_list(
+                                    ("file-view-list", session_id),
+                                    lines.len(),
+                                    move |range, _, _| {
+                                        range
+                                            .map(|index| {
+                                                let line_num = index + 1;
+                                                let text = &lines[index];
+                                                div()
+                                                    .id(("fv-row", index))
+                                                    .h(px(DIFF_ROW_HEIGHT_PX))
+                                                    .w_full()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .font(mono_font.clone())
+                                                    .text_size(px(DIFF_FONT_SIZE_PX))
+                                                    .child(
+                                                        div()
+                                                            .w(px(
+                                                                (line_number_width + 2) as f32
+                                                                    * DIFF_FONT_SIZE_PX
+                                                                    * 0.6,
+                                                            ))
+                                                            .flex_none()
+                                                            .text_color(rgb(theme.text_disabled))
+                                                            .text_size(px(DIFF_FONT_SIZE_PX))
+                                                            .px_1()
+                                                            .flex()
+                                                            .justify_end()
+                                                            .child(format!("{line_num}")),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .pl_2()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .overflow_hidden()
+                                                            .text_color(rgb(theme.text_primary))
+                                                            .child(text.to_owned()),
+                                                    )
+                                                    .into_any_element()
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                )
+                                .h_full()
+                                .flex_1()
+                                .min_w_0()
+                                .track_scroll(scroll_handle.clone()),
+                            ),
+                    )
                 }),
         )
 }
