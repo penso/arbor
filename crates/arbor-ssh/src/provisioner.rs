@@ -46,9 +46,8 @@ impl RemoteProvisioner for SshProvisioner<'_> {
             // Clone the default branch first, then create the new branch.
             // Using --branch would fail if the branch doesn't exist on the
             // remote yet (which is the common case for new outposts).
-            let clone_cmd = format!(
-                "GIT_SSH_COMMAND='ssh -F /dev/null' git clone {clone_url} {remote_path}"
-            );
+            let clone_cmd =
+                format!("GIT_SSH_COMMAND='ssh -F /dev/null' git clone {clone_url} {remote_path}");
             tracing::info!(
                 clone_url,
                 branch,
