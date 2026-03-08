@@ -56,21 +56,30 @@ pub struct EmbeddedTerminal {
 
 pub type EmbeddedSnapshot = TerminalSnapshot;
 
-pub fn launch_backend(kind: TerminalBackendKind, cwd: &Path) -> Result<TerminalLaunch, String> {
+pub fn launch_backend(
+    kind: TerminalBackendKind,
+    cwd: &Path,
+    initial_rows: u16,
+    initial_cols: u16,
+) -> Result<TerminalLaunch, String> {
     match kind {
-        TerminalBackendKind::Embedded => EmbeddedTerminal::spawn(cwd).map(TerminalLaunch::Embedded),
+        TerminalBackendKind::Embedded => {
+            EmbeddedTerminal::spawn(cwd, initial_rows, initial_cols).map(TerminalLaunch::Embedded)
+        },
         TerminalBackendKind::Alacritty => launch_alacritty(cwd).map(TerminalLaunch::External),
         TerminalBackendKind::Ghostty => launch_ghostty(cwd).map(TerminalLaunch::External),
     }
 }
 
 impl EmbeddedTerminal {
-    pub fn spawn(cwd: &Path) -> Result<Self, String> {
+    pub fn spawn(cwd: &Path, initial_rows: u16, initial_cols: u16) -> Result<Self, String> {
+        let rows = if initial_rows > 0 { initial_rows } else { TERMINAL_ROWS };
+        let cols = if initial_cols > 1 { initial_cols } else { TERMINAL_COLS };
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
-                rows: TERMINAL_ROWS,
-                cols: TERMINAL_COLS,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -103,11 +112,11 @@ impl EmbeddedTerminal {
             .map_err(|error| format!("failed to open PTY writer: {error}"))?;
         let master = pair.master;
 
-        let emulator = Arc::new(Mutex::new(TerminalEmulator::new()));
+        let emulator = Arc::new(Mutex::new(TerminalEmulator::with_size(rows, cols)));
         let exit_code = Arc::new(Mutex::new(None));
         let generation = Arc::new(AtomicU64::new(1));
         let killer = Arc::new(Mutex::new(Some(killer)));
-        let size = Arc::new(Mutex::new((TERMINAL_ROWS, TERMINAL_COLS, 0, 0)));
+        let size = Arc::new(Mutex::new((rows, cols, 0, 0)));
 
         spawn_reader_thread(reader, emulator.clone(), generation.clone());
         spawn_wait_thread(

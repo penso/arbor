@@ -17,8 +17,8 @@ use {
     },
 };
 
-pub const TERMINAL_ROWS: u16 = 56;
-pub const TERMINAL_COLS: u16 = 180;
+pub const TERMINAL_ROWS: u16 = 24;
+pub const TERMINAL_COLS: u16 = 80;
 pub const TERMINAL_SCROLLBACK: usize = 8_000;
 
 pub const TERMINAL_DEFAULT_FG: u32 = 0xabb2bf;

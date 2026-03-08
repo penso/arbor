@@ -820,6 +820,7 @@ struct ArborWindow {
     right_pane_width: f32,
     terminal_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
+    last_terminal_grid_size: Option<(u16, u16)>,
     center_tabs_scroll_handle: ScrollHandle,
     diff_scroll_handle: UniformListScrollHandle,
     terminal_selection: Option<TerminalSelection>,
@@ -1017,6 +1018,7 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
+                    last_terminal_grid_size: None,
                     center_tabs_scroll_handle: ScrollHandle::new(),
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
@@ -1262,6 +1264,7 @@ impl ArborWindow {
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
+            last_terminal_grid_size: None,
             center_tabs_scroll_handle: ScrollHandle::new(),
             diff_scroll_handle: UniformListScrollHandle::new(),
             terminal_selection: None,
@@ -1775,6 +1778,9 @@ impl ArborWindow {
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
         let target_grid_size =
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
+        if let Some((rows, cols, ..)) = target_grid_size {
+            self.last_terminal_grid_size = Some((rows, cols));
+        }
         let daemon = self.terminal_daemon.clone();
         let mut sessions_to_close = Vec::new();
         let mut pending_notifications: Vec<(String, String, bool)> = Vec::new();
@@ -5784,7 +5790,8 @@ impl ArborWindow {
         }
 
         if !launched_with_daemon {
-            match terminal_backend::launch_backend(backend_kind, &cwd) {
+            let (initial_rows, initial_cols) = self.last_terminal_grid_size.unwrap_or((0, 0));
+            match terminal_backend::launch_backend(backend_kind, &cwd, initial_rows, initial_cols) {
                 Ok(TerminalLaunch::Embedded(runtime)) => {
                     session.command = "embedded shell".to_owned();
                     session.generation = runtime.generation();
