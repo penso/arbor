@@ -155,6 +155,7 @@ dependencies = [
  "imara-diff 0.2.0",
  "libssh-rs-sys",
  "notify-rust",
+ "objc",
  "octocrab",
  "portable-pty",
  "ropey",

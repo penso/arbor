@@ -52,6 +52,11 @@ use {
     theme::{ThemeKind, ThemePalette},
 };
 
+const APP_VERSION: &str = match option_env!("ARBOR_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 const FONT_UI: &str = ".ZedSans";
 const FONT_MONO: &str = "CaskaydiaMono Nerd Font Mono";
 #[cfg(target_os = "macos")]
@@ -143,6 +148,7 @@ fn terminal_mono_font(cx: &App) -> gpui::Font {
 }
 
 actions!(arbor, [
+    ShowAbout,
     RequestQuit,
     ImmediateQuit,
     NewWindow,
@@ -16164,7 +16170,32 @@ fn new_window(_: &NewWindow, cx: &mut App) {
     open_arbor_window(cx);
 }
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn show_about(_: &ShowAbout, _cx: &mut App) {
+    use cocoa::{
+        appkit::NSApp,
+        base::{id, nil},
+        foundation::{NSDictionary, NSString as _},
+    };
+    use objc::{msg_send, sel, sel_impl};
+
+    // SAFETY: Cocoa FFI – we send a well-known AppKit selector on the shared
+    // NSApplication to show the standard About panel with a custom version.
+    unsafe {
+        let key: id = cocoa::foundation::NSString::alloc(nil).init_str("ApplicationVersion");
+        let value: id = cocoa::foundation::NSString::alloc(nil).init_str(APP_VERSION);
+        let options: id = NSDictionary::dictionaryWithObject_forKey_(nil, value, key);
+        let app: id = NSApp();
+        let () = msg_send![app, orderFrontStandardAboutPanelWithOptions: options];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_about(_: &ShowAbout, _cx: &mut App) {}
+
 fn install_app_menu_and_keys(cx: &mut App) {
+    cx.on_action(show_about);
     cx.on_action(new_window);
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewWindow, None),
