@@ -235,12 +235,8 @@ impl LiveSession {
     fn append_output_chunk(&self, chunk: &str) {
         let mut output_tail = lock_or_recover(&self.output_tail);
         output_tail.push_str(chunk);
-
-        let char_count = output_tail.chars().count();
-        if char_count > OUTPUT_TAIL_MAX_CHARS {
-            let skip = char_count.saturating_sub(OUTPUT_TAIL_MAX_CHARS);
-            *output_tail = output_tail.chars().skip(skip).collect();
-        }
+        *output_tail =
+            trim_output_tail_preserving_ansi(output_tail.as_str(), OUTPUT_TAIL_MAX_CHARS);
 
         self.touch();
     }
@@ -560,9 +556,200 @@ fn trim_to_last_lines(text: &str, max_lines: usize) -> String {
     lines[start..].join("\n")
 }
 
+fn trim_output_tail_preserving_ansi(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_owned();
+    }
+
+    let target = total_chars.saturating_sub(max_chars);
+    let mut state = AnsiScanState::Ground;
+    let mut cut_byte = None;
+    let mut consumed = 0_usize;
+
+    for (byte_index, ch) in text.char_indices() {
+        if consumed >= target && state == AnsiScanState::Ground {
+            cut_byte = Some(byte_index);
+            break;
+        }
+
+        state = state.step(ch);
+        consumed = consumed.saturating_add(1);
+    }
+
+    let start = cut_byte.unwrap_or(text.len());
+    let trimmed = &text[start..];
+    strip_incomplete_trailing_ansi(trimmed)
+}
+
+fn strip_incomplete_trailing_ansi(text: &str) -> String {
+    let mut state = AnsiScanState::Ground;
+    let mut sequence_start: Option<usize> = None;
+
+    for (byte_index, ch) in text.char_indices() {
+        let next = state.step(ch);
+        if state == AnsiScanState::Ground && next != AnsiScanState::Ground {
+            sequence_start = Some(byte_index);
+        } else if next == AnsiScanState::Ground {
+            sequence_start = None;
+        }
+        state = next;
+    }
+
+    if state == AnsiScanState::Ground {
+        return text.to_owned();
+    }
+
+    match sequence_start {
+        Some(index) => text[..index].to_owned(),
+        None => String::new(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnsiScanState {
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+    Dcs,
+    DcsEscape,
+    Apc,
+    ApcEscape,
+    Pm,
+    PmEscape,
+}
+
+impl AnsiScanState {
+    fn step(self, ch: char) -> Self {
+        match self {
+            Self::Ground => {
+                if ch == '\u{1b}' {
+                    Self::Escape
+                } else {
+                    Self::Ground
+                }
+            },
+            Self::Escape => match ch {
+                '[' => Self::Csi,
+                ']' => Self::Osc,
+                'P' => Self::Dcs,
+                '_' => Self::Apc,
+                '^' => Self::Pm,
+                '\u{1b}' => Self::Escape,
+                _ => Self::Ground,
+            },
+            Self::Csi => {
+                if matches!(ch as u32, 0x40..=0x7E) {
+                    Self::Ground
+                } else {
+                    Self::Csi
+                }
+            },
+            Self::Osc => match ch {
+                '\u{07}' => Self::Ground,
+                '\u{1b}' => Self::OscEscape,
+                _ => Self::Osc,
+            },
+            Self::OscEscape => {
+                if ch == '\\' {
+                    Self::Ground
+                } else {
+                    Self::Osc
+                }
+            },
+            Self::Dcs => {
+                if ch == '\u{1b}' {
+                    Self::DcsEscape
+                } else {
+                    Self::Dcs
+                }
+            },
+            Self::DcsEscape => {
+                if ch == '\\' {
+                    Self::Ground
+                } else {
+                    Self::Dcs
+                }
+            },
+            Self::Apc => {
+                if ch == '\u{1b}' {
+                    Self::ApcEscape
+                } else {
+                    Self::Apc
+                }
+            },
+            Self::ApcEscape => {
+                if ch == '\\' {
+                    Self::Ground
+                } else {
+                    Self::Apc
+                }
+            },
+            Self::Pm => {
+                if ch == '\u{1b}' {
+                    Self::PmEscape
+                } else {
+                    Self::Pm
+                }
+            },
+            Self::PmEscape => {
+                if ch == '\\' {
+                    Self::Ground
+                } else {
+                    Self::Pm
+                }
+            },
+        }
+    }
+}
+
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_trim_does_not_start_inside_osc_sequence() {
+        let text = format!(
+            "{}{}",
+            "x".repeat(32),
+            "\u{1b}]133;C;cmdline=echo hi\u{1b}\\\nplain\n"
+        );
+
+        let trimmed = trim_output_tail_preserving_ansi(&text, 18);
+        assert!(
+            !trimmed.starts_with("133;"),
+            "trimmed tail started in OSC payload: {trimmed:?}"
+        );
+        assert!(
+            !trimmed.starts_with(";C;"),
+            "trimmed tail started in OSC payload: {trimmed:?}"
+        );
+    }
+
+    #[test]
+    fn tail_trim_drops_incomplete_trailing_escape() {
+        let text = format!("{}hello\u{1b}]133;A", "x".repeat(32));
+        let trimmed = trim_output_tail_preserving_ansi(&text, 12);
+        assert_eq!(trimmed, "hello");
+    }
+
+    #[test]
+    fn tail_trim_keeps_complete_st_terminated_escape() {
+        let text = "a\u{1b}]133;A\u{1b}\\b";
+        let trimmed = trim_output_tail_preserving_ansi(text, 64);
+        assert_eq!(trimmed, text);
     }
 }
