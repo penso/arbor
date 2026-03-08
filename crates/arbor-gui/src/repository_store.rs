@@ -8,6 +8,7 @@ const REPOSITORY_STORE_RELATIVE_PATH: &str = ".arbor/repositories.json";
 pub trait RepositoryStore {
     fn load_roots(&self) -> Result<Vec<PathBuf>, String>;
     fn save_roots(&self, roots: &[PathBuf]) -> Result<(), String>;
+    fn has_store_file(&self) -> bool;
 }
 
 pub struct JsonRepositoryStore {
@@ -61,6 +62,10 @@ impl RepositoryStore for JsonRepositoryStore {
                 self.path.display()
             )
         })
+    }
+
+    fn has_store_file(&self) -> bool {
+        self.path.exists()
     }
 }
 

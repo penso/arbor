@@ -986,6 +986,7 @@ struct ArborWindow {
     left_pane_width: f32,
     right_pane_width: f32,
     terminal_focus: FocusHandle,
+    welcome_clone_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
     last_terminal_grid_size: Option<(u16, u16)>,
     center_tabs_scroll_handle: ScrollHandle,
@@ -1200,6 +1201,7 @@ impl ArborWindow {
                         .right_pane_width
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
+                    welcome_clone_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
                     last_terminal_grid_size: None,
                     center_tabs_scroll_handle: ScrollHandle::new(),
@@ -1338,8 +1340,13 @@ impl ArborWindow {
                 (Vec::new(), false)
             };
 
+        let repository_store_file_exists = repository_store.has_store_file();
+        let mut loaded_roots_were_empty = false;
         let mut repositories = match repository_store.load_roots() {
-            Ok(roots) => repository_store::resolve_repositories_from_roots(roots),
+            Ok(roots) => {
+                loaded_roots_were_empty = roots.is_empty();
+                repository_store::resolve_repositories_from_roots(roots)
+            },
             Err(error) => {
                 notice_parts.push(format!("failed to load saved repositories: {error}"));
                 Vec::new()
@@ -1348,10 +1355,10 @@ impl ArborWindow {
         let mut persist_repositories = false;
 
         if let Some(ref root) = repo_root
-            && (repositories.is_empty()
-                || !repositories
-                    .iter()
-                    .any(|repository| &repository.root == root))
+            && !repositories
+                .iter()
+                .any(|repository| &repository.root == root)
+            && should_seed_repo_root_from_cwd(repository_store_file_exists, loaded_roots_were_empty)
         {
             repositories.push(RepositorySummary::from_root(root.clone()));
             persist_repositories = true;
@@ -1464,6 +1471,7 @@ impl ArborWindow {
                 .right_pane_width
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
+            welcome_clone_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
             last_terminal_grid_size: None,
             center_tabs_scroll_handle: ScrollHandle::new(),
@@ -3682,13 +3690,21 @@ impl ArborWindow {
                             .flex_col()
                             .gap_2()
                             .child(
-                                modal_input_field(
+                                single_line_input_field(
                                     theme,
                                     "welcome-clone-url",
-                                    "Repository URL",
                                     &self.welcome_clone_url,
                                     "https://github.com/user/repo or git@github.com:user/repo.git",
                                     clone_url_active,
+                                )
+                                .track_focus(&self.welcome_clone_focus)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                        window.focus(&this.welcome_clone_focus);
+                                        this.welcome_clone_url_active = true;
+                                        cx.notify();
+                                    }),
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.welcome_clone_url_active = true;
@@ -5819,8 +5835,16 @@ impl ArborWindow {
             if event.keystroke.modifiers.control || event.keystroke.modifiers.alt {
                 return;
             }
-            if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                self.welcome_clone_url.push_str(key_char);
+            let key_text = event.keystroke.key_char.as_deref().or_else(|| {
+                let key = event.keystroke.key.as_str();
+                if key.chars().count() == 1 {
+                    Some(key)
+                } else {
+                    None
+                }
+            });
+            if let Some(key_text) = key_text {
+                self.welcome_clone_url.push_str(key_text);
                 self.welcome_clone_error = None;
                 cx.notify();
                 cx.stop_propagation();
@@ -14271,6 +14295,12 @@ impl EntityInputHandler for ArborWindow {
             cx.notify();
             return;
         }
+        if self.welcome_clone_url_active {
+            self.welcome_clone_url.push_str(text);
+            self.welcome_clone_error = None;
+            cx.notify();
+            return;
+        }
         let Some(session_id) = self.active_terminal_id_for_selected_worktree() else {
             return;
         };
@@ -16409,6 +16439,52 @@ fn modal_input_field(
         )
 }
 
+fn single_line_input_field(
+    theme: ThemePalette,
+    id: impl Into<ElementId>,
+    value: &str,
+    placeholder: impl Into<String>,
+    active: bool,
+) -> Stateful<Div> {
+    let placeholder = placeholder.into();
+
+    div()
+        .id(id)
+        .h(px(30.))
+        .cursor_text()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(if active {
+            theme.accent
+        } else {
+            theme.border
+        }))
+        .bg(rgb(theme.panel_bg))
+        .px_2()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_sm()
+                .font_family(FONT_MONO)
+                .text_color(rgb(if value.is_empty() {
+                    theme.text_disabled
+                } else {
+                    theme.text_primary
+                }))
+                .child(if value.is_empty() {
+                    placeholder
+                } else {
+                    value.to_owned()
+                }),
+        )
+}
+
 fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
     div()
         .text_xs()
@@ -17520,6 +17596,13 @@ fn repository_display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn should_seed_repo_root_from_cwd(store_file_exists: bool, loaded_roots_were_empty: bool) -> bool {
+    // Seed from CWD on first run (no store file), or when there are existing
+    // saved roots and CWD is simply not listed yet. If the store exists and is
+    // explicitly empty, preserve that empty state across restarts.
+    !store_file_exists || !loaded_roots_were_empty
 }
 
 fn short_branch(value: &str) -> String {
@@ -19628,5 +19711,21 @@ mod tests {
             crate::LaunchMode::Gui => panic!("expected daemon launch mode"),
             crate::LaunchMode::Help => panic!("expected daemon launch mode"),
         }
+    }
+
+    #[test]
+    fn seed_repo_root_from_cwd_when_store_file_missing() {
+        assert!(crate::should_seed_repo_root_from_cwd(false, false));
+        assert!(crate::should_seed_repo_root_from_cwd(false, true));
+    }
+
+    #[test]
+    fn does_not_seed_repo_root_from_cwd_when_store_is_explicitly_empty() {
+        assert!(!crate::should_seed_repo_root_from_cwd(true, true));
+    }
+
+    #[test]
+    fn seed_repo_root_from_cwd_when_store_has_saved_roots() {
+        assert!(crate::should_seed_repo_root_from_cwd(true, false));
     }
 }
