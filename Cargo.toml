@@ -4,6 +4,7 @@ members = [
     "crates/arbor-core",
     "crates/arbor-gui",
     "crates/arbor-httpd",
+    "crates/arbor-mcp",
     "crates/arbor-mosh",
     "crates/arbor-ssh",
     "crates/arbor-terminal-emulator",

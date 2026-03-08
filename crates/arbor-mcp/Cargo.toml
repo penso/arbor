@@ -1,0 +1,22 @@
+[package]
+name = "arbor-mcp"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "arbor-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+rmcp = { version = "1", features = ["server", "transport-io", "schemars"] }
+schemars = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+ureq = { workspace = true }
+
+[lints]
+workspace = true
