@@ -97,7 +97,12 @@ impl LiveSession {
             })?;
 
         let mut command = CommandBuilder::new(shell.clone());
-        command.arg("-l");
+        if let Some(ref cmd) = request.command {
+            command.arg("-c");
+            command.arg(cmd);
+        } else {
+            command.arg("-l");
+        }
         command.cwd(request.cwd.as_os_str());
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");

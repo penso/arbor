@@ -1,8 +1,12 @@
+mod process_manager;
 mod repository_store;
 mod terminal_daemon;
 
 use {
-    crate::terminal_daemon::{LocalTerminalDaemon, LocalTerminalDaemonError, SessionEvent},
+    crate::{
+        process_manager::ProcessManager,
+        terminal_daemon::{LocalTerminalDaemon, LocalTerminalDaemonError, SessionEvent},
+    },
     arbor_core::{
         agent::AgentState,
         changes,
@@ -11,6 +15,7 @@ use {
             KillRequest, ResizeRequest, SignalRequest, SnapshotRequest, TerminalDaemon,
             TerminalSignal, TerminalSnapshot, WriteRequest,
         },
+        process::ProcessInfo,
         worktree,
     },
     axum::{
@@ -43,6 +48,7 @@ const AGENT_SESSION_EXPIRY_SECS: u64 = 300;
 struct AppState {
     repository_store_path: PathBuf,
     daemon: Arc<Mutex<LocalTerminalDaemon>>,
+    process_manager: Arc<Mutex<ProcessManager>>,
     agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
     agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
 }
@@ -92,6 +98,8 @@ struct HealthResponse {
 struct RepositoryDto {
     root: String,
     label: String,
+    github_repo_slug: Option<String>,
+    avatar_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,6 +109,10 @@ struct WorktreeDto {
     branch: String,
     is_primary_checkout: bool,
     last_activity_unix_ms: Option<u64>,
+    diff_additions: Option<usize>,
+    diff_deletions: Option<usize>,
+    pr_number: Option<u64>,
+    pr_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +142,7 @@ struct CreateTerminalRequest {
     cols: Option<u16>,
     rows: Option<u16>,
     title: Option<String>,
+    command: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,12 +212,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let daemon_store = JsonDaemonSessionStore::default();
     let (agent_broadcast, _) = tokio::sync::broadcast::channel::<AgentWsEvent>(64);
+
+    // Initialize process manager — scan repository roots for arbor.toml files
+    let repo_store_path = repository_store::default_repository_store_path();
+    let process_manager = {
+        let roots = repository_store::load_repository_roots(&repo_store_path).unwrap_or_default();
+        let resolved = repository_store::resolve_repository_roots(roots);
+        let repo_root = resolved
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut pm = ProcessManager::new(repo_root.clone());
+        let configs = process_manager::load_process_configs(&repo_root);
+        if !configs.is_empty() {
+            println!(
+                "loaded {} process config(s) from {}/arbor.toml",
+                configs.len(),
+                repo_root.display()
+            );
+        }
+        pm.load_configs(configs);
+        pm
+    };
+
     let state = AppState {
-        repository_store_path: repository_store::default_repository_store_path(),
+        repository_store_path: repo_store_path,
         daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(daemon_store))),
+        process_manager: Arc::new(Mutex::new(process_manager)),
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
     };
+
+    // Spawn background task to monitor process lifecycle
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                let restart_schedule = {
+                    let mut pm = state.process_manager.lock().await;
+                    let mut daemon = state.daemon.lock().await;
+                    pm.check_and_update(&mut daemon)
+                };
+                for (name, delay) in restart_schedule {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let mut pm = state.process_manager.lock().await;
+                        let mut daemon = state.daemon.lock().await;
+                        let _ = pm.start_process(&name, &mut daemon);
+                    });
+                }
+            }
+        });
+    }
 
     let app = router(
         state,
@@ -242,7 +304,14 @@ fn router(state: AppState, web_ui_available: bool) -> Router {
         .route("/terminals/{session_id}", delete(kill_terminal))
         .route("/terminals/{session_id}/ws", get(terminal_ws))
         .route("/agent/notify", post(agent_notify))
-        .route("/agent/activity/ws", get(agent_activity_ws));
+        .route("/agent/activity/ws", get(agent_activity_ws))
+        .route("/processes", get(list_processes))
+        .route("/processes/start-all", post(start_all_processes))
+        .route("/processes/stop-all", post(stop_all_processes))
+        .route("/processes/{name}/start", post(start_process))
+        .route("/processes/{name}/stop", post(stop_process))
+        .route("/processes/{name}/restart", post(restart_process))
+        .route("/processes/ws", get(process_status_ws));
 
     let with_state = Router::new().nest("/api/v1", api).with_state(state);
 
@@ -267,9 +336,15 @@ async fn list_repositories(State(state): State<AppState>) -> ApiResult<Vec<Repos
 
     let repositories = resolved
         .into_iter()
-        .map(|root| RepositoryDto {
-            label: repository_display_name(&root),
-            root: root.display().to_string(),
+        .map(|root| {
+            let slug = github_repo_slug_for_path(&root);
+            let avatar_url = slug.as_deref().and_then(github_avatar_url);
+            RepositoryDto {
+                label: repository_display_name(&root),
+                root: root.display().to_string(),
+                github_repo_slug: slug,
+                avatar_url,
+            }
         })
         .collect();
 
@@ -287,27 +362,38 @@ async fn list_worktrees(
 
     let mut worktrees = Vec::new();
 
-    for repository_root in resolved {
+    for repository_root in &resolved {
         if let Some(filter_root) = filter.as_ref()
-            && !paths_equivalent(&repository_root, filter_root)
+            && !paths_equivalent(repository_root, filter_root)
         {
             continue;
         }
 
-        match worktree::list(&repository_root) {
+        let repo_slug = github_repo_slug_for_path(repository_root);
+
+        match worktree::list(repository_root) {
             Ok(entries) => {
                 for entry in entries {
                     let last_activity_unix_ms = worktree::last_git_activity_ms(&entry.path);
+                    let diff_summary = changes::diff_line_summary(&entry.path).ok();
+                    let branch_name = entry
+                        .branch
+                        .as_deref()
+                        .map(short_branch)
+                        .unwrap_or_else(|| "-".to_owned());
+                    let is_primary = entry.path.as_path() == repository_root.as_path();
+                    let (pr_number, pr_url) =
+                        lookup_pr_for_branch(repo_slug.as_deref(), &branch_name, is_primary).await;
                     worktrees.push(WorktreeDto {
                         repo_root: repository_root.display().to_string(),
                         path: entry.path.display().to_string(),
-                        branch: entry
-                            .branch
-                            .as_deref()
-                            .map(short_branch)
-                            .unwrap_or_else(|| "-".to_owned()),
-                        is_primary_checkout: entry.path.as_path() == repository_root,
+                        branch: branch_name,
+                        is_primary_checkout: is_primary,
                         last_activity_unix_ms,
+                        diff_additions: diff_summary.as_ref().map(|d| d.additions),
+                        diff_deletions: diff_summary.as_ref().map(|d| d.deletions),
+                        pr_number,
+                        pr_url,
                     });
                 }
             },
@@ -387,6 +473,7 @@ async fn create_terminal(
             cols,
             rows,
             title: request.title,
+            command: request.command,
         })
         .map_err(map_daemon_error)?;
 
@@ -888,6 +975,138 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
     worktree::paths_equivalent(left, right)
 }
 
+fn github_repo_slug_for_path(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout);
+    github_repo_slug_from_remote_url(url.trim())
+}
+
+fn github_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
+    let path = remote_url
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote_url.strip_prefix("https://github.com/"))
+        .or_else(|| remote_url.strip_prefix("http://github.com/"))
+        .or_else(|| remote_url.strip_prefix("ssh://git@github.com/"))?;
+
+    let normalized = path.trim_end_matches('/');
+    let repo_path = normalized.strip_suffix(".git").unwrap_or(normalized);
+    let (owner, repo_name) = repo_path.split_once('/')?;
+    if owner.is_empty() || repo_name.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo_name}"))
+}
+
+fn github_avatar_url(repo_slug: &str) -> Option<String> {
+    let (owner, _) = repo_slug.split_once('/')?;
+    Some(format!(
+        "https://avatars.githubusercontent.com/{owner}?size=96"
+    ))
+}
+
+/// Try to find PR number for a branch using the GitHub API via octocrab.
+async fn lookup_pr_for_branch(
+    repo_slug: Option<&str>,
+    branch: &str,
+    is_primary: bool,
+) -> (Option<u64>, Option<String>) {
+    let slug = match repo_slug {
+        Some(s) => s,
+        None => return (None, None),
+    };
+
+    if is_primary || branch == "-" || branch.is_empty() {
+        return (None, None);
+    }
+
+    // Skip main/master/develop branches
+    let lower = branch.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "main" | "master" | "develop" | "dev" | "trunk"
+    ) {
+        return (None, None);
+    }
+
+    let Some((owner, repo_name)) = slug.split_once('/') else {
+        return (None, None);
+    };
+
+    let Some(client) = build_github_client() else {
+        return (None, None);
+    };
+
+    let owner = owner.to_owned();
+    let repo_name = repo_name.to_owned();
+
+    let page = client
+        .pulls(&owner, &repo_name)
+        .list()
+        .head(format!("{owner}:{branch}"))
+        .state(octocrab::params::State::All)
+        .per_page(1)
+        .send()
+        .await;
+
+    let Ok(page) = page else {
+        return (None, None);
+    };
+
+    match page.items.first() {
+        Some(pr) => {
+            let number = pr.number;
+            let url = format!("https://github.com/{owner}/{repo_name}/pull/{number}");
+            (Some(number), Some(url))
+        },
+        None => (None, None),
+    }
+}
+
+fn build_github_client() -> Option<octocrab::Octocrab> {
+    let token = resolve_github_token()?;
+    octocrab::Octocrab::builder()
+        .personal_token(token)
+        .build()
+        .ok()
+}
+
+fn resolve_github_token() -> Option<String> {
+    // Try GITHUB_TOKEN environment variable first
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+
+    // Fall back to `gh auth token` CLI
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
 fn internal_error(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -914,5 +1133,98 @@ fn map_daemon_error(error: LocalTerminalDaemonError) -> (StatusCode, Json<ApiErr
         LocalTerminalDaemonError::SessionStore(store_error) => {
             internal_error(store_error.to_string())
         },
+    }
+}
+
+// ── Process management handlers ──────────────────────────────────────
+
+async fn list_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessInfo>> {
+    let pm = state.process_manager.lock().await;
+    Ok(Json(pm.list_processes()))
+}
+
+async fn start_all_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessInfo>> {
+    let mut pm = state.process_manager.lock().await;
+    let mut daemon = state.daemon.lock().await;
+    let results = pm.start_all(&mut daemon);
+    let infos: Vec<ProcessInfo> = results
+        .into_iter()
+        .filter_map(|(_, result)| result.ok())
+        .collect();
+    Ok(Json(infos))
+}
+
+async fn stop_all_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessInfo>> {
+    let mut pm = state.process_manager.lock().await;
+    let mut daemon = state.daemon.lock().await;
+    let results = pm.stop_all(&mut daemon);
+    let infos: Vec<ProcessInfo> = results
+        .into_iter()
+        .filter_map(|(_, result)| result.ok())
+        .collect();
+    Ok(Json(infos))
+}
+
+async fn start_process(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<ProcessInfo> {
+    let mut pm = state.process_manager.lock().await;
+    let mut daemon = state.daemon.lock().await;
+    let info = pm
+        .start_process(&name, &mut daemon)
+        .map_err(internal_error)?;
+    Ok(Json(info))
+}
+
+async fn stop_process(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<ProcessInfo> {
+    let mut pm = state.process_manager.lock().await;
+    let mut daemon = state.daemon.lock().await;
+    let info = pm
+        .stop_process(&name, &mut daemon)
+        .map_err(internal_error)?;
+    Ok(Json(info))
+}
+
+async fn restart_process(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<ProcessInfo> {
+    let mut pm = state.process_manager.lock().await;
+    let mut daemon = state.daemon.lock().await;
+    let info = pm
+        .restart_process(&name, &mut daemon)
+        .map_err(internal_error)?;
+    Ok(Json(info))
+}
+
+async fn process_status_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| handle_process_status_ws(state, socket))
+        .into_response()
+}
+
+async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
+    let (snapshot, mut rx) = {
+        let pm = state.process_manager.lock().await;
+        (pm.snapshot_event(), pm.subscribe())
+    };
+
+    if send_ws_json(&mut socket, &snapshot).await.is_err() {
+        return;
+    }
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                if send_ws_json(&mut socket, &event).await.is_err() {
+                    break;
+                }
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
     }
 }

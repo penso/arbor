@@ -70,6 +70,15 @@ function renderTabs(): void {
     return;
   }
 
+  // Auto-connect if a session is selected but no xterm instance exists
+  if (
+    state.activeSessionId !== null &&
+    (activeInstance === null || activeInstance.sessionId !== state.activeSessionId)
+  ) {
+    // Defer to avoid re-entrancy during render
+    setTimeout(() => activateSession(state.activeSessionId!), 0);
+  }
+
   for (const session of sessions) {
     const tab = el("button", "terminal-tab");
     if (state.activeSessionId === session.session_id) {

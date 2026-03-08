@@ -71,6 +71,8 @@ struct CreateTerminalRequest {
     cols: u16,
     rows: u16,
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +119,7 @@ impl HttpTerminalDaemon {
             cols: request.cols,
             rows: request.rows,
             title: request.title.filter(|value| !value.trim().is_empty()),
+            command: request.command,
         };
 
         let response = self.send_json("POST", &format!("{API_PATH_PREFIX}/terminals"), &payload)?;

@@ -47,6 +47,7 @@ pub struct ArborConfig {
     pub theme: Option<String>,
     pub daemon_url: Option<String>,
     pub notifications: Option<bool>,
+    pub preferred_editor: Option<String>,
     pub agent_presets: Vec<AgentPresetConfig>,
     pub remote_hosts: Vec<RemoteHostConfig>,
 }
@@ -220,6 +221,18 @@ pub fn remove_remote_host(name: &str) -> Result<(), String> {
 #[serde(default)]
 pub struct RepoConfig {
     pub presets: Vec<RepoPresetConfig>,
+    pub processes: Vec<ProcessConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ProcessConfig {
+    pub name: String,
+    pub command: String,
+    pub working_dir: Option<String>,
+    pub auto_start: Option<bool>,
+    pub auto_restart: Option<bool>,
+    pub restart_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

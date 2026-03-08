@@ -1,11 +1,12 @@
-import type { Repository, Worktree, TerminalSession, ChangedFile } from "./types";
-import { fetchRepositories, fetchWorktrees, fetchTerminals, fetchChangedFiles } from "./api";
+import type { Repository, Worktree, TerminalSession, ChangedFile, ProcessInfo } from "./types";
+import { fetchRepositories, fetchWorktrees, fetchTerminals, fetchChangedFiles, fetchProcesses } from "./api";
 
 export type AppState = {
   repositories: Repository[];
   worktrees: Worktree[];
   sessions: TerminalSession[];
   changedFiles: ChangedFile[];
+  processes: ProcessInfo[];
 
   selectedRepoRoot: string | null;
   selectedWorktreePath: string | null;
@@ -21,6 +22,7 @@ export function createInitialState(): AppState {
     worktrees: [],
     sessions: [],
     changedFiles: [],
+    processes: [],
     selectedRepoRoot: null,
     selectedWorktreePath: null,
     activeSessionId: null,
@@ -55,10 +57,11 @@ export async function refresh(): Promise<void> {
   updateState({ loading: true, error: null });
 
   try {
-    const [repositories, worktrees, sessions] = await Promise.all([
+    const [repositories, worktrees, sessions, processes] = await Promise.all([
       fetchRepositories(),
       fetchWorktrees(),
       fetchTerminals(),
+      fetchProcesses().catch(() => [] as ProcessInfo[]),
     ]);
 
     // Validate selections still exist
@@ -74,16 +77,26 @@ export async function refresh(): Promise<void> {
         ? state.selectedWorktreePath
         : null;
 
-    const activeSessionId =
+    let activeSessionId =
       state.activeSessionId !== null &&
       sessions.some((s) => s.session_id === state.activeSessionId)
         ? state.activeSessionId
         : null;
 
+    // Auto-select first running terminal if none is active
+    if (activeSessionId === null && sessions.length > 0) {
+      const running = sessions.find((s) => s.state === "running");
+      const first = running ?? sessions[0];
+      if (first !== undefined) {
+        activeSessionId = first.session_id;
+      }
+    }
+
     updateState({
       repositories,
       worktrees,
       sessions,
+      processes,
       selectedRepoRoot,
       selectedWorktreePath,
       activeSessionId,

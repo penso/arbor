@@ -8,8 +8,18 @@ test.describe("Arbor Web UI", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify([
-          { root: "/home/user/projects/arbor", label: "arbor" },
-          { root: "/home/user/projects/moltis", label: "moltis" },
+          {
+            root: "/home/user/projects/arbor",
+            label: "arbor",
+            github_repo_slug: "penso/arbor",
+            avatar_url: null,
+          },
+          {
+            root: "/home/user/projects/moltis",
+            label: "moltis",
+            github_repo_slug: "penso/moltis",
+            avatar_url: "https://avatars.githubusercontent.com/penso?size=96",
+          },
         ]),
       }),
     );
@@ -25,6 +35,10 @@ test.describe("Arbor Web UI", () => {
             branch: "main",
             is_primary_checkout: true,
             last_activity_unix_ms: Date.now() - 30_000,
+            diff_additions: 84,
+            diff_deletions: 2,
+            pr_number: null,
+            pr_url: null,
           },
           {
             repo_root: "/home/user/projects/arbor",
@@ -32,6 +46,10 @@ test.describe("Arbor Web UI", () => {
             branch: "feature/auth",
             is_primary_checkout: false,
             last_activity_unix_ms: Date.now() - 120_000,
+            diff_additions: 15,
+            diff_deletions: 3,
+            pr_number: 365,
+            pr_url: "https://github.com/penso/arbor/pull/365",
           },
           {
             repo_root: "/home/user/projects/moltis",
@@ -39,6 +57,10 @@ test.describe("Arbor Web UI", () => {
             branch: "main",
             is_primary_checkout: true,
             last_activity_unix_ms: null,
+            diff_additions: null,
+            diff_deletions: null,
+            pr_number: null,
+            pr_url: null,
           },
         ]),
       }),
@@ -121,13 +143,34 @@ test.describe("Arbor Web UI", () => {
     await expect(sidebar.locator(".repo-name").getByText("arbor", { exact: true })).toBeVisible();
     await expect(sidebar.locator(".repo-name").getByText("moltis", { exact: true })).toBeVisible();
 
+    // GitHub icon for repo without avatar (arbor has slug but no avatar_url)
+    await expect(sidebar.locator(".repo-icon-github").first()).toBeVisible();
+
+    // GitHub avatar for repo with avatar_url (moltis)
+    await expect(sidebar.locator(".repo-avatar")).toBeVisible();
+
     // Worktree cards under their repo
     await expect(sidebar.locator(".wt-branch").getByText("main").first()).toBeVisible();
     await expect(sidebar.locator(".wt-branch").getByText("feature/auth")).toBeVisible();
 
+    // Git branch icons on worktree cards
+    await expect(sidebar.locator(".wt-branch-icon").first()).toBeVisible();
+
+    // Diff stats on worktrees
+    await expect(sidebar.locator(".wt-diff-add").getByText("+84")).toBeVisible();
+    await expect(sidebar.locator(".wt-diff-del").getByText("-2")).toBeVisible();
+
+    // PR number on feature/auth worktree
+    await expect(sidebar.locator(".wt-pr").getByText("#365")).toBeVisible();
+
     // Worktree count badges
     await expect(sidebar.locator(".repo-wt-count").getByText("2")).toBeVisible();
     await expect(sidebar.locator(".repo-wt-count").getByText("1")).toBeVisible();
+
+    await page.screenshot({
+      path: "e2e/screenshots/sidebar-details.png",
+      fullPage: true,
+    });
   });
 
   test("collapsing repo hides its worktrees", async ({ page }) => {

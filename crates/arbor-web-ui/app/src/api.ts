@@ -5,6 +5,8 @@ import type {
   TerminalState,
   ChangedFile,
   ChangeKind,
+  ProcessInfo,
+  ProcessStatus,
   WsServerEvent,
   WsClientEvent,
 } from "./types";
@@ -62,7 +64,12 @@ export async function fetchRepositories(): Promise<Repository[]> {
     const root = readString(item["root"]);
     const label = readString(item["label"]);
     if (root !== null && label !== null) {
-      repos.push({ root, label });
+      repos.push({
+        root,
+        label,
+        github_repo_slug: readString(item["github_repo_slug"]),
+        avatar_url: readString(item["avatar_url"]),
+      });
     }
   }
   return repos;
@@ -89,6 +96,10 @@ export async function fetchWorktrees(repoRoot?: string): Promise<Worktree[]> {
         branch,
         is_primary_checkout: isPrimary,
         last_activity_unix_ms: readNumber(item["last_activity_unix_ms"]),
+        diff_additions: readNumber(item["diff_additions"]),
+        diff_deletions: readNumber(item["diff_deletions"]),
+        pr_number: readNumber(item["pr_number"]),
+        pr_url: readString(item["pr_url"]),
       });
     }
   }
@@ -238,4 +249,77 @@ export function serializeWsClientEvent(event: WsClientEvent): string {
 export function buildWsUrl(sessionId: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/api/v1/terminals/${encodeURIComponent(sessionId)}/ws`;
+}
+
+// ── Process management ───────────────────────────────────────────────
+
+const VALID_PROCESS_STATUSES = new Set<string>([
+  "running", "restarting", "crashed", "stopped",
+]);
+
+function parseProcessStatus(value: unknown): ProcessStatus | null {
+  if (typeof value === "string" && VALID_PROCESS_STATUSES.has(value)) {
+    return value as ProcessStatus;
+  }
+  return null;
+}
+
+function parseProcessInfo(item: unknown): ProcessInfo | null {
+  if (!isRecord(item)) return null;
+  const name = readString(item["name"]);
+  const command = readString(item["command"]);
+  const status = parseProcessStatus(item["status"]);
+  const restartCount = readNumber(item["restart_count"]);
+  if (name === null || command === null || status === null || restartCount === null) {
+    return null;
+  }
+  return {
+    name,
+    command,
+    status,
+    exit_code: readNumber(item["exit_code"]),
+    restart_count: restartCount,
+    session_id: readString(item["session_id"]),
+  };
+}
+
+export async function fetchProcesses(): Promise<ProcessInfo[]> {
+  const raw = await fetchJson("/api/v1/processes");
+  if (!Array.isArray(raw)) throw new Error("processes payload is not an array");
+  const processes: ProcessInfo[] = [];
+  for (const item of raw) {
+    const info = parseProcessInfo(item);
+    if (info !== null) processes.push(info);
+  }
+  return processes;
+}
+
+async function postProcessAction(url: string): Promise<void> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`process action failed (${response.status})`);
+  }
+}
+
+export async function startAllProcesses(): Promise<void> {
+  await postProcessAction("/api/v1/processes/start-all");
+}
+
+export async function stopAllProcesses(): Promise<void> {
+  await postProcessAction("/api/v1/processes/stop-all");
+}
+
+export async function startProcess(name: string): Promise<void> {
+  await postProcessAction(`/api/v1/processes/${encodeURIComponent(name)}/start`);
+}
+
+export async function stopProcess(name: string): Promise<void> {
+  await postProcessAction(`/api/v1/processes/${encodeURIComponent(name)}/stop`);
+}
+
+export async function restartProcess(name: string): Promise<void> {
+  await postProcessAction(`/api/v1/processes/${encodeURIComponent(name)}/restart`);
 }

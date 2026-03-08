@@ -25,14 +25,14 @@ use {
         Algorithm as DiffAlgorithm, Diff as BlobDiff, InternedInput as BlobInternedInput,
     },
     gpui::{
-        App, Application, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
-        ElementInputHandler, EntityInputHandler, FocusHandle, FontFallbacks, FontFeatures,
-        FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent, Keystroke, Menu, MenuItem,
-        MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels,
-        ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun, TitlebarOptions,
-        UTF16Selection, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
-        WindowDecorations, WindowOptions, actions, canvas, div, fill, font, img, point, prelude::*,
-        px, rgb, size, uniform_list,
+        Animation, AnimationExt, App, Application, Bounds, ClipboardItem, Context, Div,
+        DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle,
+        FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent,
+        Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
+        TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
+        WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, fill, font, img,
+        point, prelude::*, px, rgb, size, uniform_list,
     },
     ropey::Rope,
     std::{
@@ -813,6 +813,7 @@ struct ArborWindow {
     worktree_stats_loading: bool,
     worktree_prs_loading: bool,
     active_worktree_index: Option<usize>,
+    worktree_selection_epoch: usize,
     changed_files: Vec<ChangedFile>,
     selected_changed_file: Option<PathBuf>,
     terminals: Vec<TerminalSession>,
@@ -1013,6 +1014,7 @@ impl ArborWindow {
                     worktree_stats_loading: false,
                     worktree_prs_loading: false,
                     active_worktree_index: None,
+                    worktree_selection_epoch: 0,
                     changed_files: Vec::new(),
                     selected_changed_file: None,
                     terminals: Vec::new(),
@@ -1267,6 +1269,7 @@ impl ArborWindow {
             worktree_stats_loading: false,
             worktree_prs_loading: false,
             active_worktree_index: None,
+            worktree_selection_epoch: 0,
             changed_files: Vec::new(),
             selected_changed_file: None,
             terminals: Vec::new(),
@@ -3828,6 +3831,9 @@ impl ArborWindow {
             self.worktree_nav_forward.clear();
         }
         self.close_top_bar_worktree_quick_actions();
+        if self.active_worktree_index != Some(index) {
+            self.worktree_selection_epoch = self.worktree_selection_epoch.wrapping_add(1);
+        }
         self.active_worktree_index = Some(index);
         self.active_outpost_index = None;
         self.active_diff_session_id = None;
@@ -6045,6 +6051,7 @@ impl ArborWindow {
                 cols: 120,
                 rows: 35,
                 title: Some(session.title.clone()),
+                command: None,
             }) {
                 Ok(response) => {
                     let daemon_session = response.session;
@@ -8150,6 +8157,7 @@ impl ArborWindow {
                 };
                 pane = pane.child(repo_icon);
 
+                let selection_epoch = self.worktree_selection_epoch;
                 for (wt_index, worktree) in repo_worktrees {
                     let is_active = self.active_worktree_index == Some(wt_index);
                     let first_char: String = worktree
@@ -8160,38 +8168,45 @@ impl ArborWindow {
                         .to_uppercase()
                         .collect();
 
-                    pane = pane.child(
-                        div()
-                            .id(("collapsed-worktree", wt_index))
-                            .cursor_pointer()
-                            .size(px(30.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(if is_active {
-                                theme.accent
-                            } else {
-                                theme.border
-                            }))
-                            .bg(rgb(if is_active {
-                                theme.panel_active_bg
-                            } else {
-                                theme.panel_bg
-                            }))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(if is_active {
-                                theme.text_primary
-                            } else {
-                                theme.text_muted
-                            }))
-                            .child(first_char)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_worktree(wt_index, window, cx);
-                            })),
-                    );
+                    let cell = div()
+                        .id(("collapsed-worktree", wt_index))
+                        .cursor_pointer()
+                        .size(px(30.))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(if is_active {
+                            theme.accent
+                        } else {
+                            theme.border
+                        }))
+                        .bg(rgb(if is_active {
+                            theme.panel_active_bg
+                        } else {
+                            theme.panel_bg
+                        }))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if is_active {
+                            theme.text_primary
+                        } else {
+                            theme.text_muted
+                        }))
+                        .child(first_char)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_worktree(wt_index, window, cx);
+                        }));
+                    if is_active {
+                        pane = pane.child(cell.with_animation(
+                            ("collapsed-wt-select", selection_epoch),
+                            Animation::new(Duration::from_millis(150)),
+                            |el, delta| el.opacity(0.7 + 0.3 * delta),
+                        ));
+                    } else {
+                        pane = pane.child(cell.opacity(0.7));
+                    }
                 }
             }
 
@@ -8495,6 +8510,7 @@ impl ArborWindow {
                                         )
                                 )
                                 .when(!is_collapsed, |this| {
+                                    let selection_epoch = self.worktree_selection_epoch;
                                     this.child(
                                     div()
                                         .flex()
@@ -8513,7 +8529,7 @@ impl ArborWindow {
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
                                                     None => None,
                                                 };
-                                                div()
+                                                let row = div()
                                                     .id(("worktree-row", index))
                                                     .font_family(FONT_MONO)
                                                     .cursor_pointer()
@@ -8726,7 +8742,19 @@ impl ArborWindow {
                                                             }),
                                                     )
                                                     ) // text column
-                                                    ) // bordered cell
+                                                    ); // bordered cell
+                                                if is_active {
+                                                    row.with_animation(
+                                                        ("worktree-select", selection_epoch),
+                                                        Animation::new(Duration::from_millis(150)),
+                                                        |el, delta| {
+                                                            el.opacity(0.7 + 0.3 * delta)
+                                                        },
+                                                    )
+                                                    .into_any_element()
+                                                } else {
+                                                    row.opacity(0.7).into_any_element()
+                                                }
                                             }),
                                         ),
                                 )

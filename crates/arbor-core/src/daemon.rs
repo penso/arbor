@@ -19,6 +19,8 @@ pub struct CreateOrAttachRequest {
     pub cols: u16,
     pub rows: u16,
     pub title: Option<String>,
+    /// When set, spawn `$SHELL -c "<command>"` instead of a login shell.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

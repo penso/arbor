@@ -17,11 +17,13 @@ arbor-core = { path = "../arbor-core" }
 arbor-web-ui = { path = "../arbor-web-ui" }
 axum = { workspace = true, features = ["ws"] }
 futures-util = "0.3"
+octocrab = { workspace = true }
 portable-pty = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+toml = "0.8"
 tower-http = { workspace = true }
 
 [dev-dependencies]

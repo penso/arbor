@@ -1,6 +1,8 @@
 export type Repository = {
   root: string;
   label: string;
+  github_repo_slug: string | null;
+  avatar_url: string | null;
 };
 
 export type Worktree = {
@@ -9,6 +11,10 @@ export type Worktree = {
   branch: string;
   is_primary_checkout: boolean;
   last_activity_unix_ms: number | null;
+  diff_additions: number | null;
+  diff_deletions: number | null;
+  pr_number: number | null;
+  pr_url: string | null;
 };
 
 export type TerminalState = "running" | "completed" | "failed";
@@ -44,6 +50,17 @@ export type ChangeKind =
   | "type-change"
   | "conflict"
   | "intent-to-add";
+
+export type ProcessStatus = "running" | "restarting" | "crashed" | "stopped";
+
+export type ProcessInfo = {
+  name: string;
+  command: string;
+  status: ProcessStatus;
+  exit_code: number | null;
+  restart_count: number;
+  session_id: string | null;
+};
 
 export type AgentSession = {
   cwd: string;
