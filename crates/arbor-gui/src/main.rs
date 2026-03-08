@@ -5892,7 +5892,7 @@ impl ArborWindow {
                     cx.stop_propagation();
                     return;
                 },
-                "backspace" => {
+                "backspace" | "delete" => {
                     self.update_settings_modal_input(SettingsModalInputEvent::Backspace, cx);
                     cx.stop_propagation();
                     return;
@@ -8365,32 +8365,6 @@ impl ArborWindow {
                     )
                     .child(
                         div()
-                            .id("open-settings")
-                            .cursor_pointer()
-                            .text_color(rgb(theme.text_muted))
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .hover(|s| {
-                                s.bg(rgb(theme.panel_bg))
-                                    .text_color(rgb(theme.text_primary))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_settings_modal(cx);
-                            }))
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(16.))
-                                    .child("\u{f013}"),
-                            ),
-                    )
-                    .child(
-                        div()
                             .id("report-issue")
                             .cursor_pointer()
                             .text_color(rgb(theme.text_muted))
@@ -9757,20 +9731,45 @@ impl ArborWindow {
                     .px_3()
                     .flex()
                     .items_center()
-                    .gap_2()
                     .child(
-                        action_button(theme, "open-add-repository", "Add Repo", false, false)
-                            .flex_1()
+                        div()
+                            .id("open-add-repository")
+                            .cursor_pointer()
+                            .h(px(24.))
+                            .w_full()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .hover(|s| {
+                                s.bg(rgb(theme.panel_active_bg))
+                                    .border_color(rgb(theme.accent))
+                            })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_add_repository_picker(cx);
-                            })),
-                    )
-                    .child(
-                        action_button(theme, "open-manage-hosts", "Manage Hosts", false, false)
-                            .flex_1()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_manage_hosts_modal(cx);
-                            })),
+                            }))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_family(FONT_MONO)
+                                            .text_size(px(11.))
+                                            .text_color(rgb(theme.accent))
+                                            .child("\u{f067}"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(theme.text_primary))
+                                            .child("Add Repository"),
+                                    ),
+                            ),
                     ),
             )
     }
@@ -13072,12 +13071,14 @@ impl ArborWindow {
                                     } else {
                                         div()
                                             .flex()
+                                            .items_center()
                                             .child("\u{2022}".repeat(token_value.len()))
                                             .child(
                                                 div()
                                                     .w(px(1.))
                                                     .h(px(14.))
                                                     .bg(rgb(theme.accent))
+                                                    .mt(px(1.))
                                                     .ml(px(1.)),
                                             )
                                             .into_any_element()
@@ -13193,12 +13194,14 @@ impl ArborWindow {
                                     } else {
                                         div()
                                             .flex()
+                                            .items_center()
                                             .child(address)
                                             .child(
                                                 div()
                                                     .w(px(1.))
                                                     .h(px(14.))
                                                     .bg(rgb(theme.accent))
+                                                    .mt(px(1.))
                                                     .ml(px(1.)),
                                             )
                                             .into_any_element()
@@ -13233,8 +13236,6 @@ impl ArborWindow {
         };
 
         let theme = self.theme();
-        let current_theme_label = self.theme_kind.label();
-
         let settings_text_field =
             |field: SettingsField, label: &str, value: &str, active: bool, theme: ThemePalette| {
                 let border_color = if active {
@@ -13281,9 +13282,15 @@ impl ArborWindow {
                             } else if active {
                                 div()
                                     .flex()
+                                    .items_center()
                                     .child(value.to_owned())
                                     .child(
-                                        div().w(px(1.)).h(px(14.)).bg(rgb(theme.accent)).ml(px(1.)),
+                                        div()
+                                            .w(px(1.))
+                                            .h(px(14.))
+                                            .bg(rgb(theme.accent))
+                                            .mt(px(1.))
+                                            .ml(px(1.)),
                                     )
                                     .into_any_element()
                             } else {
@@ -13348,52 +13355,6 @@ impl ArborWindow {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close_settings_modal(cx);
                                     })),
-                            ),
-                    )
-                    // Theme row
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Theme"),
-                            )
-                            .child(
-                                div()
-                                    .id("settings-theme-btn")
-                                    .cursor_pointer()
-                                    .h(px(30.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(theme.panel_bg))
-                                    .text_sm()
-                                    .text_color(rgb(theme.text_primary))
-                                    .hover(|s| s.bg(rgb(theme.panel_active_bg)))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_settings_modal(cx);
-                                        this.action_open_theme_picker(
-                                            &OpenThemePicker,
-                                            window,
-                                            cx,
-                                        );
-                                    }))
-                                    .child(current_theme_label)
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(theme.text_disabled))
-                                            .child("Click to change"),
-                                    ),
                             ),
                     )
                     // Daemon URL
