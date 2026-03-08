@@ -88,7 +88,7 @@ Download the latest build from [Releases](https://github.com/penso/arbor/release
 
 - **Rust nightly** — the project uses `nightly-2025-11-30` (install via [rustup](https://rustup.rs/))
 - **[just](https://github.com/casey/just)** — task runner
-- **[CaskaydiaCove Nerd Font](https://www.nerdfonts.com/)** — icons in the UI use Nerd Font glyphs
+- **[CaskaydiaMono Nerd Font](https://www.nerdfonts.com/)** — icons in the UI use Nerd Font glyphs
 
 #### macOS
 
@@ -101,7 +101,7 @@ Or manually:
 ```
 xcode-select --install
 xcodebuild -downloadComponent MetalToolchain
-brew install --cask font-caskaydia-cove-nerd-font
+brew install --cask font-caskaydia-mono-nerd-font
 ```
 
 #### Linux (Debian/Ubuntu)
@@ -116,7 +116,7 @@ Or manually:
 sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 ```
 
-Then install the [CaskaydiaCove Nerd Font](https://www.nerdfonts.com/font-downloads) to `~/.local/share/fonts/`.
+Then install the [CaskaydiaMono Nerd Font](https://www.nerdfonts.com/font-downloads) to `~/.local/share/fonts/`.
 
 ### Build & Run
 
