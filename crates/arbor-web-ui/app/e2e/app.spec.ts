@@ -193,13 +193,23 @@ test.describe("Arbor Web UI", () => {
 
   test("terminal panel shows session tabs for selected worktree", async ({ page }) => {
     const terminalPanel = page.getByTestId("terminal-panel");
-    // Primary worktree is auto-selected, so only the "claude" session should be visible
-    await expect(terminalPanel.locator(".terminal-tab-label").getByText("claude")).toBeVisible();
+    // Primary worktree is auto-selected, label follows native behavior (last command first).
+    await expect(terminalPanel.locator(".terminal-tab-label").getByText("just test")).toBeVisible();
 
     // Switch to feature-auth worktree
     const sidebar = page.getByTestId("sidebar");
     await sidebar.locator(".wt-card").nth(1).click();
-    await expect(terminalPanel.locator(".terminal-tab-label").getByText("feature-auth")).toBeVisible();
+    await expect(terminalPanel.locator(".terminal-tab-label").getByText("cargo build")).toBeVisible();
+  });
+
+  test("terminal panel shows empty state for worktree without terminals", async ({ page }) => {
+    const sidebar = page.getByTestId("sidebar");
+    const terminalPanel = page.getByTestId("terminal-panel");
+
+    // Switch to moltis primary worktree, which has no terminal sessions in mocked data.
+    await sidebar.locator(".wt-card").nth(2).click();
+
+    await expect(terminalPanel.locator(".terminal-empty").getByText("Click + to add a terminal")).toBeVisible();
   });
 
   test("changes panel shows files when worktree selected", async ({ page }) => {

@@ -22,13 +22,15 @@ You can deploy the `website/` directory directly to:
 - Netlify
 - Any static file host
 
+Current live deployment: [https://penso.github.io/arbor/](https://penso.github.io/arbor/)
+
 ## Feature Screenshots
 
 Replace these files with your own captures to update the "Feature screenshots" section:
 
-- `website/images/features/worktrees.png`
-- `website/images/features/terminal.png`
-- `website/images/features/diff.png`
-- `website/images/features/agent-activity.png`
-- `website/images/features/remote-outposts.png`
-- `website/images/features/themes.png`
+- [worktrees.png](images/features/worktrees.png)
+- [terminal.png](images/features/terminal.png)
+- [diff.png](images/features/diff.png)
+- [agent-activity.png](images/features/agent-activity.png)
+- [remote-outposts.png](images/features/remote-outposts.png)
+- [themes.png](images/features/themes.png)

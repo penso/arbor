@@ -8274,7 +8274,7 @@ impl ArborWindow {
                             .child(
                                 div()
                                     .font_family(FONT_MONO)
-                                    .text_size(px(12.))
+                                    .text_size(px(14.))
                                     .text_color(rgb(if daemon_connected {
                                         0x68c38d
                                     } else {
@@ -8309,7 +8309,7 @@ impl ArborWindow {
                             .child(
                                 div()
                                     .font_family(FONT_MONO)
-                                    .text_size(px(12.))
+                                    .text_size(px(14.))
                                     .text_color(rgb(github_auth_icon_color))
                                     .child("\u{f09b}"),
                             )
@@ -8385,7 +8385,7 @@ impl ArborWindow {
                             .child(
                                 div()
                                     .font_family(FONT_MONO)
-                                    .text_size(px(26.))
+                                    .text_size(px(16.))
                                     .child("\u{f013}"),
                             ),
                     )
@@ -8409,7 +8409,7 @@ impl ArborWindow {
                             .child(
                                 div()
                                     .font_family(FONT_MONO)
-                                    .text_size(px(13.))
+                                    .text_size(px(15.))
                                     .child("\u{f188}"),
                             )
                             .child(
@@ -18700,8 +18700,6 @@ fn build_app_menus(discovered_daemons: &[mdns_browser::DiscoveredDaemon]) -> Vec
                 MenuItem::action("New Terminal Tab", SpawnTerminal),
                 MenuItem::action("Close Terminal Tab", CloseActiveTerminal),
                 MenuItem::action("New Worktree", OpenCreateWorktree),
-                MenuItem::separator(),
-                MenuItem::action("Quit Arbor", ImmediateQuit),
             ],
         },
         Menu {

@@ -196,6 +196,16 @@
   overflow: hidden;
 }
 
+.terminal-empty {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  font-family: var(--font-body);
+}
+
 .xterm-wrapper {
   flex: 1;
   min-height: 0;

@@ -82,6 +82,16 @@ just run
 ## Website (Static)
 
 This repository includes a standalone static product site in `website/`.
+Live site: [https://penso.github.io/arbor/](https://penso.github.io/arbor/)
+
+Feature screenshots:
+
+- [Worktrees](website/images/features/worktrees.png)
+- [Terminal](website/images/features/terminal.png)
+- [Diff](website/images/features/diff.png)
+- [Agent Activity](website/images/features/agent-activity.png)
+- [Remote Outposts](website/images/features/remote-outposts.png)
+- [Themes](website/images/features/themes.png)
 
 Local preview:
 

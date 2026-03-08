@@ -15,8 +15,10 @@ import {
   parseWsServerEvent,
   serializeWsClientEvent,
 } from "../api";
+import type { TerminalSession } from "../types";
 
 const INPUT_FLUSH_MS = 16;
+const TERMINAL_TAB_COMMAND_MAX_CHARS = 14;
 
 type TerminalInstance = {
   sessionId: string;
@@ -78,8 +80,14 @@ function renderTabs(): void {
 
   const sessions = filteredSessions();
   if (sessions.length === 0) {
+    teardownActiveInstance();
     tabsContainer.append(
       el("span", "terminal-tabs-empty", state.loading ? "Loading\u2026" : "No terminals"),
+    );
+    renderEmptyState(
+      state.loading
+        ? "Loading terminals\u2026"
+        : "Click + to add a terminal",
     );
     return;
   }
@@ -113,13 +121,20 @@ function renderTabs(): void {
     const label = el(
       "span",
       "terminal-tab-label",
-      session.title ?? titleFromPath(session.cwd),
+      terminalTabTitle(session),
     );
 
     tab.append(stateIndicator, icon, label);
     tab.addEventListener("click", () => activateSession(session.session_id));
     tabsContainer.append(tab);
   }
+}
+
+function renderEmptyState(text: string): void {
+  if (terminalContainer === null) return;
+  terminalContainer.replaceChildren(
+    el("div", "terminal-empty", text),
+  );
 }
 
 function activateSession(sessionId: string): void {
@@ -392,6 +407,27 @@ function buildXtermTheme(): Record<string, string> {
     brightCyan: "#89dceb",
     brightWhite: "#ffffff",
   };
+}
+
+function terminalTabTitle(session: TerminalSession): string {
+  const lastCommand = session.last_command?.trim() ?? "";
+  if (lastCommand.length > 0) {
+    return truncateWithEllipsis(lastCommand, TERMINAL_TAB_COMMAND_MAX_CHARS);
+  }
+
+  const title = session.title?.trim() ?? "";
+  if (title.length > 0 && !title.startsWith("term-")) {
+    return truncateWithEllipsis(title, TERMINAL_TAB_COMMAND_MAX_CHARS);
+  }
+
+  return "";
+}
+
+function truncateWithEllipsis(value: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  const chars = Array.from(value);
+  if (chars.length <= maxChars) return value;
+  return `${chars.slice(0, maxChars - 1).join("")}\u2026`;
 }
 
 function registerOscGuards(xterm: Terminal): void {
