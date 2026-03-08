@@ -40,7 +40,7 @@ zizmor:
 
 ci: format-check lint test
 
-run port="":
+run port="": web-ui-build-if-needed
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -z "{{port}}" ]; then
@@ -50,7 +50,12 @@ run port="":
     fi
     echo "daemon port: $DAEMON_PORT"
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
+    export ARBOR_HTTPD_BIND="127.0.0.1:${DAEMON_PORT}"
+    cargo +{{nightly_toolchain}} run -p arbor-httpd &
+    HTTPD_PID=$!
+    trap "kill $HTTPD_PID 2>/dev/null" EXIT
     cargo +{{nightly_toolchain}} run -p arbor-gui
+    kill $HTTPD_PID 2>/dev/null || true
 
 web-ui-build-if-needed:
     @if [ -f {{web_ui_dir}}/dist/index.html ]; then \

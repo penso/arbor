@@ -51,6 +51,34 @@ pub struct ThemePalette {
 }
 
 impl ThemeKind {
+    pub const ALL: &[ThemeKind] = &[
+        ThemeKind::One,
+        ThemeKind::Ayu,
+        ThemeKind::Gruvbox,
+        ThemeKind::Dracula,
+        ThemeKind::SolarizedLight,
+        ThemeKind::Everforest,
+        ThemeKind::Catppuccin,
+        ThemeKind::CatppuccinLatte,
+        ThemeKind::Ethereal,
+        ThemeKind::FlexokiLight,
+        ThemeKind::Hackerman,
+        ThemeKind::Kanagawa,
+        ThemeKind::MatteBlack,
+        ThemeKind::Miasma,
+        ThemeKind::Nord,
+        ThemeKind::OsakaJade,
+        ThemeKind::Ristretto,
+        ThemeKind::RosePine,
+        ThemeKind::TokyoNight,
+        ThemeKind::Vantablack,
+        ThemeKind::White,
+        ThemeKind::RetroboxClassic,
+        ThemeKind::TokyoNightDay,
+        ThemeKind::TokyoNightClassic,
+        ThemeKind::Zellner,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             ThemeKind::One => "One Dark",

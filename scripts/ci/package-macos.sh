@@ -31,6 +31,15 @@ else
   echo "note: arbor-httpd not found at ${HTTPD_PATH}, skipping bundle"
 fi
 
+# Bundle web UI assets for arbor-httpd.
+WEB_UI_DIST="${ROOT_DIR}/crates/arbor-web-ui/app/dist"
+if [[ -d "${WEB_UI_DIST}" ]]; then
+  cp -R "${WEB_UI_DIST}" "${RESOURCES_DIR}/web-ui"
+  echo "bundled web-ui assets from ${WEB_UI_DIST}"
+else
+  echo "warning: web-ui dist not found at ${WEB_UI_DIST}, skipping bundle"
+fi
+
 cp "${ROOT_DIR}/packaging/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 printf 'APPL????' > "${CONTENTS_DIR}/PkgInfo"
 

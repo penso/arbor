@@ -25,7 +25,7 @@ use {
         Algorithm as DiffAlgorithm, Diff as BlobDiff, InternedInput as BlobInternedInput,
     },
     gpui::{
-        Action, App, Application, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
+        App, Application, Bounds, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
         ElementInputHandler, EntityInputHandler, FocusHandle, FontFallbacks, FontFeatures,
         FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent, Keystroke, Menu, MenuItem,
         MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels,
@@ -159,31 +159,6 @@ actions!(arbor, [
     RefreshChanges,
     OpenAddRepository,
     OpenCreateWorktree,
-    UseOneDarkTheme,
-    UseAyuDarkTheme,
-    UseGruvboxTheme,
-    UseDraculaTheme,
-    UseSolarizedLightTheme,
-    UseEverforestTheme,
-    UseCatppuccinTheme,
-    UseCatppuccinLatteTheme,
-    UseEtherealTheme,
-    UseFlexokiLightTheme,
-    UseHackermanTheme,
-    UseKanagawaTheme,
-    UseMatteBlackTheme,
-    UseMiasmaTheme,
-    UseNordTheme,
-    UseOsakaJadeTheme,
-    UseRistrettoTheme,
-    UseRosePineTheme,
-    UseTokyoNightTheme,
-    UseVantablackTheme,
-    UseWhiteTheme,
-    UseRetroboxClassicTheme,
-    UseTokyonightDayTheme,
-    UseTokyonightClassicTheme,
-    UseZellnerTheme,
     UseEmbeddedBackend,
     UseAlacrittyBackend,
     UseGhosttyBackend,
@@ -191,7 +166,8 @@ actions!(arbor, [
     NavigateWorktreeBack,
     NavigateWorktreeForward,
     CollapseAllRepositories,
-    ViewLogs
+    ViewLogs,
+    OpenThemePicker
 ]);
 
 #[derive(Debug, Clone)]
@@ -864,6 +840,7 @@ struct ArborWindow {
     repo_presets: Vec<RepoPreset>,
     manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
     show_about: bool,
+    show_theme_picker: bool,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
@@ -1063,6 +1040,7 @@ impl ArborWindow {
                     repo_presets: Vec::new(),
                     manage_repo_presets_modal: None,
                     show_about: false,
+                    show_theme_picker: false,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -1101,7 +1079,7 @@ impl ArborWindow {
                     agent_ws_connected: false,
                     ime_marked_text: None,
                 };
-                app.sync_theme_menu_selection(cx);
+
                 return app;
             },
         };
@@ -1312,6 +1290,7 @@ impl ArborWindow {
             repo_presets: Vec::new(),
             manage_repo_presets_modal: None,
             show_about: false,
+            show_theme_picker: false,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
@@ -1351,7 +1330,6 @@ impl ArborWindow {
             ime_marked_text: None,
         };
 
-        app.sync_theme_menu_selection(cx);
         app.refresh_worktrees(cx);
         app.refresh_repo_config_if_changed(cx);
         app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
@@ -1488,14 +1466,12 @@ impl ArborWindow {
         let loaded = app_config::load_or_create_config();
         let mut notices = loaded.notices;
         let mut changed = false;
-        let mut theme_changed = false;
 
         match parse_theme_kind(loaded.config.theme.as_deref()) {
             Ok(theme_kind) => {
                 if self.theme_kind != theme_kind {
                     self.theme_kind = theme_kind;
                     changed = true;
-                    theme_changed = true;
                 }
             },
             Err(error) => notices.push(error),
@@ -1583,10 +1559,6 @@ impl ArborWindow {
         }
 
         self.notifications_enabled = loaded.config.notifications.unwrap_or(true);
-
-        if theme_changed {
-            self.sync_theme_menu_selection(cx);
-        }
 
         if !notices.is_empty() {
             self.notice = Some(notices.join(" | "));
@@ -4103,8 +4075,9 @@ impl ArborWindow {
         }
 
         self.theme_kind = theme_kind;
-        self.sync_theme_menu_selection(cx);
-        self.theme_toast = Some(format!("Theme switched to {}", theme_kind.label()));
+        if !self.show_theme_picker {
+            self.theme_toast = Some(format!("Theme switched to {}", theme_kind.label()));
+        }
         self.theme_toast_generation = self.theme_toast_generation.saturating_add(1);
         let generation = self.theme_toast_generation;
         cx.notify();
@@ -4122,10 +4095,6 @@ impl ArborWindow {
             });
         })
         .detach();
-    }
-
-    fn sync_theme_menu_selection(&self, cx: &mut Context<Self>) {
-        cx.set_menus(build_app_menus(self.theme_kind));
     }
 
     fn open_create_modal(
@@ -5191,6 +5160,15 @@ impl ArborWindow {
             return;
         }
 
+        if self.show_theme_picker {
+            if event.keystroke.key.as_str() == "escape" {
+                self.show_theme_picker = false;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+
         if self.github_auth_modal.is_some() {
             if event.keystroke.modifiers.platform {
                 return;
@@ -5580,226 +5558,6 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn action_use_one_dark_theme(
-        &mut self,
-        _: &UseOneDarkTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::One, cx);
-    }
-
-    fn action_use_ayu_dark_theme(
-        &mut self,
-        _: &UseAyuDarkTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Ayu, cx);
-    }
-
-    fn action_use_gruvbox_theme(
-        &mut self,
-        _: &UseGruvboxTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Gruvbox, cx);
-    }
-
-    fn action_use_dracula_theme(
-        &mut self,
-        _: &UseDraculaTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Dracula, cx);
-    }
-
-    fn action_use_solarized_light_theme(
-        &mut self,
-        _: &UseSolarizedLightTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::SolarizedLight, cx);
-    }
-
-    fn action_use_everforest_theme(
-        &mut self,
-        _: &UseEverforestTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Everforest, cx);
-    }
-
-    fn action_use_catppuccin_theme(
-        &mut self,
-        _: &UseCatppuccinTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Catppuccin, cx);
-    }
-
-    fn action_use_catppuccin_latte_theme(
-        &mut self,
-        _: &UseCatppuccinLatteTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::CatppuccinLatte, cx);
-    }
-
-    fn action_use_ethereal_theme(
-        &mut self,
-        _: &UseEtherealTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Ethereal, cx);
-    }
-
-    fn action_use_flexoki_light_theme(
-        &mut self,
-        _: &UseFlexokiLightTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::FlexokiLight, cx);
-    }
-
-    fn action_use_hackerman_theme(
-        &mut self,
-        _: &UseHackermanTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Hackerman, cx);
-    }
-
-    fn action_use_kanagawa_theme(
-        &mut self,
-        _: &UseKanagawaTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Kanagawa, cx);
-    }
-
-    fn action_use_matte_black_theme(
-        &mut self,
-        _: &UseMatteBlackTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::MatteBlack, cx);
-    }
-
-    fn action_use_miasma_theme(
-        &mut self,
-        _: &UseMiasmaTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Miasma, cx);
-    }
-
-    fn action_use_nord_theme(&mut self, _: &UseNordTheme, _: &mut Window, cx: &mut Context<Self>) {
-        self.switch_theme(ThemeKind::Nord, cx);
-    }
-
-    fn action_use_osaka_jade_theme(
-        &mut self,
-        _: &UseOsakaJadeTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::OsakaJade, cx);
-    }
-
-    fn action_use_ristretto_theme(
-        &mut self,
-        _: &UseRistrettoTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Ristretto, cx);
-    }
-
-    fn action_use_rose_pine_theme(
-        &mut self,
-        _: &UseRosePineTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::RosePine, cx);
-    }
-
-    fn action_use_tokyo_night_theme(
-        &mut self,
-        _: &UseTokyoNightTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::TokyoNight, cx);
-    }
-
-    fn action_use_vantablack_theme(
-        &mut self,
-        _: &UseVantablackTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Vantablack, cx);
-    }
-
-    fn action_use_white_theme(
-        &mut self,
-        _: &UseWhiteTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::White, cx);
-    }
-
-    fn action_use_retrobox_classic_theme(
-        &mut self,
-        _: &UseRetroboxClassicTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::RetroboxClassic, cx);
-    }
-
-    fn action_use_tokyonight_day_theme(
-        &mut self,
-        _: &UseTokyonightDayTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::TokyoNightDay, cx);
-    }
-
-    fn action_use_tokyonight_classic_theme(
-        &mut self,
-        _: &UseTokyonightClassicTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::TokyoNightClassic, cx);
-    }
-
-    fn action_use_zellner_theme(
-        &mut self,
-        _: &UseZellnerTheme,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_theme(ThemeKind::Zellner, cx);
-    }
-
     fn action_use_embedded_backend(
         &mut self,
         _: &UseEmbeddedBackend,
@@ -5934,6 +5692,16 @@ impl ArborWindow {
 
     fn action_show_about(&mut self, _: &ShowAbout, _: &mut Window, cx: &mut Context<Self>) {
         self.show_about = true;
+        cx.notify();
+    }
+
+    fn action_open_theme_picker(
+        &mut self,
+        _: &OpenThemePicker,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_theme_picker = true;
         cx.notify();
     }
 
@@ -7467,6 +7235,47 @@ impl ArborWindow {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .child({
+                        let daemon_connected = self.terminal_daemon.is_some();
+                        let web_ui_url = self.daemon_base_url.clone();
+                        div()
+                            .id("web-ui-link")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(if daemon_connected {
+                                theme.text_muted
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .when(daemon_connected, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(theme.panel_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.open_external_url(&web_ui_url, cx);
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(if daemon_connected {
+                                        0x68c38d
+                                    } else {
+                                        theme.text_disabled
+                                    }))
+                                    .child("\u{f0ac}"),
+                            )
+                            .child(div().text_size(px(11.)).child("Web UI"))
+                    })
                     .child(
                         div()
                             .id("github-auth")
@@ -11841,6 +11650,141 @@ impl ArborWindow {
             )
     }
 
+    fn render_theme_picker_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        if !self.show_theme_picker {
+            return div();
+        }
+
+        let theme = self.theme();
+        let current_theme = self.theme_kind;
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.show_theme_picker = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.show_theme_picker = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            // Semi-transparent backdrop (separate child so opacity doesn't affect modal)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(rgb(0x000000))
+                    .opacity(0.15),
+            )
+            .child(
+                div()
+                    .w(px(820.))
+                    .max_h(px(600.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // Header
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child("Choose Theme"),
+                    )
+                    // Theme grid
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(ThemeKind::ALL.iter().enumerate().map(
+                                |(idx, &kind)| {
+                                let palette = kind.palette();
+                                let is_active = kind == current_theme;
+                                let border_color = if is_active {
+                                    theme.accent
+                                } else {
+                                    theme.border
+                                };
+                                div()
+                                    .id(("theme-card", idx))
+                                    .w(px(148.))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(border_color))
+                                    .when(is_active, |d| d.border_2())
+                                    .bg(rgb(theme.panel_bg))
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.85))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.switch_theme(kind, cx);
+                                    }))
+                                    // Color swatch strip
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .h(px(36.))
+                                            .child(
+                                                div().flex_1().bg(rgb(palette.app_bg)),
+                                            )
+                                            .child(
+                                                div().flex_1().bg(rgb(palette.sidebar_bg)),
+                                            )
+                                            .child(
+                                                div().flex_1().bg(rgb(palette.accent)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .bg(rgb(palette.text_primary)),
+                                            )
+                                            .child(
+                                                div().flex_1().bg(rgb(palette.border)),
+                                            ),
+                                    )
+                                    // Theme name
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py(px(6.))
+                                            .text_xs()
+                                            .text_color(rgb(theme.text_primary))
+                                            .when(is_active, |d| {
+                                                d.font_weight(FontWeight::SEMIBOLD)
+                                            })
+                                            .child(kind.label()),
+                                    )
+                            },
+                            )),
+                    ),
+            )
+    }
+
     fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_repo_presets_modal.clone() else {
             return div();
@@ -12527,31 +12471,6 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_refresh_changes))
             .on_action(cx.listener(Self::action_open_add_repository))
             .on_action(cx.listener(Self::action_open_create_worktree))
-            .on_action(cx.listener(Self::action_use_one_dark_theme))
-            .on_action(cx.listener(Self::action_use_ayu_dark_theme))
-            .on_action(cx.listener(Self::action_use_gruvbox_theme))
-            .on_action(cx.listener(Self::action_use_dracula_theme))
-            .on_action(cx.listener(Self::action_use_solarized_light_theme))
-            .on_action(cx.listener(Self::action_use_everforest_theme))
-            .on_action(cx.listener(Self::action_use_catppuccin_theme))
-            .on_action(cx.listener(Self::action_use_catppuccin_latte_theme))
-            .on_action(cx.listener(Self::action_use_ethereal_theme))
-            .on_action(cx.listener(Self::action_use_flexoki_light_theme))
-            .on_action(cx.listener(Self::action_use_hackerman_theme))
-            .on_action(cx.listener(Self::action_use_kanagawa_theme))
-            .on_action(cx.listener(Self::action_use_matte_black_theme))
-            .on_action(cx.listener(Self::action_use_miasma_theme))
-            .on_action(cx.listener(Self::action_use_nord_theme))
-            .on_action(cx.listener(Self::action_use_osaka_jade_theme))
-            .on_action(cx.listener(Self::action_use_ristretto_theme))
-            .on_action(cx.listener(Self::action_use_rose_pine_theme))
-            .on_action(cx.listener(Self::action_use_tokyo_night_theme))
-            .on_action(cx.listener(Self::action_use_vantablack_theme))
-            .on_action(cx.listener(Self::action_use_white_theme))
-            .on_action(cx.listener(Self::action_use_retrobox_classic_theme))
-            .on_action(cx.listener(Self::action_use_tokyonight_day_theme))
-            .on_action(cx.listener(Self::action_use_tokyonight_classic_theme))
-            .on_action(cx.listener(Self::action_use_zellner_theme))
             .on_action(cx.listener(Self::action_use_embedded_backend))
             .on_action(cx.listener(Self::action_use_alacritty_backend))
             .on_action(cx.listener(Self::action_use_ghostty_backend))
@@ -12561,6 +12480,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_collapse_all_repositories))
             .on_action(cx.listener(Self::action_view_logs))
             .on_action(cx.listener(Self::action_show_about))
+            .on_action(cx.listener(Self::action_open_theme_picker))
             .on_action(cx.listener(Self::action_request_quit))
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
@@ -12603,6 +12523,7 @@ impl Render for ArborWindow {
             .child(self.render_manage_presets_modal(cx))
             .child(self.render_manage_repo_presets_modal(cx))
             .child(self.render_about_modal(cx))
+            .child(self.render_theme_picker_modal(cx))
             .child(div().when_some(self.theme_toast.clone(), |this, toast| {
                 this.child(
                     div()
@@ -16793,10 +16714,10 @@ fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-]", NavigateWorktreeForward, None),
         KeyBinding::new("cmd-shift-l", ViewLogs, None),
     ]);
-    cx.set_menus(build_app_menus(ThemeKind::One));
+    cx.set_menus(build_app_menus());
 }
 
-fn build_app_menus(selected_theme: ThemeKind) -> Vec<Menu> {
+fn build_app_menus() -> Vec<Menu> {
     vec![
         Menu {
             name: "Arbor".into(),
@@ -16834,14 +16755,12 @@ fn build_app_menus(selected_theme: ThemeKind) -> Vec<Menu> {
             ],
         },
         Menu {
-            name: "Theme".into(),
-            items: theme_menu_items(selected_theme),
-        },
-        Menu {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleLeftPane),
                 MenuItem::action("Collapse All Repositories", CollapseAllRepositories),
+                MenuItem::separator(),
+                MenuItem::action("Theme Picker...", OpenThemePicker),
                 MenuItem::separator(),
                 MenuItem::action("View Logs", ViewLogs),
             ],
@@ -16861,136 +16780,6 @@ fn build_app_menus(selected_theme: ThemeKind) -> Vec<Menu> {
             ],
         },
     ]
-}
-
-fn theme_menu_items(selected_theme: ThemeKind) -> Vec<MenuItem> {
-    vec![
-        theme_menu_item(
-            "One Dark",
-            selected_theme == ThemeKind::One,
-            UseOneDarkTheme,
-        ),
-        theme_menu_item(
-            "Ayu Dark",
-            selected_theme == ThemeKind::Ayu,
-            UseAyuDarkTheme,
-        ),
-        theme_menu_item(
-            "Gruvbox Dark",
-            selected_theme == ThemeKind::Gruvbox,
-            UseGruvboxTheme,
-        ),
-        theme_menu_item(
-            "Dracula",
-            selected_theme == ThemeKind::Dracula,
-            UseDraculaTheme,
-        ),
-        theme_menu_item(
-            "Solarized Light",
-            selected_theme == ThemeKind::SolarizedLight,
-            UseSolarizedLightTheme,
-        ),
-        theme_menu_item(
-            "Everforest",
-            selected_theme == ThemeKind::Everforest,
-            UseEverforestTheme,
-        ),
-        theme_menu_item(
-            "Catppuccin",
-            selected_theme == ThemeKind::Catppuccin,
-            UseCatppuccinTheme,
-        ),
-        theme_menu_item(
-            "Catppuccin Latte",
-            selected_theme == ThemeKind::CatppuccinLatte,
-            UseCatppuccinLatteTheme,
-        ),
-        theme_menu_item(
-            "Ethereal",
-            selected_theme == ThemeKind::Ethereal,
-            UseEtherealTheme,
-        ),
-        theme_menu_item(
-            "Flexoki Light",
-            selected_theme == ThemeKind::FlexokiLight,
-            UseFlexokiLightTheme,
-        ),
-        theme_menu_item(
-            "Hackerman",
-            selected_theme == ThemeKind::Hackerman,
-            UseHackermanTheme,
-        ),
-        theme_menu_item(
-            "Kanagawa",
-            selected_theme == ThemeKind::Kanagawa,
-            UseKanagawaTheme,
-        ),
-        theme_menu_item(
-            "Matte Black",
-            selected_theme == ThemeKind::MatteBlack,
-            UseMatteBlackTheme,
-        ),
-        theme_menu_item(
-            "Miasma",
-            selected_theme == ThemeKind::Miasma,
-            UseMiasmaTheme,
-        ),
-        theme_menu_item("Nord", selected_theme == ThemeKind::Nord, UseNordTheme),
-        theme_menu_item(
-            "Osaka Jade",
-            selected_theme == ThemeKind::OsakaJade,
-            UseOsakaJadeTheme,
-        ),
-        theme_menu_item(
-            "Ristretto",
-            selected_theme == ThemeKind::Ristretto,
-            UseRistrettoTheme,
-        ),
-        theme_menu_item(
-            "Rose Pine",
-            selected_theme == ThemeKind::RosePine,
-            UseRosePineTheme,
-        ),
-        theme_menu_item(
-            "Tokyo Night",
-            selected_theme == ThemeKind::TokyoNight,
-            UseTokyoNightTheme,
-        ),
-        theme_menu_item(
-            "Vantablack",
-            selected_theme == ThemeKind::Vantablack,
-            UseVantablackTheme,
-        ),
-        theme_menu_item("White", selected_theme == ThemeKind::White, UseWhiteTheme),
-        theme_menu_item(
-            "Retrobox Classic",
-            selected_theme == ThemeKind::RetroboxClassic,
-            UseRetroboxClassicTheme,
-        ),
-        theme_menu_item(
-            "TokyoNight Day",
-            selected_theme == ThemeKind::TokyoNightDay,
-            UseTokyonightDayTheme,
-        ),
-        theme_menu_item(
-            "TokyoNight Classic",
-            selected_theme == ThemeKind::TokyoNightClassic,
-            UseTokyonightClassicTheme,
-        ),
-        theme_menu_item(
-            "Zellner",
-            selected_theme == ThemeKind::Zellner,
-            UseZellnerTheme,
-        ),
-    ]
-}
-
-fn theme_menu_item(label: &str, selected: bool, action: impl Action) -> MenuItem {
-    if selected {
-        MenuItem::action(format!("{label} ✓"), action)
-    } else {
-        MenuItem::action(label.to_owned(), action)
-    }
 }
 
 fn bounds_from_window_geometry(geometry: ui_state_store::WindowGeometry) -> Option<Bounds<Pixels>> {

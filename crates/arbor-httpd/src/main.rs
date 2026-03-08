@@ -757,7 +757,14 @@ fn ensure_web_ui_assets() -> Result<(), String> {
         return Ok(());
     }
 
+    // Only attempt an automatic npm build during development, when the source
+    // directory exists. In release/packaged builds the assets should already
+    // be bundled alongside the binary.
     let app_dir = arbor_web_ui::app_dir();
+    if !app_dir.join("package.json").is_file() {
+        return Err("web-ui assets not found (packaged build without bundled assets?)".to_owned());
+    }
+
     let package_manager = detect_npm_binary()
         .ok_or_else(|| "`npm` is not installed or not in PATH; skipping web-ui build".to_owned())?;
 
