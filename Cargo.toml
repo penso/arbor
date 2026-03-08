@@ -20,7 +20,6 @@ version = "0.1.0"
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_qualifications = "deny"
-unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [workspace.lints.clippy]
 expect_used = "deny"

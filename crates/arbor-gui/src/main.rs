@@ -169,8 +169,7 @@ actions!(arbor, [
     NavigateWorktreeBack,
     NavigateWorktreeForward,
     CollapseAllRepositories,
-    ViewLogs,
-    ShowAbout
+    ViewLogs
 ]);
 
 #[derive(Debug, Clone)]
@@ -11414,7 +11413,7 @@ impl ArborWindow {
         }
 
         let theme = self.theme();
-        let version = env!("CARGO_PKG_VERSION");
+        let version = APP_VERSION;
 
         div()
             .absolute()
@@ -16170,32 +16169,7 @@ fn new_window(_: &NewWindow, cx: &mut App) {
     open_arbor_window(cx);
 }
 
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn show_about(_: &ShowAbout, _cx: &mut App) {
-    use cocoa::{
-        appkit::NSApp,
-        base::{id, nil},
-        foundation::{NSDictionary, NSString as _},
-    };
-    use objc::{msg_send, sel, sel_impl};
-
-    // SAFETY: Cocoa FFI – we send a well-known AppKit selector on the shared
-    // NSApplication to show the standard About panel with a custom version.
-    unsafe {
-        let key: id = cocoa::foundation::NSString::alloc(nil).init_str("ApplicationVersion");
-        let value: id = cocoa::foundation::NSString::alloc(nil).init_str(APP_VERSION);
-        let options: id = NSDictionary::dictionaryWithObject_forKey_(nil, value, key);
-        let app: id = NSApp();
-        let () = msg_send![app, orderFrontStandardAboutPanelWithOptions: options];
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn show_about(_: &ShowAbout, _cx: &mut App) {}
-
 fn install_app_menu_and_keys(cx: &mut App) {
-    cx.on_action(show_about);
     cx.on_action(new_window);
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewWindow, None),
