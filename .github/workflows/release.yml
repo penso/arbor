@@ -47,6 +47,8 @@ jobs:
         run: |
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target aarch64-apple-darwin
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target aarch64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target x86_64-apple-darwin
       - name: Package macOS app
         shell: bash
         env:
@@ -57,6 +59,10 @@ jobs:
             target/aarch64-apple-darwin/release/Arbor \
             target/x86_64-apple-darwin/release/Arbor \
             -output dist/Arbor
+          lipo -create \
+            target/aarch64-apple-darwin/release/arbor-httpd \
+            target/x86_64-apple-darwin/release/arbor-httpd \
+            -output dist/arbor-httpd
           ./scripts/ci/package-macos.sh "$TAG" "universal2-apple-darwin" "dist/Arbor" "dist"
       - name: Import signing certificate
         if: env.MACOS_CERTIFICATE != ''
@@ -91,9 +97,20 @@ jobs:
         shell: bash
         run: |
           APP_PATH="dist/Arbor.app"
+          HTTPD_BIN="${APP_PATH}/Contents/MacOS/arbor-httpd"
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
               | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "Signing with identity: $IDENTITY"
+
+          if [[ ! -f "${HTTPD_BIN}" ]]; then
+            echo "error: expected arbor-httpd in app bundle at ${HTTPD_BIN}" >&2
+            exit 1
+          fi
+
+          /usr/bin/codesign --force --timestamp --options runtime \
+              --entitlements packaging/macos/Arbor.entitlements \
+              --sign "$IDENTITY" \
+              "${HTTPD_BIN}" -v
 
           /usr/bin/codesign --force --timestamp --options runtime \
               --entitlements packaging/macos/Arbor.entitlements \
@@ -209,7 +226,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: rustup target add "$TARGET"
-      - name: Build Linux binary
+      - name: Build Linux binaries
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -220,6 +237,7 @@ jobs:
             export PKG_CONFIG_ALLOW_CROSS=1
           fi
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "$TARGET"
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target "$TARGET"
       - name: Package Linux app
         shell: bash
         env:
@@ -249,8 +267,10 @@ jobs:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
       - name: Add Rust target
         run: rustup target add x86_64-pc-windows-msvc
-      - name: Build Windows binary
-        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
+      - name: Build Windows binaries
+        run: |
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target x86_64-pc-windows-msvc
       - name: Package Windows app
         env:
           TAG: ${{ github.ref_name }}

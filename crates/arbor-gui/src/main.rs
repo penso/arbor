@@ -15232,9 +15232,11 @@ fn create_command(program: &str) -> Command {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn set_dock_icon() {
-    use cocoa::appkit::{NSApp, NSApplication, NSImage};
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString as _;
+    use cocoa::{
+        appkit::{NSApp, NSApplication, NSImage},
+        base::{id, nil},
+        foundation::NSString as _,
+    };
 
     // SAFETY: Cocoa FFI – we call well-known AppKit selectors on the shared
     // NSApplication. GPUI has already initialised the NSApplication before
