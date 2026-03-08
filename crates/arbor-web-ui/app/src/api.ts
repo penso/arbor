@@ -172,17 +172,22 @@ export async function createTerminal(
   cols: number,
   rows: number,
   title?: string,
+  command?: string,
 ): Promise<CreateTerminalResult> {
+  const body: Record<string, unknown> = {
+    cwd,
+    workspace_id: cwd,
+    cols,
+    rows,
+    title,
+  };
+  if (command !== undefined) {
+    body["command"] = command;
+  }
   const response = await fetch("/api/v1/terminals", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      cwd,
-      workspace_id: cwd,
-      cols,
-      rows,
-      title,
-    }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw new Error(`failed to create terminal (${response.status})`);

@@ -241,4 +241,35 @@ test.describe("Arbor Web UI", () => {
     const handles = page.locator(".resize-handle");
     await expect(handles).toHaveCount(2);
   });
+
+  test("mobile layout shows burger menu", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+
+    // Burger button should be visible
+    const burgerBtn = page.locator(".burger-btn");
+    await expect(burgerBtn).toBeVisible();
+
+    // Sidebar should be hidden initially
+    const sidebar = page.getByTestId("sidebar");
+    await expect(sidebar).not.toBeInViewport();
+
+    // Click burger to open sidebar
+    await burgerBtn.click();
+    await expect(sidebar).toHaveClass(/open/);
+
+    // Overlay should be visible
+    await expect(page.locator(".sidebar-overlay.visible")).toBeAttached();
+
+    // Terminal panel should still be visible
+    await expect(page.getByTestId("terminal-panel")).toBeVisible();
+
+    await page.screenshot({
+      path: "e2e/screenshots/mobile-sidebar-open.png",
+      fullPage: true,
+    });
+
+    // Click overlay to close sidebar
+    await page.locator(".sidebar-overlay").click();
+    await expect(sidebar).not.toHaveClass(/open/);
+  });
 });

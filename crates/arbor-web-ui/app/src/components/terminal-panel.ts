@@ -41,10 +41,19 @@ export function createTerminalPanel(): HTMLElement {
   // Tab bar
   const toolbar = el("div", "terminal-toolbar");
   tabsContainer = el("div", "terminal-tabs");
+
+  const presetGroup = el("div", "preset-group");
+  for (const preset of AGENT_PRESETS) {
+    const btn = el("button", "preset-btn", preset.label);
+    btn.title = `Launch ${preset.label}`;
+    btn.addEventListener("click", () => launchPreset(preset));
+    presetGroup.append(btn);
+  }
+
   const addBtn = el("button", "terminal-add-btn", "+");
   addBtn.title = "New terminal";
   addBtn.addEventListener("click", openNewTerminal);
-  toolbar.append(tabsContainer, addBtn);
+  toolbar.append(tabsContainer, presetGroup, addBtn);
 
   // Terminal container
   terminalContainer = el("div", "terminal-container");
@@ -66,7 +75,9 @@ function renderTabs(): void {
 
   const sessions = filteredSessions();
   if (sessions.length === 0) {
-    tabsContainer.append(el("span", "terminal-tabs-empty", "No terminals"));
+    tabsContainer.append(
+      el("span", "terminal-tabs-empty", state.loading ? "Loading\u2026" : "No terminals"),
+    );
     return;
   }
 
@@ -289,6 +300,40 @@ function teardownActiveInstance(): void {
 
   if (terminalContainer !== null) {
     terminalContainer.replaceChildren();
+  }
+}
+
+type AgentPreset = { label: string; command: string };
+
+const AGENT_PRESETS: AgentPreset[] = [
+  { label: "Claude", command: "claude" },
+  { label: "Codex", command: "codex" },
+  { label: "OpenCode", command: "opencode" },
+  { label: "Copilot", command: "copilot" },
+];
+
+async function launchPreset(preset: AgentPreset): Promise<void> {
+  const worktreePath = state.selectedWorktreePath;
+  if (worktreePath === null) {
+    setStatus("Select a worktree first");
+    return;
+  }
+
+  try {
+    const result = await apiCreateTerminal(
+      worktreePath,
+      120,
+      35,
+      preset.label.toLowerCase(),
+      preset.command,
+    );
+    setActiveSession(result.sessionId);
+    await refresh();
+    activateSession(result.sessionId);
+  } catch (error) {
+    setStatus(
+      `Failed: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
   }
 }
 

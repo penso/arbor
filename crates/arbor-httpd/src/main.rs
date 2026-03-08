@@ -52,7 +52,17 @@ struct PrCacheEntry {
     fetched_at: std::time::Instant,
 }
 
-const PR_CACHE_TTL_SECS: u64 = 120;
+const PR_CACHE_TTL_SECS: u64 = 300;
+
+/// Cached repository metadata (GitHub slug & avatar).
+#[derive(Clone)]
+struct RepoCacheEntry {
+    github_repo_slug: Option<String>,
+    avatar_url: Option<String>,
+    fetched_at: std::time::Instant,
+}
+
+const REPO_CACHE_TTL_SECS: u64 = 600;
 
 #[derive(Clone)]
 struct AppState {
@@ -62,6 +72,7 @@ struct AppState {
     agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
     agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
     pr_cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
+    repo_cache: Arc<Mutex<HashMap<String, RepoCacheEntry>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
         pr_cache: Arc::new(Mutex::new(HashMap::new())),
+        repo_cache: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Spawn background task to monitor process lifecycle
@@ -346,11 +358,11 @@ async fn list_repositories(State(state): State<AppState>) -> ApiResult<Vec<Repos
         .map_err(internal_error)?;
     let resolved = repository_store::resolve_repository_roots(roots);
 
+    let mut cache = state.repo_cache.lock().await;
     let repositories = resolved
         .into_iter()
         .map(|root| {
-            let slug = github_repo_slug_for_path(&root);
-            let avatar_url = slug.as_deref().and_then(github_avatar_url);
+            let (slug, avatar_url) = github_repo_slug_cached(&mut cache, &root);
             RepositoryDto {
                 label: repository_display_name(&root),
                 root: root.display().to_string(),
@@ -372,51 +384,94 @@ async fn list_worktrees(
     let resolved = repository_store::resolve_repository_roots(roots);
     let filter = query.repo_root.as_deref().map(PathBuf::from);
 
-    let mut worktrees = Vec::new();
-
-    for repository_root in &resolved {
-        if let Some(filter_root) = filter.as_ref()
-            && !paths_equivalent(repository_root, filter_root)
-        {
-            continue;
-        }
-
-        let repo_slug = github_repo_slug_for_path(repository_root);
-
-        match worktree::list(repository_root) {
-            Ok(entries) => {
-                for entry in entries {
-                    let last_activity_unix_ms = worktree::last_git_activity_ms(&entry.path);
-                    let diff_summary = changes::diff_line_summary(&entry.path).ok();
-                    let branch_name = entry
-                        .branch
-                        .as_deref()
-                        .map(short_branch)
-                        .unwrap_or_else(|| "-".to_owned());
-                    let is_primary = entry.path.as_path() == repository_root.as_path();
-                    let (pr_number, pr_url) =
-                        lookup_pr_for_branch(repo_slug.as_deref(), &branch_name, is_primary).await;
-                    worktrees.push(WorktreeDto {
-                        repo_root: repository_root.display().to_string(),
-                        path: entry.path.display().to_string(),
-                        branch: branch_name,
-                        is_primary_checkout: is_primary,
-                        last_activity_unix_ms,
-                        diff_additions: diff_summary.as_ref().map(|d| d.additions),
-                        diff_deletions: diff_summary.as_ref().map(|d| d.deletions),
-                        pr_number,
-                        pr_url,
-                    });
-                }
-            },
-            Err(error) => {
-                return Err(internal_error(format!(
-                    "failed to list worktrees for `{}`: {error}",
-                    repository_root.display()
-                )));
-            },
-        }
+    // Phase 1: collect all worktree data (sync, fast)
+    struct WorktreeData {
+        repo_root: String,
+        path: String,
+        branch: String,
+        is_primary: bool,
+        last_activity_unix_ms: Option<u64>,
+        diff_additions: Option<usize>,
+        diff_deletions: Option<usize>,
+        repo_slug: Option<String>,
     }
+
+    let mut entries_data: Vec<WorktreeData> = Vec::new();
+
+    {
+        let mut repo_cache = state.repo_cache.lock().await;
+        for repository_root in &resolved {
+            if let Some(filter_root) = filter.as_ref()
+                && !paths_equivalent(repository_root, filter_root)
+            {
+                continue;
+            }
+
+            let (repo_slug, _) = github_repo_slug_cached(&mut repo_cache, repository_root);
+
+            match worktree::list(repository_root) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let last_activity_unix_ms = worktree::last_git_activity_ms(&entry.path);
+                        let diff_summary = changes::diff_line_summary(&entry.path).ok();
+                        let branch_name = entry
+                            .branch
+                            .as_deref()
+                            .map(short_branch)
+                            .unwrap_or_else(|| "-".to_owned());
+                        let is_primary = entry.path.as_path() == repository_root.as_path();
+                        entries_data.push(WorktreeData {
+                            repo_root: repository_root.display().to_string(),
+                            path: entry.path.display().to_string(),
+                            branch: branch_name,
+                            is_primary,
+                            last_activity_unix_ms,
+                            diff_additions: diff_summary.as_ref().map(|d| d.additions),
+                            diff_deletions: diff_summary.as_ref().map(|d| d.deletions),
+                            repo_slug: repo_slug.clone(),
+                        });
+                    }
+                },
+                Err(error) => {
+                    return Err(internal_error(format!(
+                        "failed to list worktrees for `{}`: {error}",
+                        repository_root.display()
+                    )));
+                },
+            }
+        }
+    } // drop repo_cache lock before async PR lookups
+
+    // Phase 2: look up PRs concurrently with caching
+    let pr_futures: Vec<_> = entries_data
+        .iter()
+        .map(|wd| {
+            let cache = state.pr_cache.clone();
+            let slug = wd.repo_slug.clone();
+            let branch = wd.branch.clone();
+            let is_primary = wd.is_primary;
+            async move { lookup_pr_cached(cache, slug.as_deref(), &branch, is_primary).await }
+        })
+        .collect();
+
+    let pr_results = futures_util::future::join_all(pr_futures).await;
+
+    // Phase 3: assemble DTOs
+    let mut worktrees: Vec<WorktreeDto> = entries_data
+        .into_iter()
+        .zip(pr_results)
+        .map(|(wd, (pr_number, pr_url))| WorktreeDto {
+            repo_root: wd.repo_root,
+            path: wd.path,
+            branch: wd.branch,
+            is_primary_checkout: wd.is_primary,
+            last_activity_unix_ms: wd.last_activity_unix_ms,
+            diff_additions: wd.diff_additions,
+            diff_deletions: wd.diff_deletions,
+            pr_number,
+            pr_url,
+        })
+        .collect();
 
     worktrees.sort_by(|left, right| {
         left.repo_root
@@ -1000,6 +1055,26 @@ fn github_repo_slug_for_path(repo_root: &Path) -> Option<String> {
     github_repo_slug_from_remote_url(url.trim())
 }
 
+fn github_repo_slug_cached(
+    cache: &mut HashMap<String, RepoCacheEntry>,
+    repo_root: &Path,
+) -> (Option<String>, Option<String>) {
+    let key = repo_root.display().to_string();
+    if let Some(entry) = cache.get(&key)
+        && entry.fetched_at.elapsed().as_secs() < REPO_CACHE_TTL_SECS
+    {
+        return (entry.github_repo_slug.clone(), entry.avatar_url.clone());
+    }
+    let slug = github_repo_slug_for_path(repo_root);
+    let avatar_url = slug.as_deref().and_then(github_avatar_url);
+    cache.insert(key, RepoCacheEntry {
+        github_repo_slug: slug.clone(),
+        avatar_url: avatar_url.clone(),
+        fetched_at: std::time::Instant::now(),
+    });
+    (slug, avatar_url)
+}
+
 fn github_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
     let path = remote_url
         .strip_prefix("git@github.com:")
@@ -1021,6 +1096,45 @@ fn github_avatar_url(repo_slug: &str) -> Option<String> {
     Some(format!(
         "https://avatars.githubusercontent.com/{owner}?size=96"
     ))
+}
+
+/// Cached wrapper around `lookup_pr_for_branch`.
+async fn lookup_pr_cached(
+    cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
+    repo_slug: Option<&str>,
+    branch: &str,
+    is_primary: bool,
+) -> (Option<u64>, Option<String>) {
+    let slug = match repo_slug {
+        Some(s) => s,
+        None => return (None, None),
+    };
+
+    let cache_key = format!("{slug}:{branch}");
+
+    // Check cache
+    {
+        let cache_map = cache.lock().await;
+        if let Some(entry) = cache_map.get(&cache_key)
+            && entry.fetched_at.elapsed().as_secs() < PR_CACHE_TTL_SECS
+        {
+            return (entry.pr_number, entry.pr_url.clone());
+        }
+    }
+
+    let (pr_number, pr_url) = lookup_pr_for_branch(repo_slug, branch, is_primary).await;
+
+    // Store in cache
+    {
+        let mut cache_map = cache.lock().await;
+        cache_map.insert(cache_key, PrCacheEntry {
+            pr_number,
+            pr_url: pr_url.clone(),
+            fetched_at: std::time::Instant::now(),
+        });
+    }
+
+    (pr_number, pr_url)
 }
 
 /// Try to find PR number for a branch using the GitHub API via octocrab.

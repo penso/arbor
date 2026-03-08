@@ -53,7 +53,11 @@ export function updateState(partial: Partial<AppState>): void {
   notify();
 }
 
+let refreshInFlight = false;
+
 export async function refresh(): Promise<void> {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   updateState({ loading: true, error: null });
 
   try {
@@ -114,6 +118,8 @@ export async function refresh(): Promise<void> {
       loading: false,
       error: error instanceof Error ? error.message : "unknown request failure",
     });
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -131,7 +137,19 @@ export function refreshChangedFiles(worktreePath: string): void {
 
 export function selectWorktree(path: string | null): void {
   const newPath = state.selectedWorktreePath === path ? null : path;
-  updateState({ selectedWorktreePath: newPath, changedFiles: [] });
+
+  // Auto-select a terminal for this worktree
+  let activeSessionId = state.activeSessionId;
+  if (newPath !== null) {
+    const wtSessions = state.sessions.filter(
+      (s) => s.workspace_id === newPath || s.cwd === newPath,
+    );
+    const running = wtSessions.find((s) => s.state === "running");
+    const first = running ?? wtSessions[0];
+    activeSessionId = first?.session_id ?? null;
+  }
+
+  updateState({ selectedWorktreePath: newPath, changedFiles: [], activeSessionId });
   if (newPath !== null) {
     refreshChangedFiles(newPath);
   }
@@ -142,5 +160,10 @@ export function setActiveSession(sessionId: string | null): void {
 }
 
 export function filteredSessions(): TerminalSession[] {
-  return state.sessions;
+  if (state.selectedWorktreePath === null) {
+    return state.sessions;
+  }
+  return state.sessions.filter(
+    (s) => s.workspace_id === state.selectedWorktreePath || s.cwd === state.selectedWorktreePath,
+  );
 }

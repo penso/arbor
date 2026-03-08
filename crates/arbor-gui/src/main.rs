@@ -7570,7 +7570,7 @@ impl ArborWindow {
                                     }))
                                     .child("\u{f0ac}"),
                             )
-                            .child(div().text_size(px(11.)).child("Web UI"))
+                            .child(div().text_size(px(11.)).child("Remote Control"))
                     })
                     .child(
                         div()
@@ -8646,8 +8646,8 @@ impl ArborWindow {
                                                                             .child("..."),
                                                                     );
                                                                 } else if show_diff_summary {
-                                                                    right = right
-                                                                        .child(
+                                                                    if summary.additions > 0 {
+                                                                        right = right.child(
                                                                             div()
                                                                                 .text_xs()
                                                                                 .text_color(rgb(
@@ -8658,8 +8658,10 @@ impl ArborWindow {
                                                                                     summary
                                                                                         .additions
                                                                                 )),
-                                                                        )
-                                                                        .child(
+                                                                        );
+                                                                    }
+                                                                    if summary.deletions > 0 {
+                                                                        right = right.child(
                                                                             div()
                                                                                 .text_xs()
                                                                                 .text_color(rgb(
@@ -8671,6 +8673,7 @@ impl ArborWindow {
                                                                                         .deletions
                                                                                 )),
                                                                         );
+                                                                    }
                                                                 }
 
                                                                 if let Some(activity_ms) = worktree.last_activity_unix_ms {
@@ -9937,14 +9940,16 @@ impl ArborWindow {
                                     .items_center()
                                     .justify_end()
                                     .gap_1()
-                                    .when(show_line_stats, |this| {
+                                    .when(change.additions > 0, |this| {
                                         this.child(
                                             div()
                                                 .text_xs()
                                                 .text_color(rgb(0x72d69c))
                                                 .child(format!("+{}", change.additions)),
                                         )
-                                        .child(
+                                    })
+                                    .when(change.deletions > 0, |this| {
+                                        this.child(
                                             div()
                                                 .text_xs()
                                                 .text_color(rgb(0xeb6f92))

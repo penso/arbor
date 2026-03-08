@@ -1,0 +1,173 @@
+/* ── Mobile top bar ── */
+
+.mobile-bar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.burger-btn,
+.changes-toggle-btn {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+
+.burger-btn:hover,
+.changes-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.mobile-title {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+
+/* ── Overlay backdrop ── */
+
+.sidebar-overlay {
+  display: none;
+}
+
+/* ── Mobile breakpoint ── */
+
+@media (max-width: 768px) {
+  .mobile-bar {
+    display: flex;
+  }
+
+  .main-layout {
+    position: relative;
+  }
+
+  /* Sidebar: off-screen drawer */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 100;
+    width: 280px;
+    min-width: 0;
+    max-width: 85vw;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: none;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Overlay */
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+
+  .sidebar-overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Hide resize handles on mobile */
+  .resize-handle {
+    display: none;
+  }
+
+  /* Changes panel: slide up from bottom */
+  .changes-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    z-index: 90;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    height: 50vh;
+    max-height: 60vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 12px 12px 0 0;
+    transform: translateY(100%);
+    transition: transform 0.25s ease;
+  }
+
+  .changes-panel.open {
+    transform: translateY(0);
+  }
+
+  /* Terminal takes full width */
+  .terminal-panel {
+    flex: 1;
+    width: 100%;
+  }
+
+  /* Hide preset buttons on mobile — show only + btn */
+  .preset-group {
+    display: none;
+  }
+
+  /* Terminal tabs: horizontal scroll */
+  .terminal-tabs {
+    gap: 1px;
+  }
+
+  .terminal-tab {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  /* Status bar: compact */
+  .status-bar {
+    padding: 0 8px;
+  }
+
+  .status-worktree {
+    max-width: 150px;
+  }
+}
+
+/* ── Very small screens ── */
+
+@media (max-width: 480px) {
+  .terminal-tab-label {
+    max-width: 60px;
+  }
+
+  .terminal-tab {
+    padding: 4px 6px;
+    gap: 4px;
+  }
+
+  .sidebar {
+    width: 85vw;
+  }
+}
