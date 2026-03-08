@@ -1,5 +1,4 @@
 use {
-    crate::terminal_daemon::LocalTerminalDaemon,
     arbor_core::{
         daemon::{
             CreateOrAttachRequest, KillRequest, TerminalDaemon, TerminalSessionState, default_shell,
@@ -134,11 +133,11 @@ impl ProcessManager {
     }
 
     /// Start a single process by name. Creates a terminal session for it.
-    pub fn start_process(
-        &mut self,
-        name: &str,
-        daemon: &mut LocalTerminalDaemon,
-    ) -> Result<ProcessInfo, String> {
+    pub fn start_process<D>(&mut self, name: &str, daemon: &mut D) -> Result<ProcessInfo, String>
+    where
+        D: TerminalDaemon,
+        D::Error: ToString,
+    {
         let process = self
             .processes
             .get_mut(name)
@@ -191,11 +190,11 @@ impl ProcessManager {
     }
 
     /// Stop a single process by name.
-    pub fn stop_process(
-        &mut self,
-        name: &str,
-        daemon: &mut LocalTerminalDaemon,
-    ) -> Result<ProcessInfo, String> {
+    pub fn stop_process<D>(&mut self, name: &str, daemon: &mut D) -> Result<ProcessInfo, String>
+    where
+        D: TerminalDaemon,
+        D::Error: ToString,
+    {
         let process = self
             .processes
             .get_mut(name)
@@ -220,20 +219,21 @@ impl ProcessManager {
     }
 
     /// Restart a single process by name.
-    pub fn restart_process(
-        &mut self,
-        name: &str,
-        daemon: &mut LocalTerminalDaemon,
-    ) -> Result<ProcessInfo, String> {
+    pub fn restart_process<D>(&mut self, name: &str, daemon: &mut D) -> Result<ProcessInfo, String>
+    where
+        D: TerminalDaemon,
+        D::Error: ToString,
+    {
         self.stop_process(name, daemon)?;
         self.start_process(name, daemon)
     }
 
     /// Start all processes that have `auto_start = true`.
-    pub fn start_all(
-        &mut self,
-        daemon: &mut LocalTerminalDaemon,
-    ) -> Vec<(String, Result<ProcessInfo, String>)> {
+    pub fn start_all<D>(&mut self, daemon: &mut D) -> Vec<(String, Result<ProcessInfo, String>)>
+    where
+        D: TerminalDaemon,
+        D::Error: ToString,
+    {
         let auto_start_names: Vec<String> = self
             .processes
             .iter()
@@ -250,10 +250,11 @@ impl ProcessManager {
     }
 
     /// Stop all running processes.
-    pub fn stop_all(
-        &mut self,
-        daemon: &mut LocalTerminalDaemon,
-    ) -> Vec<(String, Result<ProcessInfo, String>)> {
+    pub fn stop_all<D>(&mut self, daemon: &mut D) -> Vec<(String, Result<ProcessInfo, String>)>
+    where
+        D: TerminalDaemon,
+        D::Error: ToString,
+    {
         let running_names: Vec<String> = self
             .processes
             .iter()
@@ -271,10 +272,11 @@ impl ProcessManager {
 
     /// Check all running processes for exit, handle auto-restart.
     /// Returns names of processes that need to be restarted (after backoff delay).
-    pub fn check_and_update(
-        &mut self,
-        daemon: &mut LocalTerminalDaemon,
-    ) -> Vec<(String, Duration)> {
+    pub fn check_and_update<D>(&mut self, daemon: &mut D) -> Vec<(String, Duration)>
+    where
+        D: TerminalDaemon,
+        D::Error: ToString,
+    {
         let mut restart_schedule: Vec<(String, Duration)> = Vec::new();
 
         let names: Vec<String> = self.processes.keys().cloned().collect();

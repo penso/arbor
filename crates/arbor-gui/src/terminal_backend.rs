@@ -253,6 +253,17 @@ impl EmbeddedTerminal {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
+
+    pub fn close(&self) {
+        let mut killer_guard = match self.killer.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if let Some(killer) = killer_guard.as_mut() {
+            let _ = killer.kill();
+        }
+    }
 }
 
 impl Drop for EmbeddedTerminal {

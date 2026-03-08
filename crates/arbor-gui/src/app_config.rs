@@ -91,16 +91,98 @@ pub struct LoadedArborConfig {
     pub notices: Vec<String>,
 }
 
-pub fn load_or_create_config() -> LoadedArborConfig {
-    let path = default_config_path();
+pub trait AppConfigStore {
+    fn config_path(&self) -> PathBuf;
+    fn config_last_modified(&self) -> Option<SystemTime>;
+    fn load_or_create_config(&self) -> LoadedArborConfig;
+    fn append_remote_host(&self, host: &RemoteHostConfig) -> Result<(), String>;
+    fn remove_remote_host(&self, name: &str) -> Result<(), String>;
+    fn load_repo_config(&self, repo_root: &Path) -> Option<RepoConfig>;
+    fn save_repo_presets(
+        &self,
+        repo_root: &Path,
+        presets: &[RepoPresetConfig],
+    ) -> Result<(), String>;
+    fn remove_repo_preset(&self, repo_root: &Path, name: &str) -> Result<(), String>;
+    fn save_scalar_settings(&self, settings: &[(&str, Option<&str>)]) -> Result<(), String>;
+    fn save_agent_presets(&self, presets: &[AgentPresetConfig]) -> Result<(), String>;
+}
+
+pub struct FileAppConfigStore {
+    path: PathBuf,
+}
+
+impl FileAppConfigStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Default for FileAppConfigStore {
+    fn default() -> Self {
+        Self::new(default_config_path())
+    }
+}
+
+impl AppConfigStore for FileAppConfigStore {
+    fn config_path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    fn config_last_modified(&self) -> Option<SystemTime> {
+        config_last_modified(&self.path)
+    }
+
+    fn load_or_create_config(&self) -> LoadedArborConfig {
+        load_or_create_config_at(&self.path)
+    }
+
+    fn append_remote_host(&self, host: &RemoteHostConfig) -> Result<(), String> {
+        append_remote_host_at(&self.path, host)
+    }
+
+    fn remove_remote_host(&self, name: &str) -> Result<(), String> {
+        remove_remote_host_at(&self.path, name)
+    }
+
+    fn load_repo_config(&self, repo_root: &Path) -> Option<RepoConfig> {
+        load_repo_config(repo_root)
+    }
+
+    fn save_repo_presets(
+        &self,
+        repo_root: &Path,
+        presets: &[RepoPresetConfig],
+    ) -> Result<(), String> {
+        save_repo_presets(repo_root, presets)
+    }
+
+    fn remove_repo_preset(&self, repo_root: &Path, name: &str) -> Result<(), String> {
+        remove_repo_preset(repo_root, name)
+    }
+
+    fn save_scalar_settings(&self, settings: &[(&str, Option<&str>)]) -> Result<(), String> {
+        save_scalar_settings_at(&self.path, settings)
+    }
+
+    fn save_agent_presets(&self, presets: &[AgentPresetConfig]) -> Result<(), String> {
+        save_agent_presets_at(&self.path, presets)
+    }
+}
+
+pub fn default_app_config_store() -> Box<dyn AppConfigStore> {
+    Box::new(FileAppConfigStore::default())
+}
+
+fn load_or_create_config_at(path: &Path) -> LoadedArborConfig {
     let mut notices = Vec::new();
 
-    if let Err(error) = ensure_config_file_exists(&path) {
+    if let Err(error) = ensure_config_file_exists(path) {
         notices.push(error);
     }
 
     let parsed = Config::builder()
-        .add_source(File::from(path.as_path()).required(false))
+        .add_source(File::from(path).required(false))
         .build()
         .and_then(|settings| settings.try_deserialize::<ArborConfig>());
 
@@ -114,10 +196,6 @@ pub fn load_or_create_config() -> LoadedArborConfig {
             }
         },
     }
-}
-
-pub fn config_path() -> PathBuf {
-    default_config_path()
 }
 
 pub fn config_last_modified(path: &Path) -> Option<SystemTime> {
@@ -151,10 +229,9 @@ fn default_config_path() -> PathBuf {
     }
 }
 
-pub fn append_remote_host(host: &RemoteHostConfig) -> Result<(), String> {
-    let path = config_path();
+fn append_remote_host_at(path: &Path, host: &RemoteHostConfig) -> Result<(), String> {
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut doc: DocumentMut = content
         .parse()
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
@@ -184,14 +261,12 @@ pub fn append_remote_host(host: &RemoteHostConfig) -> Result<(), String> {
 
     arr.push(table);
 
-    fs::write(&path, doc.to_string())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(path, doc.to_string()).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
-pub fn remove_remote_host(name: &str) -> Result<(), String> {
-    let path = config_path();
+fn remove_remote_host_at(path: &Path, name: &str) -> Result<(), String> {
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut doc: DocumentMut = content
         .parse()
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
@@ -215,8 +290,7 @@ pub fn remove_remote_host(name: &str) -> Result<(), String> {
         }
     }
 
-    fs::write(&path, doc.to_string())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(path, doc.to_string()).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 // ── Per-repository config (arbor.toml) ───────────────────────────────
@@ -320,10 +394,9 @@ pub fn remove_repo_preset(repo_root: &Path, name: &str) -> Result<(), String> {
         .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
-pub fn save_scalar_settings(settings: &[(&str, Option<&str>)]) -> Result<(), String> {
-    let path = config_path();
+fn save_scalar_settings_at(path: &Path, settings: &[(&str, Option<&str>)]) -> Result<(), String> {
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut doc: DocumentMut = content
         .parse()
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
@@ -339,14 +412,12 @@ pub fn save_scalar_settings(settings: &[(&str, Option<&str>)]) -> Result<(), Str
         }
     }
 
-    fs::write(&path, doc.to_string())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(path, doc.to_string()).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
-pub fn save_agent_presets(presets: &[AgentPresetConfig]) -> Result<(), String> {
-    let path = config_path();
+fn save_agent_presets_at(path: &Path, presets: &[AgentPresetConfig]) -> Result<(), String> {
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut doc: DocumentMut = content
         .parse()
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
@@ -364,6 +435,5 @@ pub fn save_agent_presets(presets: &[AgentPresetConfig]) -> Result<(), String> {
         doc.insert("agent_presets", toml_edit::Item::ArrayOfTables(arr));
     }
 
-    fs::write(&path, doc.to_string())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(path, doc.to_string()).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }

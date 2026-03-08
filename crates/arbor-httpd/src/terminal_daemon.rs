@@ -1,9 +1,9 @@
 use {
     arbor_core::daemon::{
         CreateOrAttachRequest, CreateOrAttachResponse, DaemonSessionRecord, DaemonSessionStore,
-        DaemonSessionStoreError, DetachRequest, JsonDaemonSessionStore, KillRequest, ResizeRequest,
-        SignalRequest, SnapshotRequest, TerminalDaemon, TerminalSessionState, TerminalSignal,
-        TerminalSnapshot, WriteRequest,
+        DaemonSessionStoreError, DetachRequest, KillRequest, ResizeRequest, SignalRequest,
+        SnapshotRequest, TerminalDaemon, TerminalSessionState, TerminalSignal, TerminalSnapshot,
+        WriteRequest,
     },
     portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system},
     std::{
@@ -377,15 +377,18 @@ fn spawn_wait_thread(mut child: Box<dyn Child + Send + Sync>, session: Arc<LiveS
 
 pub struct LocalTerminalDaemon {
     sessions: HashMap<String, Arc<LiveSession>>,
-    session_store: JsonDaemonSessionStore,
+    session_store: Box<dyn DaemonSessionStore>,
     next_session_id: u64,
 }
 
 impl LocalTerminalDaemon {
-    pub fn new(session_store: JsonDaemonSessionStore) -> Self {
+    pub fn new<S>(session_store: S) -> Self
+    where
+        S: DaemonSessionStore + 'static,
+    {
         Self {
             sessions: HashMap::new(),
-            session_store,
+            session_store: Box::new(session_store),
             next_session_id: 1,
         }
     }

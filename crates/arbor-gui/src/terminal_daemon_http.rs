@@ -9,6 +9,7 @@ use {
         fmt,
         io::{Read, Write},
         net::{TcpStream, ToSocketAddrs},
+        sync::{Arc, Mutex},
         time::Duration,
     },
 };
@@ -21,7 +22,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct HttpTerminalDaemon {
     endpoint: HttpEndpoint,
-    auth_token: Option<String>,
+    auth_token: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,12 +112,14 @@ impl HttpTerminalDaemon {
         let endpoint = HttpEndpoint::parse(base_url)?;
         Ok(Self {
             endpoint,
-            auth_token: None,
+            auth_token: Arc::new(Mutex::new(None)),
         })
     }
 
-    pub fn set_auth_token(&mut self, token: Option<String>) {
-        self.auth_token = token;
+    pub fn set_auth_token(&self, token: Option<String>) {
+        if let Ok(mut auth_token) = self.auth_token.lock() {
+            *auth_token = token;
+        }
     }
 
     pub fn base_url(&self) -> String {
@@ -266,7 +269,7 @@ impl HttpTerminalDaemon {
             "{method} {request_path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: application/json\r\n"
         );
 
-        if let Some(ref token) = self.auth_token {
+        if let Some(token) = self.auth_token.lock().ok().and_then(|guard| guard.clone()) {
             headers.push_str(&format!("Authorization: Bearer {token}\r\n"));
         }
         if !body.is_empty() {
@@ -350,6 +353,81 @@ impl HttpTerminalDaemon {
             response.status_code
         ))
     }
+}
+
+pub trait TerminalDaemonClient: Send + Sync {
+    fn base_url(&self) -> String;
+    fn set_auth_token(&self, token: Option<String>);
+    fn create_or_attach(
+        &self,
+        request: CreateOrAttachRequest,
+    ) -> Result<CreateOrAttachResponse, HttpTerminalDaemonError>;
+    fn write(&self, request: WriteRequest) -> Result<(), HttpTerminalDaemonError>;
+    fn resize(&self, request: ResizeRequest) -> Result<(), HttpTerminalDaemonError>;
+    fn signal(&self, request: SignalRequest) -> Result<(), HttpTerminalDaemonError>;
+    fn detach(&self, request: DetachRequest) -> Result<(), HttpTerminalDaemonError>;
+    fn kill(&self, request: KillRequest) -> Result<(), HttpTerminalDaemonError>;
+    fn snapshot(
+        &self,
+        request: SnapshotRequest,
+    ) -> Result<Option<TerminalSnapshot>, HttpTerminalDaemonError>;
+    fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, HttpTerminalDaemonError>;
+}
+
+impl TerminalDaemonClient for HttpTerminalDaemon {
+    fn base_url(&self) -> String {
+        HttpTerminalDaemon::base_url(self)
+    }
+
+    fn set_auth_token(&self, token: Option<String>) {
+        HttpTerminalDaemon::set_auth_token(self, token);
+    }
+
+    fn create_or_attach(
+        &self,
+        request: CreateOrAttachRequest,
+    ) -> Result<CreateOrAttachResponse, HttpTerminalDaemonError> {
+        HttpTerminalDaemon::create_or_attach(self, request)
+    }
+
+    fn write(&self, request: WriteRequest) -> Result<(), HttpTerminalDaemonError> {
+        HttpTerminalDaemon::write(self, request)
+    }
+
+    fn resize(&self, request: ResizeRequest) -> Result<(), HttpTerminalDaemonError> {
+        HttpTerminalDaemon::resize(self, request)
+    }
+
+    fn signal(&self, request: SignalRequest) -> Result<(), HttpTerminalDaemonError> {
+        HttpTerminalDaemon::signal(self, request)
+    }
+
+    fn detach(&self, request: DetachRequest) -> Result<(), HttpTerminalDaemonError> {
+        HttpTerminalDaemon::detach(self, request)
+    }
+
+    fn kill(&self, request: KillRequest) -> Result<(), HttpTerminalDaemonError> {
+        HttpTerminalDaemon::kill(self, request)
+    }
+
+    fn snapshot(
+        &self,
+        request: SnapshotRequest,
+    ) -> Result<Option<TerminalSnapshot>, HttpTerminalDaemonError> {
+        HttpTerminalDaemon::snapshot(self, request)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, HttpTerminalDaemonError> {
+        HttpTerminalDaemon::list_sessions(self)
+    }
+}
+
+pub type SharedTerminalDaemonClient = Arc<dyn TerminalDaemonClient>;
+
+pub fn default_terminal_daemon_client(
+    base_url: &str,
+) -> Result<SharedTerminalDaemonClient, HttpTerminalDaemonError> {
+    Ok(Arc::new(HttpTerminalDaemon::new(base_url)?))
 }
 
 impl HttpEndpoint {

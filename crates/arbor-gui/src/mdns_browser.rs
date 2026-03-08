@@ -41,26 +41,30 @@ pub enum MdnsEvent {
     Removed(String),
 }
 
-pub struct MdnsBrowser {
+pub trait MdnsDiscovery {
+    fn poll_updates(&self) -> Vec<MdnsEvent>;
+}
+
+struct MdnsSdBrowser {
     _daemon: ServiceDaemon,
     receiver: mdns_sd::Receiver<ServiceEvent>,
 }
 
 /// Start browsing for `_arbor._tcp` services on the local network.
-pub fn start_browsing() -> Result<MdnsBrowser, String> {
+pub fn start_browsing() -> Result<Box<dyn MdnsDiscovery>, String> {
     let daemon = ServiceDaemon::new().map_err(|e| format!("failed to create mDNS daemon: {e}"))?;
     let receiver = daemon
         .browse(SERVICE_TYPE)
         .map_err(|e| format!("failed to browse for {SERVICE_TYPE}: {e}"))?;
-    Ok(MdnsBrowser {
+    Ok(Box::new(MdnsSdBrowser {
         _daemon: daemon,
         receiver,
-    })
+    }))
 }
 
-impl MdnsBrowser {
+impl MdnsDiscovery for MdnsSdBrowser {
     /// Non-blocking drain of pending mDNS events.
-    pub fn poll_updates(&self) -> Vec<MdnsEvent> {
+    fn poll_updates(&self) -> Vec<MdnsEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.receiver.try_recv() {
             match event {

@@ -1,5 +1,6 @@
 mod app_config;
 mod github_auth_store;
+mod github_service;
 mod log_layer;
 mod mdns_browser;
 mod notifications;
@@ -51,7 +52,6 @@ use {
         TerminalBackendKind, TerminalCursor, TerminalLaunch, TerminalStyledCell,
         TerminalStyledLine, TerminalStyledRun,
     },
-    terminal_daemon_http::HttpTerminalDaemon,
     theme::{ThemeKind, ThemePalette},
 };
 
@@ -208,6 +208,8 @@ struct RepositorySummary {
     github_repo_slug: Option<String>,
 }
 
+type SharedTerminalRuntime = Arc<dyn TerminalRuntimeHandle>;
+
 #[derive(Clone)]
 struct TerminalSession {
     id: u64,
@@ -226,7 +228,7 @@ struct TerminalSession {
     output: String,
     styled_output: Vec<TerminalStyledLine>,
     cursor: Option<TerminalCursor>,
-    runtime: Option<TerminalRuntime>,
+    runtime: Option<SharedTerminalRuntime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,16 +236,6 @@ enum TerminalState {
     Running,
     Completed,
     Failed,
-}
-
-#[derive(Clone)]
-enum OutpostTerminalRuntime {
-    #[allow(dead_code)]
-    RemoteDaemon {
-        daemon: HttpTerminalDaemon,
-    },
-    SshShell(SshTerminalShell),
-    MoshShell(arbor_mosh::MoshShell),
 }
 
 /// SSH terminal shell wrapper that provides Clone (via Arc<Mutex>) and
@@ -381,11 +373,387 @@ impl SshTerminalShell {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalRuntimeKind {
+    Local,
+    Outpost,
+}
+
+struct RuntimeNotification {
+    title: String,
+    body: String,
+    play_sound: bool,
+}
+
+#[derive(Default)]
+struct TerminalRuntimeSyncOutcome {
+    changed: bool,
+    close_session: bool,
+    clear_global_daemon: bool,
+    notice: Option<String>,
+    notification: Option<RuntimeNotification>,
+}
+
+trait EmulatorRuntimeBackend: Clone {
+    fn poll(&self);
+    fn write_input(&self, input: &[u8]) -> Result<(), String>;
+    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot;
+    fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), String>;
+    fn generation(&self) -> u64;
+    fn close(&self);
+}
+
+trait TerminalRuntimeHandle {
+    fn kind(&self) -> TerminalRuntimeKind;
+    fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), String>;
+    fn sync(
+        &self,
+        session: &mut TerminalSession,
+        is_active: bool,
+        target_grid_size: Option<(u16, u16, u16, u16)>,
+    ) -> TerminalRuntimeSyncOutcome;
+    fn close(&self, session: &TerminalSession) -> Result<(), String>;
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeExitLabels {
+    completed_title: &'static str,
+    failed_title: &'static str,
+    failed_notice_prefix: &'static str,
+}
+
 #[derive(Clone)]
-enum TerminalRuntime {
-    Embedded(EmbeddedTerminal),
-    Daemon,
-    Outpost(OutpostTerminalRuntime),
+struct EmulatorTerminalRuntime<B> {
+    backend: B,
+    kind: TerminalRuntimeKind,
+    resize_error_label: &'static str,
+    exit_labels: RuntimeExitLabels,
+}
+
+#[derive(Clone)]
+struct DaemonTerminalRuntime {
+    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+    kind: TerminalRuntimeKind,
+    resize_error_label: &'static str,
+    snapshot_error_label: &'static str,
+    exit_labels: Option<RuntimeExitLabels>,
+    clear_global_daemon_on_connection_refused: bool,
+}
+
+impl EmulatorRuntimeBackend for EmbeddedTerminal {
+    fn poll(&self) {}
+
+    fn write_input(&self, input: &[u8]) -> Result<(), String> {
+        EmbeddedTerminal::write_input(self, input)
+    }
+
+    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+        EmbeddedTerminal::snapshot(self)
+    }
+
+    fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), String> {
+        EmbeddedTerminal::resize(self, rows, cols, pixel_width, pixel_height)
+    }
+
+    fn generation(&self) -> u64 {
+        EmbeddedTerminal::generation(self)
+    }
+
+    fn close(&self) {
+        EmbeddedTerminal::close(self);
+    }
+}
+
+impl EmulatorRuntimeBackend for SshTerminalShell {
+    fn poll(&self) {
+        let _ = SshTerminalShell::poll(self);
+    }
+
+    fn write_input(&self, input: &[u8]) -> Result<(), String> {
+        SshTerminalShell::write_input(self, input)
+    }
+
+    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+        SshTerminalShell::snapshot(self)
+    }
+
+    fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        _pixel_width: u16,
+        _pixel_height: u16,
+    ) -> Result<(), String> {
+        SshTerminalShell::resize(self, rows, cols)
+    }
+
+    fn generation(&self) -> u64 {
+        SshTerminalShell::generation(self)
+    }
+
+    fn close(&self) {
+        SshTerminalShell::close(self);
+    }
+}
+
+impl EmulatorRuntimeBackend for arbor_mosh::MoshShell {
+    fn poll(&self) {}
+
+    fn write_input(&self, input: &[u8]) -> Result<(), String> {
+        arbor_mosh::MoshShell::write_input(self, input)
+    }
+
+    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+        arbor_mosh::MoshShell::snapshot(self)
+    }
+
+    fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), String> {
+        arbor_mosh::MoshShell::resize(self, rows, cols, pixel_width, pixel_height)
+    }
+
+    fn generation(&self) -> u64 {
+        arbor_mosh::MoshShell::generation(self)
+    }
+
+    fn close(&self) {
+        arbor_mosh::MoshShell::close(self);
+    }
+}
+
+impl<B> TerminalRuntimeHandle for EmulatorTerminalRuntime<B>
+where
+    B: EmulatorRuntimeBackend + 'static,
+{
+    fn kind(&self) -> TerminalRuntimeKind {
+        self.kind
+    }
+
+    fn write_input(&self, _session: &TerminalSession, input: &[u8]) -> Result<(), String> {
+        self.backend.write_input(input)
+    }
+
+    fn sync(
+        &self,
+        session: &mut TerminalSession,
+        is_active: bool,
+        target_grid_size: Option<(u16, u16, u16, u16)>,
+    ) -> TerminalRuntimeSyncOutcome {
+        let mut outcome = TerminalRuntimeSyncOutcome::default();
+
+        if is_active
+            && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
+            && let Err(error) = self.backend.resize(rows, cols, pixel_width, pixel_height)
+        {
+            outcome.notice = Some(format!("{}: {error}", self.resize_error_label));
+        }
+
+        self.backend.poll();
+
+        let generation = self.backend.generation();
+        if generation == session.generation {
+            return outcome;
+        }
+
+        let snapshot = self.backend.snapshot();
+        if apply_terminal_emulator_snapshot(session, snapshot) {
+            outcome.changed = true;
+        }
+        session.generation = generation;
+
+        if let Some(exit_code) = session.exit_code
+            && session.state == TerminalState::Running
+        {
+            session.updated_at_unix_ms = current_unix_timestamp_millis();
+            if exit_code == 0 {
+                outcome.notification = Some(RuntimeNotification {
+                    title: self.exit_labels.completed_title.to_owned(),
+                    body: format!("`{}` completed successfully", session.title),
+                    play_sound: true,
+                });
+                outcome.close_session = true;
+            } else {
+                session.state = TerminalState::Failed;
+                session.runtime = None;
+                outcome.changed = true;
+                outcome.notification = Some(RuntimeNotification {
+                    title: self.exit_labels.failed_title.to_owned(),
+                    body: format!("`{}` failed with code {exit_code}", session.title),
+                    play_sound: false,
+                });
+                outcome.notice = Some(format!(
+                    "{} `{}` exited with code {exit_code}",
+                    self.exit_labels.failed_notice_prefix, session.title
+                ));
+            }
+        }
+
+        outcome
+    }
+
+    fn close(&self, _session: &TerminalSession) -> Result<(), String> {
+        self.backend.close();
+        Ok(())
+    }
+}
+
+impl TerminalRuntimeHandle for DaemonTerminalRuntime {
+    fn kind(&self) -> TerminalRuntimeKind {
+        self.kind
+    }
+
+    fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), String> {
+        if input == [0x03] {
+            self.daemon
+                .signal(SignalRequest {
+                    session_id: session.daemon_session_id.clone(),
+                    signal: TerminalSignal::Interrupt,
+                })
+                .map_err(|error| error.to_string())
+        } else {
+            self.daemon
+                .write(WriteRequest {
+                    session_id: session.daemon_session_id.clone(),
+                    bytes: input.to_vec(),
+                })
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    fn sync(
+        &self,
+        session: &mut TerminalSession,
+        is_active: bool,
+        target_grid_size: Option<(u16, u16, u16, u16)>,
+    ) -> TerminalRuntimeSyncOutcome {
+        let mut outcome = TerminalRuntimeSyncOutcome::default();
+
+        if is_active
+            && let Some((rows, cols, ..)) = target_grid_size
+            && (cols != session.cols || rows != session.rows)
+        {
+            match self.daemon.resize(ResizeRequest {
+                session_id: session.daemon_session_id.clone(),
+                cols,
+                rows,
+            }) {
+                Ok(()) => {
+                    session.cols = cols;
+                    session.rows = rows;
+                    outcome.changed = true;
+                },
+                Err(error) => {
+                    outcome.notice = Some(format!("{}: {error}", self.resize_error_label));
+                },
+            }
+        }
+
+        match self.daemon.snapshot(SnapshotRequest {
+            session_id: session.daemon_session_id.clone(),
+            max_lines: 220,
+        }) {
+            Ok(Some(snapshot)) => {
+                let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
+                if session.output != snapshot.output_tail {
+                    session.output = snapshot.output_tail;
+                    let (styled, cursor) =
+                        emulate_raw_output(&session.output, session.rows, session.cols);
+                    session.styled_output = styled;
+                    session.cursor = cursor;
+                    outcome.changed = true;
+                }
+                if session.state != snapshot_state {
+                    session.state = snapshot_state;
+                    outcome.changed = true;
+                }
+                if session.exit_code != snapshot.exit_code {
+                    session.exit_code = snapshot.exit_code;
+                    outcome.changed = true;
+                }
+                if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
+                    session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
+                    outcome.changed = true;
+                }
+
+                if let Some(exit_labels) = self.exit_labels
+                    && let Some(exit_code) = snapshot.exit_code
+                {
+                    if exit_code == 0 {
+                        outcome.notification = Some(RuntimeNotification {
+                            title: exit_labels.completed_title.to_owned(),
+                            body: format!("`{}` completed successfully", session.title),
+                            play_sound: true,
+                        });
+                        outcome.close_session = true;
+                    } else if session.state == TerminalState::Failed {
+                        session.runtime = None;
+                        outcome.changed = true;
+                        outcome.notification = Some(RuntimeNotification {
+                            title: exit_labels.failed_title.to_owned(),
+                            body: format!("`{}` failed with code {exit_code}", session.title),
+                            play_sound: false,
+                        });
+                        outcome.notice = Some(format!(
+                            "{} `{}` exited with code {exit_code}",
+                            exit_labels.failed_notice_prefix, session.title
+                        ));
+                    }
+                }
+            },
+            Ok(None) => {
+                outcome.close_session = true;
+            },
+            Err(error) => {
+                let error_text = error.to_string();
+                if self.clear_global_daemon_on_connection_refused
+                    && daemon_error_is_connection_refused(&error_text)
+                {
+                    session.runtime = None;
+                    session.state = TerminalState::Failed;
+                    outcome.changed = true;
+                    outcome.clear_global_daemon = true;
+                } else {
+                    outcome.notice = Some(format!(
+                        "failed to load {} for terminal `{}`: {error}",
+                        self.snapshot_error_label, session.title
+                    ));
+                }
+            },
+        }
+
+        outcome
+    }
+
+    fn close(&self, session: &TerminalSession) -> Result<(), String> {
+        let result = if session.state == TerminalState::Running {
+            self.daemon.kill(KillRequest {
+                session_id: session.daemon_session_id.clone(),
+            })
+        } else {
+            self.daemon.detach(DetachRequest {
+                session_id: session.daemon_session_id.clone(),
+            })
+        };
+
+        result.map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -947,17 +1315,18 @@ struct CreatedWorktree {
 }
 
 struct ArborWindow {
+    app_config_store: Box<dyn app_config::AppConfigStore>,
     repository_store: Box<dyn repository_store::RepositoryStore>,
     daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
-    terminal_daemon: Option<HttpTerminalDaemon>,
+    terminal_daemon: Option<terminal_daemon_http::SharedTerminalDaemonClient>,
     daemon_base_url: String,
     ui_state_store: Box<dyn ui_state_store::UiStateStore>,
     github_auth_store: Box<dyn github_auth_store::GithubAuthStore>,
+    github_service: Arc<dyn github_service::GitHubService>,
     github_auth_state: github_auth_store::GithubAuthState,
     github_auth_in_progress: bool,
     github_auth_copy_feedback_active: bool,
     github_auth_copy_feedback_generation: u64,
-    config_path: PathBuf,
     config_last_modified: Option<SystemTime>,
     repositories: Vec<RepositorySummary>,
     active_repository_index: Option<usize>,
@@ -1024,6 +1393,7 @@ struct ArborWindow {
     terminal_launchers: Vec<ExternalLauncher>,
     last_persisted_ui_state: ui_state_store::UiState,
     last_ui_state_error: Option<String>,
+    notification_service: Box<dyn notifications::NotificationService>,
     notifications_enabled: bool,
     window_is_active: bool,
     notice: Option<String>,
@@ -1041,7 +1411,7 @@ struct ArborWindow {
     worktree_context_menu: Option<WorktreeContextMenu>,
     outpost_context_menu: Option<OutpostContextMenu>,
     discovered_daemons: Vec<mdns_browser::DiscoveredDaemon>,
-    mdns_browser: Option<mdns_browser::MdnsBrowser>,
+    mdns_browser: Option<Box<dyn mdns_browser::MdnsDiscovery>>,
     active_discovered_daemon: Option<usize>,
     worktree_nav_back: Vec<usize>,
     worktree_nav_forward: Vec<usize>,
@@ -1079,18 +1449,21 @@ impl ArborWindow {
         log_buffer: log_layer::LogBuffer,
         cx: &mut Context<Self>,
     ) -> Self {
+        let app_config_store = app_config::default_app_config_store();
         let repository_store = repository_store::default_repository_store();
         let ui_state_store = ui_state_store::default_ui_state_store();
         let github_auth_store = github_auth_store::default_github_auth_store();
+        let github_service = github_service::default_github_service();
+        let notification_service = notifications::default_notification_service();
         let loaded_github_auth_state = github_auth_store.load();
-        let config_path = app_config::config_path();
+        let config_path = app_config_store.config_path();
         let cwd = match env::current_dir() {
             Ok(path) => path,
             Err(error) => {
                 let mut notice_parts = vec![format!("failed to read current directory: {error}")];
-                let loaded_config = app_config::load_or_create_config();
+                let loaded_config = app_config_store.load_or_create_config();
                 notice_parts.extend(loaded_config.notices);
-                let config_last_modified = app_config::config_last_modified(&config_path);
+                let config_last_modified = app_config_store.config_last_modified();
                 let github_auth_state = match loaded_github_auth_state.clone() {
                     Ok(state) => state,
                     Err(error) => {
@@ -1158,17 +1531,18 @@ impl ArborWindow {
                 let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
 
                 let app = Self {
+                    app_config_store,
                     repository_store,
                     daemon_session_store,
                     terminal_daemon: None,
                     daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
                     ui_state_store,
                     github_auth_store,
+                    github_service,
                     github_auth_state,
                     github_auth_in_progress: false,
                     github_auth_copy_feedback_active: false,
                     github_auth_copy_feedback_generation: 0,
-                    config_path,
                     config_last_modified,
                     repositories,
                     active_repository_index,
@@ -1239,6 +1613,7 @@ impl ArborWindow {
                     terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     last_ui_state_error: None,
+                    notification_service,
                     notifications_enabled,
                     window_is_active: true,
                     notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
@@ -1283,9 +1658,9 @@ impl ArborWindow {
         let repo_root = worktree::repo_root(&cwd).ok();
 
         tracing::info!(config = %config_path.display(), "loading configuration");
-        let loaded_config = app_config::load_or_create_config();
+        let loaded_config = app_config_store.load_or_create_config();
         let mut notice_parts = loaded_config.notices;
-        let config_last_modified = app_config::config_last_modified(&config_path);
+        let config_last_modified = app_config_store.config_last_modified();
         let github_auth_state = match loaded_github_auth_state {
             Ok(state) => state,
             Err(error) => {
@@ -1301,14 +1676,15 @@ impl ArborWindow {
         let daemon_base_url =
             daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
         tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
-        let mut terminal_daemon = match HttpTerminalDaemon::new(&daemon_base_url) {
-            Ok(client) => Some(client),
-            Err(error) => {
-                tracing::error!(%error, url = %daemon_base_url, "invalid daemon URL");
-                notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
-                None
-            },
-        };
+        let mut terminal_daemon =
+            match terminal_daemon_http::default_terminal_daemon_client(&daemon_base_url) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    tracing::error!(%error, url = %daemon_base_url, "invalid daemon URL");
+                    notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
+                    None
+                },
+            };
         let (initial_daemon_records, attach_daemon_runtime) =
             if let Some(daemon) = terminal_daemon.as_ref() {
                 match daemon.list_sessions() {
@@ -1424,17 +1800,18 @@ impl ArborWindow {
         let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
 
         let mut app = Self {
+            app_config_store,
             repository_store,
             daemon_session_store,
             terminal_daemon,
             daemon_base_url,
             ui_state_store,
             github_auth_store,
+            github_service,
             github_auth_state,
             github_auth_in_progress: false,
             github_auth_copy_feedback_active: false,
             github_auth_copy_feedback_generation: 0,
-            config_path,
             config_last_modified,
             repositories,
             active_repository_index,
@@ -1519,6 +1896,7 @@ impl ArborWindow {
             worktree_nav_forward: Vec::new(),
             last_persisted_ui_state: startup_ui_state,
             last_ui_state_error: None,
+            notification_service,
             notifications_enabled,
             window_is_active: true,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
@@ -1744,13 +2122,13 @@ impl ArborWindow {
     }
 
     fn refresh_config_if_changed(&mut self, cx: &mut Context<Self>) {
-        let next_modified = app_config::config_last_modified(&self.config_path);
+        let next_modified = self.app_config_store.config_last_modified();
         if self.config_last_modified == next_modified {
             return;
         }
         self.config_last_modified = next_modified;
 
-        let loaded = app_config::load_or_create_config();
+        let loaded = self.app_config_store.load_or_create_config();
         let mut notices = loaded.notices;
         let mut changed = false;
 
@@ -1777,15 +2155,16 @@ impl ArborWindow {
         let next_daemon_base_url = daemon_base_url_from_config(loaded.config.daemon_url.as_deref());
         if self.daemon_base_url != next_daemon_base_url {
             self.daemon_base_url = next_daemon_base_url.clone();
-            self.terminal_daemon = match HttpTerminalDaemon::new(&next_daemon_base_url) {
-                Ok(client) => Some(client),
-                Err(error) => {
-                    notices.push(format!(
-                        "invalid daemon_url `{next_daemon_base_url}`: {error}"
-                    ));
-                    None
-                },
-            };
+            self.terminal_daemon =
+                match terminal_daemon_http::default_terminal_daemon_client(&next_daemon_base_url) {
+                    Ok(client) => Some(client),
+                    Err(error) => {
+                        notices.push(format!(
+                            "invalid daemon_url `{next_daemon_base_url}`: {error}"
+                        ));
+                        None
+                    },
+                };
             changed = true;
         }
 
@@ -1866,11 +2245,11 @@ impl ArborWindow {
     }
 
     fn load_all_repo_presets(&self) -> Vec<RepoPreset> {
-        let mut presets = load_repo_presets(&self.repo_root);
+        let mut presets = load_repo_presets(self.app_config_store.as_ref(), &self.repo_root);
         if let Some(wt_path) = self.selected_worktree_path()
             && wt_path != self.repo_root.as_path()
         {
-            for wt_preset in load_repo_presets(wt_path) {
+            for wt_preset in load_repo_presets(self.app_config_store.as_ref(), wt_path) {
                 if !presets.iter().any(|p| p.name == wt_preset.name) {
                     presets.push(wt_preset);
                 }
@@ -2012,8 +2391,8 @@ impl ArborWindow {
                     session.rows = rows;
                     changed = true;
                 }
-                if attach_runtime && session.runtime.is_none() {
-                    session.runtime = Some(TerminalRuntime::Daemon);
+                if attach_runtime && let Some(daemon) = self.terminal_daemon.as_ref() {
+                    session.runtime = Some(local_daemon_runtime(daemon.clone()));
                     changed = true;
                 }
             } else {
@@ -2036,7 +2415,13 @@ impl ArborWindow {
                     output,
                     styled_output: Vec::new(),
                     cursor: None,
-                    runtime: attach_runtime.then_some(TerminalRuntime::Daemon),
+                    runtime: attach_runtime
+                        .then(|| {
+                            self.terminal_daemon
+                                .as_ref()
+                                .map(|daemon| local_daemon_runtime(daemon.clone()))
+                        })
+                        .flatten(),
                 });
                 changed = true;
             }
@@ -2074,7 +2459,7 @@ impl ArborWindow {
 
     fn maybe_notify(&self, title: &str, body: &str, play_sound: bool) {
         if self.notifications_enabled && !self.window_is_active {
-            notifications::send(title, body, play_sound);
+            self.notification_service.send(title, body, play_sound);
         }
     }
 
@@ -2087,9 +2472,8 @@ impl ArborWindow {
         if let Some((rows, cols, ..)) = target_grid_size {
             self.last_terminal_grid_size = Some((rows, cols));
         }
-        let daemon = self.terminal_daemon.clone();
         let mut sessions_to_close = Vec::new();
-        let mut pending_notifications: Vec<(String, String, bool)> = Vec::new();
+        let mut pending_notifications = Vec::new();
 
         for index in 0..self.terminals.len() {
             let Some(runtime) = self
@@ -2100,370 +2484,38 @@ impl ArborWindow {
                 continue;
             };
 
-            match runtime {
-                TerminalRuntime::Embedded(runtime) => {
-                    let session_id = self.terminals[index].id;
-                    if active_terminal_id == Some(session_id)
-                        && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
-                        && let Err(error) = runtime.resize(rows, cols, pixel_width, pixel_height)
-                    {
-                        self.notice = Some(format!("failed to resize terminal: {error}"));
-                    }
-
-                    let generation = runtime.generation();
-                    if generation == self.terminals[index].generation {
-                        continue;
-                    }
-
-                    let snapshot = runtime.snapshot();
-                    let session = &mut self.terminals[index];
-                    let output = snapshot.output;
-                    let styled_output = snapshot.styled_lines;
-                    let cursor = snapshot.cursor;
-                    if output != session.output
-                        || styled_output != session.styled_output
-                        || cursor != session.cursor
-                    {
-                        session.output = output;
-                        session.styled_output = styled_output;
-                        session.cursor = cursor;
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        changed = true;
-                    }
-                    session.generation = generation;
-
-                    if let Some(exit_code) = snapshot.exit_code
-                        && session.state == TerminalState::Running
-                    {
-                        session.exit_code = Some(exit_code);
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        if exit_code == 0 {
-                            pending_notifications.push((
-                                "Terminal completed".to_owned(),
-                                format!("`{}` completed successfully", session.title),
-                                true,
-                            ));
-                            sessions_to_close.push(session.id);
-                        } else {
-                            session.state = TerminalState::Failed;
-                            session.runtime = None;
-                            changed = true;
-                            pending_notifications.push((
-                                "Terminal failed".to_owned(),
-                                format!("`{}` failed with code {exit_code}", session.title),
-                                false,
-                            ));
-                            self.notice = Some(format!(
-                                "terminal tab `{}` exited with code {exit_code}",
-                                session.title,
-                            ));
-                        }
-                    }
-                },
-                TerminalRuntime::Daemon => {
-                    let Some(daemon) = daemon.as_ref() else {
-                        continue;
-                    };
-
-                    let (session_id, daemon_session_id, previous_cols, previous_rows, title) = {
-                        let session = &self.terminals[index];
-                        (
-                            session.id,
-                            session.daemon_session_id.clone(),
-                            session.cols,
-                            session.rows,
-                            session.title.clone(),
-                        )
-                    };
-
-                    if active_terminal_id == Some(session_id)
-                        && let Some((rows, cols, ..)) = target_grid_size
-                        && (cols != previous_cols || rows != previous_rows)
-                    {
-                        match daemon.resize(ResizeRequest {
-                            session_id: daemon_session_id.clone(),
-                            cols,
-                            rows,
-                        }) {
-                            Ok(()) => {
-                                let session = &mut self.terminals[index];
-                                session.cols = cols;
-                                session.rows = rows;
-                                changed = true;
-                            },
-                            Err(error) => {
-                                self.notice = Some(format!("failed to resize terminal: {error}"));
-                            },
-                        }
-                    }
-
-                    match daemon.snapshot(SnapshotRequest {
-                        session_id: daemon_session_id,
-                        max_lines: 220,
-                    }) {
-                        Ok(Some(snapshot)) => {
-                            let session = &mut self.terminals[index];
-                            let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
-                            if session.output != snapshot.output_tail {
-                                session.output = snapshot.output_tail;
-                                let (styled, cursor) =
-                                    emulate_raw_output(&session.output, session.rows, session.cols);
-                                session.styled_output = styled;
-                                session.cursor = cursor;
-                                changed = true;
-                            }
-                            if session.state != snapshot_state {
-                                session.state = snapshot_state;
-                                changed = true;
-                            }
-                            if session.exit_code != snapshot.exit_code {
-                                session.exit_code = snapshot.exit_code;
-                                changed = true;
-                            }
-                            if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
-                                session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
-                                changed = true;
-                            }
-
-                            if let Some(exit_code) = snapshot.exit_code {
-                                if exit_code == 0 {
-                                    pending_notifications.push((
-                                        "Terminal completed".to_owned(),
-                                        format!("`{title}` completed successfully"),
-                                        true,
-                                    ));
-                                    sessions_to_close.push(session.id);
-                                } else if session.state == TerminalState::Failed {
-                                    session.runtime = None;
-                                    changed = true;
-                                    pending_notifications.push((
-                                        "Terminal failed".to_owned(),
-                                        format!("`{title}` failed with code {exit_code}"),
-                                        false,
-                                    ));
-                                    self.notice = Some(format!(
-                                        "terminal tab `{title}` exited with code {exit_code}",
-                                    ));
-                                }
-                            }
-                        },
-                        Ok(None) => {
-                            sessions_to_close.push(session_id);
-                        },
-                        Err(error) => {
-                            let error_text = error.to_string();
-                            if daemon_error_is_connection_refused(&error_text) {
-                                self.terminal_daemon = None;
-                                let session = &mut self.terminals[index];
-                                session.runtime = None;
-                                session.state = TerminalState::Failed;
-                                changed = true;
-                            } else {
-                                self.notice = Some(format!(
-                                    "failed to load daemon snapshot for terminal `{title}`: {error}"
-                                ));
-                            }
-                        },
-                    }
-                },
-                TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon { ref daemon }) => {
-                    let (session_id, daemon_session_id, previous_cols, previous_rows, title) = {
-                        let session = &self.terminals[index];
-                        (
-                            session.id,
-                            session.daemon_session_id.clone(),
-                            session.cols,
-                            session.rows,
-                            session.title.clone(),
-                        )
-                    };
-
-                    if active_terminal_id == Some(session_id)
-                        && let Some((rows, cols, ..)) = target_grid_size
-                        && (cols != previous_cols || rows != previous_rows)
-                    {
-                        match daemon.resize(ResizeRequest {
-                            session_id: daemon_session_id.clone(),
-                            cols,
-                            rows,
-                        }) {
-                            Ok(()) => {
-                                let session = &mut self.terminals[index];
-                                session.cols = cols;
-                                session.rows = rows;
-                                changed = true;
-                            },
-                            Err(error) => {
-                                self.notice =
-                                    Some(format!("failed to resize outpost terminal: {error}"));
-                            },
-                        }
-                    }
-
-                    match daemon.snapshot(SnapshotRequest {
-                        session_id: daemon_session_id,
-                        max_lines: 220,
-                    }) {
-                        Ok(Some(snapshot)) => {
-                            let session = &mut self.terminals[index];
-                            let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
-                            if session.output != snapshot.output_tail {
-                                session.output = snapshot.output_tail;
-                                let (styled, cursor) =
-                                    emulate_raw_output(&session.output, session.rows, session.cols);
-                                session.styled_output = styled;
-                                session.cursor = cursor;
-                                changed = true;
-                            }
-                            if session.state != snapshot_state {
-                                session.state = snapshot_state;
-                                changed = true;
-                            }
-                            if session.exit_code != snapshot.exit_code {
-                                session.exit_code = snapshot.exit_code;
-                                changed = true;
-                            }
-                            if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
-                                session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
-                                changed = true;
-                            }
-                        },
-                        Ok(None) => {
-                            sessions_to_close.push(session_id);
-                        },
-                        Err(error) => {
-                            self.notice = Some(format!(
-                                "failed to load outpost daemon snapshot for terminal `{title}`: {error}"
-                            ));
-                        },
-                    }
-                },
-                TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ref ssh)) => {
-                    let session_id = self.terminals[index].id;
-                    if active_terminal_id == Some(session_id)
-                        && let Some((rows, cols, _pixel_width, _pixel_height)) = target_grid_size
-                        && let Err(error) = ssh.resize(rows, cols)
-                    {
-                        self.notice = Some(format!("failed to resize SSH terminal: {error}"));
-                    }
-
-                    // Poll for new data from the SSH channel
-                    ssh.poll();
-
-                    let generation = ssh.generation();
-                    if generation == self.terminals[index].generation {
-                        continue;
-                    }
-
-                    let snapshot = ssh.snapshot();
-                    let session = &mut self.terminals[index];
-                    let output = snapshot.output;
-                    let styled_output = snapshot.styled_lines;
-                    let cursor = snapshot.cursor;
-                    if output != session.output
-                        || styled_output != session.styled_output
-                        || cursor != session.cursor
-                    {
-                        session.output = output;
-                        session.styled_output = styled_output;
-                        session.cursor = cursor;
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        changed = true;
-                    }
-                    session.generation = generation;
-
-                    if let Some(exit_code) = snapshot.exit_code
-                        && session.state == TerminalState::Running
-                    {
-                        session.exit_code = Some(exit_code);
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        if exit_code == 0 {
-                            pending_notifications.push((
-                                "SSH terminal completed".to_owned(),
-                                format!("`{}` completed successfully", session.title),
-                                true,
-                            ));
-                            sessions_to_close.push(session.id);
-                        } else {
-                            session.state = TerminalState::Failed;
-                            session.runtime = None;
-                            changed = true;
-                            pending_notifications.push((
-                                "SSH terminal failed".to_owned(),
-                                format!("`{}` failed with code {exit_code}", session.title),
-                                false,
-                            ));
-                            self.notice = Some(format!(
-                                "SSH terminal tab `{}` exited with code {exit_code}",
-                                session.title,
-                            ));
-                        }
-                    }
-                },
-                TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh)) => {
-                    let session_id = self.terminals[index].id;
-                    if active_terminal_id == Some(session_id)
-                        && let Some((rows, cols, pixel_width, pixel_height)) = target_grid_size
-                        && let Err(error) = mosh.resize(rows, cols, pixel_width, pixel_height)
-                    {
-                        self.notice = Some(format!("failed to resize mosh terminal: {error}"));
-                    }
-
-                    let generation = mosh.generation();
-                    if generation == self.terminals[index].generation {
-                        continue;
-                    }
-
-                    let snapshot = mosh.snapshot();
-                    let session = &mut self.terminals[index];
-                    let output = snapshot.output;
-                    let styled_output = snapshot.styled_lines;
-                    let cursor = snapshot.cursor;
-                    if output != session.output
-                        || styled_output != session.styled_output
-                        || cursor != session.cursor
-                    {
-                        session.output = output;
-                        session.styled_output = styled_output;
-                        session.cursor = cursor;
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        changed = true;
-                    }
-                    session.generation = generation;
-
-                    if let Some(exit_code) = snapshot.exit_code
-                        && session.state == TerminalState::Running
-                    {
-                        session.exit_code = Some(exit_code);
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        if exit_code == 0 {
-                            pending_notifications.push((
-                                "Mosh terminal completed".to_owned(),
-                                format!("`{}` completed successfully", session.title),
-                                true,
-                            ));
-                            sessions_to_close.push(session.id);
-                        } else {
-                            session.state = TerminalState::Failed;
-                            session.runtime = None;
-                            changed = true;
-                            pending_notifications.push((
-                                "Mosh terminal failed".to_owned(),
-                                format!("`{}` failed with code {exit_code}", session.title),
-                                false,
-                            ));
-                            self.notice = Some(format!(
-                                "mosh terminal tab `{}` exited with code {exit_code}",
-                                session.title,
-                            ));
-                        }
-                    }
-                },
+            let session_id = self.terminals[index].id;
+            let outcome = {
+                let session = &mut self.terminals[index];
+                runtime.sync(
+                    session,
+                    active_terminal_id == Some(session_id),
+                    target_grid_size,
+                )
             };
+
+            changed |= outcome.changed;
+
+            if outcome.clear_global_daemon {
+                self.terminal_daemon = None;
+            }
+            if let Some(notice) = outcome.notice {
+                self.notice = Some(notice);
+            }
+            if let Some(notification) = outcome.notification {
+                pending_notifications.push(notification);
+            }
+            if outcome.close_session {
+                sessions_to_close.push(session_id);
+            }
         }
 
-        for (title, body, play_sound) in pending_notifications {
-            self.maybe_notify(&title, &body, play_sound);
+        for notification in pending_notifications {
+            self.maybe_notify(
+                &notification.title,
+                &notification.body,
+                notification.play_sound,
+            );
         }
 
         for session_id in sessions_to_close {
@@ -2893,6 +2945,7 @@ impl ArborWindow {
             })
             .collect();
         let github_token = self.github_access_token();
+        let github_service = self.github_service.clone();
 
         if tracked_branches.is_empty() {
             let mut changed = false;
@@ -2916,6 +2969,7 @@ impl ArborWindow {
                         .map(|(path, branch, repo_slug)| {
                             let pr_number = repo_slug.as_ref().and_then(|_| {
                                 github_pr_number_for_worktree(
+                                    github_service.as_ref(),
                                     &path,
                                     &branch,
                                     github_token.as_deref(),
@@ -3018,7 +3072,7 @@ impl ArborWindow {
                             == session
                                 .runtime
                                 .as_ref()
-                                .is_some_and(|rt| matches!(rt, TerminalRuntime::Outpost(_)))
+                                .is_some_and(|rt| rt.kind() == TerminalRuntimeKind::Outpost)
                 })
             })
             .or_else(|| {
@@ -3030,7 +3084,7 @@ impl ArborWindow {
                                 == session
                                     .runtime
                                     .as_ref()
-                                    .is_some_and(|rt| matches!(rt, TerminalRuntime::Outpost(_)))
+                                    .is_some_and(|rt| rt.kind() == TerminalRuntimeKind::Outpost)
                     })
                     .map(|session| session.id)
             })
@@ -3051,7 +3105,7 @@ impl ArborWindow {
                         == session
                             .runtime
                             .as_ref()
-                            .is_some_and(|rt| matches!(rt, TerminalRuntime::Outpost(_)))
+                            .is_some_and(|rt| rt.kind() == TerminalRuntimeKind::Outpost)
             })
             .collect()
     }
@@ -3133,41 +3187,11 @@ impl ArborWindow {
             return false;
         };
 
-        if let Some(session) = self.terminals.get(index) {
-            match &session.runtime {
-                Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(mosh))) => {
-                    mosh.close();
-                },
-                Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ssh))) => {
-                    ssh.close();
-                },
-                runtime => {
-                    let daemon_to_use = match runtime {
-                        Some(TerminalRuntime::Daemon) => self.terminal_daemon.as_ref(),
-                        Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon {
-                            daemon,
-                        })) => Some(daemon),
-                        _ => None,
-                    };
-
-                    if let Some(daemon) = daemon_to_use {
-                        let result = if session.state == TerminalState::Running {
-                            daemon.kill(KillRequest {
-                                session_id: session.daemon_session_id.clone(),
-                            })
-                        } else {
-                            daemon.detach(DetachRequest {
-                                session_id: session.daemon_session_id.clone(),
-                            })
-                        };
-
-                        if let Err(error) = result {
-                            self.notice =
-                                Some(format!("failed to close terminal session: {error}"));
-                        }
-                    }
-                },
-            }
+        if let Some(session) = self.terminals.get(index)
+            && let Some(runtime) = session.runtime.as_ref()
+            && let Err(error) = runtime.close(session)
+        {
+            self.notice = Some(format!("failed to close terminal session: {error}"));
         }
 
         let closed = self.terminals.remove(index);
@@ -4195,7 +4219,7 @@ impl ArborWindow {
         tracing::info!(url = %url, "connecting to daemon");
         self.daemon_base_url = url.to_owned();
         let token_key = auth_key.unwrap_or_else(|| url.to_owned());
-        let mut client = match HttpTerminalDaemon::new(url) {
+        let client = match terminal_daemon_http::default_terminal_daemon_client(url) {
             Ok(c) => c,
             Err(error) => {
                 self.notice = Some(format!("failed to connect to {url}: {error}"));
@@ -4259,7 +4283,7 @@ impl ArborWindow {
             return;
         }
         let url = modal.daemon_url.clone();
-        if let Some(client) = self.terminal_daemon.as_mut() {
+        if let Some(client) = self.terminal_daemon.as_ref() {
             client.set_auth_token(Some(token.clone()));
         }
         // Verify the token works
@@ -4521,6 +4545,7 @@ impl ArborWindow {
             .clone()
             .or_else(|| github_repo_slug_for_repo(worktree_path.as_path()));
         let github_token = self.github_access_token();
+        let github_service = self.github_service.clone();
 
         self.git_action_in_flight = Some(GitActionKind::CreatePullRequest);
         self.notice = Some("creating pull request".to_owned());
@@ -4529,6 +4554,7 @@ impl ArborWindow {
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move {
                 run_create_pr_for_worktree(
+                    github_service.as_ref(),
                     worktree_path.as_path(),
                     repo_slug.as_deref(),
                     github_token.as_deref(),
@@ -5201,7 +5227,7 @@ impl ArborWindow {
             mosh_server_path: None,
         };
 
-        if let Err(error) = app_config::append_remote_host(&host_config) {
+        if let Err(error) = self.app_config_store.append_remote_host(&host_config) {
             modal.error = Some(error);
             cx.notify();
             return;
@@ -5221,7 +5247,7 @@ impl ArborWindow {
     }
 
     fn remove_host_at(&mut self, host_name: String, cx: &mut Context<Self>) {
-        if let Err(error) = app_config::remove_remote_host(&host_name) {
+        if let Err(error) = self.app_config_store.remove_remote_host(&host_name) {
             self.notice = Some(error);
             cx.notify();
             return;
@@ -5268,7 +5294,7 @@ impl ArborWindow {
                 command: preset.command.clone(),
             })
             .collect::<Vec<_>>();
-        app_config::save_agent_presets(&presets)
+        self.app_config_store.save_agent_presets(&presets)
     }
 
     fn open_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
@@ -5589,7 +5615,7 @@ impl ArborWindow {
         let name = preset.name.clone();
         let save_dir = self.active_arbor_toml_dir();
 
-        if let Err(error) = app_config::remove_repo_preset(&save_dir, &name) {
+        if let Err(error) = self.app_config_store.remove_repo_preset(&save_dir, &name) {
             if let Some(m) = self.manage_repo_presets_modal.as_mut() {
                 m.error = Some(error);
             }
@@ -5614,7 +5640,7 @@ impl ArborWindow {
                 command: p.command.clone(),
             })
             .collect();
-        app_config::save_repo_presets(&save_dir, &presets)
+        self.app_config_store.save_repo_presets(&save_dir, &presets)
     }
 
     fn update_create_outpost_modal_input(
@@ -6626,7 +6652,7 @@ impl ArborWindow {
     }
 
     fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
-        let loaded = app_config::load_or_create_config();
+        let loaded = self.app_config_store.load_or_create_config();
         self.settings_modal = Some(SettingsModal {
             active_field: SettingsField::DaemonUrl,
             daemon_url: self.daemon_base_url.clone(),
@@ -6700,7 +6726,7 @@ impl ArborWindow {
         };
         let theme_slug = self.theme_kind.slug();
 
-        if let Err(error) = app_config::save_scalar_settings(&[
+        if let Err(error) = self.app_config_store.save_scalar_settings(&[
             (
                 "daemon_url",
                 if daemon_url.is_empty() {
@@ -6803,7 +6829,7 @@ impl ArborWindow {
                     session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
                     session.cols = daemon_session.cols.max(2);
                     session.rows = daemon_session.rows.max(1);
-                    session.runtime = Some(TerminalRuntime::Daemon);
+                    session.runtime = Some(local_daemon_runtime(daemon.clone()));
                     launched_with_daemon = true;
                 },
                 Err(error) => {
@@ -6825,7 +6851,7 @@ impl ArborWindow {
                 Ok(TerminalLaunch::Embedded(runtime)) => {
                     session.command = "embedded shell".to_owned();
                     session.generation = runtime.generation();
-                    session.runtime = Some(TerminalRuntime::Embedded(runtime));
+                    session.runtime = Some(local_embedded_runtime(runtime));
                     session.output = String::new();
                     session.styled_output = Vec::new();
                     session.cursor = None;
@@ -7004,9 +7030,7 @@ impl ArborWindow {
                         Ok(mosh) => {
                             session.command = "mosh".to_owned();
                             session.generation = mosh.generation();
-                            session.runtime = Some(TerminalRuntime::Outpost(
-                                OutpostTerminalRuntime::MoshShell(mosh),
-                            ));
+                            session.runtime = Some(outpost_mosh_runtime(mosh));
                             launched = true;
                         },
                         Err(error) => {
@@ -7042,9 +7066,7 @@ impl ArborWindow {
                         Ok(ssh_shell) => {
                             session.command = "ssh".to_owned();
                             session.generation = ssh_shell.generation();
-                            session.runtime = Some(TerminalRuntime::Outpost(
-                                OutpostTerminalRuntime::SshShell(ssh_shell),
-                            ));
+                            session.runtime = Some(outpost_ssh_runtime(ssh_shell));
                             launched = true;
                         },
                         Err(error) => {
@@ -7299,64 +7321,17 @@ impl ArborWindow {
             return Ok(());
         };
 
-        let runtime = self.terminals[index].runtime.clone();
-        match runtime {
-            Some(TerminalRuntime::Embedded(runtime)) => runtime.write_input(input),
-            Some(TerminalRuntime::Daemon) => {
-                let Some(daemon) = self.terminal_daemon.as_ref() else {
-                    return Err("terminal daemon is not configured".to_owned());
-                };
-                let daemon_session_id = self.terminals[index].daemon_session_id.clone();
-                if input == [0x03] {
-                    daemon
-                        .signal(SignalRequest {
-                            session_id: daemon_session_id,
-                            signal: TerminalSignal::Interrupt,
-                        })
-                        .map_err(|error| error.to_string())?;
-                } else {
-                    daemon
-                        .write(WriteRequest {
-                            session_id: daemon_session_id,
-                            bytes: input.to_vec(),
-                        })
-                        .map_err(|error| error.to_string())?;
-                }
-                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
-                Ok(())
-            },
-            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::RemoteDaemon { ref daemon })) => {
-                let daemon_session_id = self.terminals[index].daemon_session_id.clone();
-                if input == [0x03] {
-                    daemon
-                        .signal(SignalRequest {
-                            session_id: daemon_session_id,
-                            signal: TerminalSignal::Interrupt,
-                        })
-                        .map_err(|error| error.to_string())?;
-                } else {
-                    daemon
-                        .write(WriteRequest {
-                            session_id: daemon_session_id,
-                            bytes: input.to_vec(),
-                        })
-                        .map_err(|error| error.to_string())?;
-                }
-                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
-                Ok(())
-            },
-            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::SshShell(ref ssh))) => {
-                ssh.write_input(input)?;
-                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
-                Ok(())
-            },
-            Some(TerminalRuntime::Outpost(OutpostTerminalRuntime::MoshShell(ref mosh))) => {
-                mosh.write_input(input)?;
-                self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
-                Ok(())
-            },
-            None => Ok(()),
+        let Some(runtime) = self.terminals[index].runtime.clone() else {
+            return Ok(());
+        };
+
+        {
+            let session = &self.terminals[index];
+            runtime.write_input(session, input)?;
         }
+
+        self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+        Ok(())
     }
 
     fn clear_terminal_selection(&mut self) {
@@ -13741,8 +13716,8 @@ fn normalize_agent_presets(configured: &[app_config::AgentPresetConfig]) -> Vec<
     presets
 }
 
-fn load_repo_presets(repo_root: &Path) -> Vec<RepoPreset> {
-    let Some(config) = app_config::load_repo_config(repo_root) else {
+fn load_repo_presets(store: &dyn app_config::AppConfigStore, repo_root: &Path) -> Vec<RepoPreset> {
+    let Some(config) = store.load_repo_config(repo_root) else {
         return Vec::new();
     };
     config
@@ -13755,6 +13730,88 @@ fn load_repo_presets(repo_root: &Path) -> Vec<RepoPreset> {
             command: p.command.trim().to_owned(),
         })
         .collect()
+}
+
+fn local_embedded_runtime(runtime: EmbeddedTerminal) -> SharedTerminalRuntime {
+    Arc::new(EmulatorTerminalRuntime {
+        backend: runtime,
+        kind: TerminalRuntimeKind::Local,
+        resize_error_label: "failed to resize terminal",
+        exit_labels: RuntimeExitLabels {
+            completed_title: "Terminal completed",
+            failed_title: "Terminal failed",
+            failed_notice_prefix: "terminal tab",
+        },
+    })
+}
+
+fn local_daemon_runtime(
+    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+) -> SharedTerminalRuntime {
+    Arc::new(DaemonTerminalRuntime {
+        daemon,
+        kind: TerminalRuntimeKind::Local,
+        resize_error_label: "failed to resize terminal",
+        snapshot_error_label: "daemon snapshot",
+        exit_labels: Some(RuntimeExitLabels {
+            completed_title: "Terminal completed",
+            failed_title: "Terminal failed",
+            failed_notice_prefix: "terminal tab",
+        }),
+        clear_global_daemon_on_connection_refused: true,
+    })
+}
+
+fn outpost_ssh_runtime(ssh: SshTerminalShell) -> SharedTerminalRuntime {
+    Arc::new(EmulatorTerminalRuntime {
+        backend: ssh,
+        kind: TerminalRuntimeKind::Outpost,
+        resize_error_label: "failed to resize SSH terminal",
+        exit_labels: RuntimeExitLabels {
+            completed_title: "SSH terminal completed",
+            failed_title: "SSH terminal failed",
+            failed_notice_prefix: "SSH terminal tab",
+        },
+    })
+}
+
+fn outpost_mosh_runtime(mosh: arbor_mosh::MoshShell) -> SharedTerminalRuntime {
+    Arc::new(EmulatorTerminalRuntime {
+        backend: mosh,
+        kind: TerminalRuntimeKind::Outpost,
+        resize_error_label: "failed to resize mosh terminal",
+        exit_labels: RuntimeExitLabels {
+            completed_title: "Mosh terminal completed",
+            failed_title: "Mosh terminal failed",
+            failed_notice_prefix: "mosh terminal tab",
+        },
+    })
+}
+
+fn apply_terminal_emulator_snapshot(
+    session: &mut TerminalSession,
+    snapshot: arbor_terminal_emulator::TerminalSnapshot,
+) -> bool {
+    let mut changed = false;
+
+    if session.output != snapshot.output
+        || session.styled_output != snapshot.styled_lines
+        || session.cursor != snapshot.cursor
+    {
+        session.output = snapshot.output;
+        session.styled_output = snapshot.styled_lines;
+        session.cursor = snapshot.cursor;
+        session.updated_at_unix_ms = current_unix_timestamp_millis();
+        changed = true;
+    }
+
+    if session.exit_code != snapshot.exit_code {
+        session.exit_code = snapshot.exit_code;
+        session.updated_at_unix_ms = current_unix_timestamp_millis();
+        changed = true;
+    }
+
+    changed
 }
 
 fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
@@ -14058,7 +14115,9 @@ fn daemon_error_is_connection_refused(message: &str) -> bool {
 
 /// Attempt to locate and spawn `arbor-httpd` as a detached background process,
 /// then poll until it becomes reachable. Returns `Some(daemon)` on success.
-fn try_auto_start_daemon(daemon_base_url: &str) -> Option<HttpTerminalDaemon> {
+fn try_auto_start_daemon(
+    daemon_base_url: &str,
+) -> Option<terminal_daemon_http::SharedTerminalDaemonClient> {
     let binary = find_arbor_httpd_binary()?;
     tracing::info!(path = %binary.display(), "auto-starting arbor-httpd");
 
@@ -14105,7 +14164,7 @@ fn try_auto_start_daemon(daemon_base_url: &str) -> Option<HttpTerminalDaemon> {
         return None;
     }
 
-    let daemon = HttpTerminalDaemon::new(daemon_base_url).ok()?;
+    let daemon = terminal_daemon_http::default_terminal_daemon_client(daemon_base_url).ok()?;
 
     const MAX_ATTEMPTS: u32 = 20;
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -17113,6 +17172,7 @@ fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
 }
 
 fn run_create_pr_for_worktree(
+    github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     repo_slug: Option<&str>,
     github_token: Option<&str>,
@@ -17129,37 +17189,13 @@ fn run_create_pr_for_worktree(
         .or_else(|| github_repo_slug_for_repo(worktree_path))
         .ok_or_else(|| "could not determine GitHub repository slug".to_owned())?;
 
-    let (owner, repo_name) = slug
-        .split_once('/')
-        .ok_or_else(|| format!("invalid repository slug: {slug}"))?;
-
     // Read the first commit message on the branch as PR title.
     let title = branch.replace(['-', '_'], " ");
 
-    let owner = owner.to_owned();
-    let repo_name = repo_name.to_owned();
     let token = resolve_github_access_token(github_token)
         .ok_or_else(|| "GitHub authentication required, click GitHub Sign in first".to_owned())?;
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|error| format!("failed to create runtime: {error}"))?;
-
-    rt.block_on(async {
-        let octocrab = octocrab::Octocrab::builder()
-            .personal_token(token)
-            .build()
-            .map_err(|error| format!("failed to create GitHub client: {error}"))?;
-
-        let pr = octocrab
-            .pulls(&owner, &repo_name)
-            .create(&title, &branch, &base_branch)
-            .send()
-            .await
-            .map_err(|error| format!("failed to create pull request: {error}"))?;
-
-        let url = pr.html_url.map(|u| u.to_string()).unwrap_or_default();
-        Ok::<String, String>(format!("created PR: {url}"))
-    })
+    github_service.create_pull_request(&slug, &title, &branch, &base_branch, &token)
 }
 
 fn extract_first_url(text: &str) -> Option<String> {
@@ -17233,6 +17269,7 @@ fn github_repo_slug_from_path(path: &str) -> Option<String> {
 }
 
 fn github_pr_number_for_worktree(
+    github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     branch: &str,
     github_token: Option<&str>,
@@ -17241,8 +17278,9 @@ fn github_pr_number_for_worktree(
         return None;
     }
 
-    github_pr_number_by_tracking_branch(worktree_path, github_token)
-        .or_else(|| github_pr_number_by_head_branch(worktree_path, branch, github_token))
+    github_pr_number_by_tracking_branch(github_service, worktree_path, github_token).or_else(|| {
+        github_pr_number_by_head_branch(github_service, worktree_path, branch, github_token)
+    })
 }
 
 fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
@@ -17263,46 +17301,23 @@ fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
 }
 
 fn github_pr_number_by_tracking_branch(
+    github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     github_token: Option<&str>,
 ) -> Option<u64> {
     let branch = git_branch_name_for_worktree(worktree_path).ok()?;
-    github_pr_number_by_head_branch(worktree_path, &branch, github_token)
+    github_pr_number_by_head_branch(github_service, worktree_path, &branch, github_token)
 }
 
 fn github_pr_number_by_head_branch(
+    github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     branch: &str,
     github_token: Option<&str>,
 ) -> Option<u64> {
     let slug = github_repo_slug_for_repo(worktree_path)?;
-    let (owner, repo_name) = slug.split_once('/')?;
-
-    let owner = owner.to_owned();
-    let repo_name = repo_name.to_owned();
-    let branch = branch.to_owned();
     let token = resolve_github_access_token(github_token)?;
-
-    let rt = tokio::runtime::Runtime::new().ok()?;
-
-    rt.block_on(async {
-        let octocrab = octocrab::Octocrab::builder()
-            .personal_token(token)
-            .build()
-            .ok()?;
-
-        let page = octocrab
-            .pulls(&owner, &repo_name)
-            .list()
-            .head(format!("{owner}:{branch}"))
-            .state(octocrab::params::State::All)
-            .per_page(1)
-            .send()
-            .await
-            .ok()?;
-
-        page.items.first().map(|pr| pr.number)
-    })
+    github_service.pull_request_number(&slug, branch, &token)
 }
 
 fn github_pr_url(repo_slug: &str, pr_number: u64) -> String {
@@ -17324,27 +17339,10 @@ fn github_access_token_from_env() -> Option<String> {
         .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
 }
 
-fn github_access_token_from_gh_cli() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["auth", "token"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    non_empty_trimmed_str(&stdout).map(str::to_owned)
-}
-
 fn resolve_github_access_token(saved_token: Option<&str>) -> Option<String> {
     let env_token = github_access_token_from_env();
     resolve_github_access_token_from_sources(saved_token, env_token.as_deref())
-        .or_else(github_access_token_from_gh_cli)
+        .or_else(github_service::github_access_token_from_gh_cli)
 }
 
 fn resolve_github_access_token_from_sources(

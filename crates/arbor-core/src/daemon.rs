@@ -122,7 +122,7 @@ pub trait TerminalDaemon {
     fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, Self::Error>;
 }
 
-pub trait DaemonSessionStore {
+pub trait DaemonSessionStore: Send + Sync {
     fn load(&self) -> Result<Vec<DaemonSessionRecord>, DaemonSessionStoreError>;
     fn save(&self, sessions: &[DaemonSessionRecord]) -> Result<(), DaemonSessionStoreError>;
 

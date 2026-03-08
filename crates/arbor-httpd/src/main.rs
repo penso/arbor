@@ -1,3 +1,4 @@
+mod github_service;
 mod mdns;
 mod process_manager;
 mod repository_store;
@@ -5,6 +6,7 @@ mod terminal_daemon;
 
 use {
     crate::{
+        github_service::GitHubPrService,
         process_manager::ProcessManager,
         terminal_daemon::{LocalTerminalDaemon, LocalTerminalDaemonError, SessionEvent},
     },
@@ -70,6 +72,7 @@ struct AppState {
     repository_store: Arc<dyn repository_store::RepositoryStore>,
     daemon: Arc<Mutex<LocalTerminalDaemon>>,
     process_manager: Arc<Mutex<ProcessManager>>,
+    github_service: Arc<dyn GitHubPrService>,
     agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
     agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
     pr_cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
@@ -262,6 +265,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         repository_store: repository_store.clone(),
         daemon: Arc::new(Mutex::new(LocalTerminalDaemon::new(daemon_store))),
         process_manager: Arc::new(Mutex::new(process_manager)),
+        github_service: github_service::default_github_pr_service(),
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
         pr_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -278,7 +282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let restart_schedule = {
                     let mut pm = state.process_manager.lock().await;
                     let mut daemon = state.daemon.lock().await;
-                    pm.check_and_update(&mut daemon)
+                    pm.check_and_update(&mut *daemon)
                 };
                 for (name, delay) in restart_schedule {
                     let state = state.clone();
@@ -286,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tokio::time::sleep(delay).await;
                         let mut pm = state.process_manager.lock().await;
                         let mut daemon = state.daemon.lock().await;
-                        let _ = pm.start_process(&name, &mut daemon);
+                        let _ = pm.start_process(&name, &mut *daemon);
                     });
                 }
             }
@@ -469,10 +473,13 @@ async fn list_worktrees(
         .iter()
         .map(|wd| {
             let cache = state.pr_cache.clone();
+            let github_service = state.github_service.clone();
             let slug = wd.repo_slug.clone();
             let branch = wd.branch.clone();
             let is_primary = wd.is_primary;
-            async move { lookup_pr_cached(cache, slug.as_deref(), &branch, is_primary).await }
+            async move {
+                lookup_pr_cached(cache, github_service, slug.as_deref(), &branch, is_primary).await
+            }
         })
         .collect();
 
@@ -1123,6 +1130,7 @@ fn github_avatar_url(repo_slug: &str) -> Option<String> {
 /// Cached wrapper around `lookup_pr_for_branch`.
 async fn lookup_pr_cached(
     cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
+    github_service: Arc<dyn GitHubPrService>,
     repo_slug: Option<&str>,
     branch: &str,
     is_primary: bool,
@@ -1144,7 +1152,9 @@ async fn lookup_pr_cached(
         }
     }
 
-    let (pr_number, pr_url) = lookup_pr_for_branch(repo_slug, branch, is_primary).await;
+    let (pr_number, pr_url) = github_service
+        .lookup_pr_for_branch(repo_slug.map(str::to_owned), branch.to_owned(), is_primary)
+        .await;
 
     // Store in cache
     {
@@ -1157,102 +1167,6 @@ async fn lookup_pr_cached(
     }
 
     (pr_number, pr_url)
-}
-
-/// Try to find PR number for a branch using the GitHub API via octocrab.
-async fn lookup_pr_for_branch(
-    repo_slug: Option<&str>,
-    branch: &str,
-    is_primary: bool,
-) -> (Option<u64>, Option<String>) {
-    let slug = match repo_slug {
-        Some(s) => s,
-        None => return (None, None),
-    };
-
-    if is_primary || branch == "-" || branch.is_empty() {
-        return (None, None);
-    }
-
-    // Skip main/master/develop branches
-    let lower = branch.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "main" | "master" | "develop" | "dev" | "trunk"
-    ) {
-        return (None, None);
-    }
-
-    let Some((owner, repo_name)) = slug.split_once('/') else {
-        return (None, None);
-    };
-
-    let Some(client) = build_github_client() else {
-        return (None, None);
-    };
-
-    let owner = owner.to_owned();
-    let repo_name = repo_name.to_owned();
-
-    let page = client
-        .pulls(&owner, &repo_name)
-        .list()
-        .head(format!("{owner}:{branch}"))
-        .state(octocrab::params::State::All)
-        .per_page(1)
-        .send()
-        .await;
-
-    let Ok(page) = page else {
-        return (None, None);
-    };
-
-    match page.items.first() {
-        Some(pr) => {
-            let number = pr.number;
-            let url = format!("https://github.com/{owner}/{repo_name}/pull/{number}");
-            (Some(number), Some(url))
-        },
-        None => (None, None),
-    }
-}
-
-fn build_github_client() -> Option<octocrab::Octocrab> {
-    let token = resolve_github_token()?;
-    octocrab::Octocrab::builder()
-        .personal_token(token)
-        .build()
-        .ok()
-}
-
-fn resolve_github_token() -> Option<String> {
-    // Try GITHUB_TOKEN environment variable first
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_owned());
-        }
-    }
-
-    // Fall back to `gh auth token` CLI
-    let output = Command::new("gh")
-        .args(["auth", "token"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_owned())
 }
 
 fn internal_error(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -1294,7 +1208,7 @@ async fn list_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessI
 async fn start_all_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessInfo>> {
     let mut pm = state.process_manager.lock().await;
     let mut daemon = state.daemon.lock().await;
-    let results = pm.start_all(&mut daemon);
+    let results = pm.start_all(&mut *daemon);
     let infos: Vec<ProcessInfo> = results
         .into_iter()
         .filter_map(|(_, result)| result.ok())
@@ -1305,7 +1219,7 @@ async fn start_all_processes(State(state): State<AppState>) -> ApiResult<Vec<Pro
 async fn stop_all_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessInfo>> {
     let mut pm = state.process_manager.lock().await;
     let mut daemon = state.daemon.lock().await;
-    let results = pm.stop_all(&mut daemon);
+    let results = pm.stop_all(&mut *daemon);
     let infos: Vec<ProcessInfo> = results
         .into_iter()
         .filter_map(|(_, result)| result.ok())
@@ -1320,7 +1234,7 @@ async fn start_process(
     let mut pm = state.process_manager.lock().await;
     let mut daemon = state.daemon.lock().await;
     let info = pm
-        .start_process(&name, &mut daemon)
+        .start_process(&name, &mut *daemon)
         .map_err(internal_error)?;
     Ok(Json(info))
 }
@@ -1332,7 +1246,7 @@ async fn stop_process(
     let mut pm = state.process_manager.lock().await;
     let mut daemon = state.daemon.lock().await;
     let info = pm
-        .stop_process(&name, &mut daemon)
+        .stop_process(&name, &mut *daemon)
         .map_err(internal_error)?;
     Ok(Json(info))
 }
@@ -1344,7 +1258,7 @@ async fn restart_process(
     let mut pm = state.process_manager.lock().await;
     let mut daemon = state.daemon.lock().await;
     let info = pm
-        .restart_process(&name, &mut daemon)
+        .restart_process(&name, &mut *daemon)
         .map_err(internal_error)?;
     Ok(Json(info))
 }
