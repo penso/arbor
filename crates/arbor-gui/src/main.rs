@@ -31,8 +31,8 @@ use {
         Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
         PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
         TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
-        WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, fill, font, img,
-        point, prelude::*, px, rgb, size, uniform_list,
+        WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, ease_in_out,
+        fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
     },
     ropey::Rope,
     std::{
@@ -8201,11 +8201,11 @@ impl ArborWindow {
                     if is_active {
                         pane = pane.child(cell.with_animation(
                             ("collapsed-wt-select", selection_epoch),
-                            Animation::new(Duration::from_millis(150)),
-                            |el, delta| el.opacity(0.7 + 0.3 * delta),
+                            Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
+                            |el, delta| el.opacity(0.8 + 0.2 * delta),
                         ));
                     } else {
-                        pane = pane.child(cell.opacity(0.7));
+                        pane = pane.child(cell.opacity(0.8));
                     }
                 }
             }
@@ -8746,14 +8746,15 @@ impl ArborWindow {
                                                 if is_active {
                                                     row.with_animation(
                                                         ("worktree-select", selection_epoch),
-                                                        Animation::new(Duration::from_millis(150)),
+                                                        Animation::new(Duration::from_millis(150))
+                                                            .with_easing(ease_in_out),
                                                         |el, delta| {
-                                                            el.opacity(0.7 + 0.3 * delta)
+                                                            el.opacity(0.8 + 0.2 * delta)
                                                         },
                                                     )
                                                     .into_any_element()
                                                 } else {
-                                                    row.opacity(0.7).into_any_element()
+                                                    row.opacity(0.8).into_any_element()
                                                 }
                                             }),
                                         ),
