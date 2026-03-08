@@ -85,13 +85,15 @@ function renderTabs(): void {
       stateIndicator.classList.add("failed");
     }
 
+    const icon = el("span", "terminal-tab-icon", "\u{f120}");
+
     const label = el(
       "span",
       "terminal-tab-label",
       session.title ?? titleFromPath(session.cwd),
     );
 
-    tab.append(stateIndicator, label);
+    tab.append(stateIndicator, icon, label);
     tab.addEventListener("click", () => activateSession(session.session_id));
     tabsContainer.append(tab);
   }
@@ -180,6 +182,10 @@ function connectWebSocket(instance: TerminalInstance): void {
 
   socket.addEventListener("open", () => {
     setStatus(`Live: ${instance.sessionId}`);
+    // Send current dimensions so the PTY learns the correct size.
+    // The initial fitAddon.fit() fires before the socket is open,
+    // so the resize event from that fit is lost.
+    sendResize(instance, instance.xterm.cols, instance.xterm.rows);
   });
 
   socket.addEventListener("message", (event) => {
@@ -191,6 +197,8 @@ function connectWebSocket(instance: TerminalInstance): void {
       case "snapshot":
         instance.xterm.write(parsed.output_tail);
         setStatus(`Live: ${instance.sessionId} (${parsed.state})`);
+        // Re-fit after snapshot so programs like tmux get the correct size
+        scheduleFit(instance);
         break;
       case "output":
         instance.xterm.write(parsed.data);
