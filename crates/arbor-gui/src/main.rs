@@ -15224,6 +15224,33 @@ fn create_command(program: &str) -> Command {
     cmd
 }
 
+/// Explicitly set the dock icon from the app bundle's `AppIcon.icns`.
+///
+/// GPUI's custom `GPUIApplication` subclass does not call `setApplicationIconImage:`
+/// after transitioning to `NSApplicationActivationPolicyRegular`, so macOS may show
+/// a generic black icon in the Dock even when the bundle contains a valid `.icns`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn set_dock_icon() {
+    use cocoa::appkit::{NSApp, NSApplication, NSImage};
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString as _;
+
+    // SAFETY: Cocoa FFI – we call well-known AppKit selectors on the shared
+    // NSApplication. GPUI has already initialised the NSApplication before
+    // our `run` callback executes.
+    unsafe {
+        let icon_name = cocoa::foundation::NSString::alloc(nil).init_str("NSApplicationIcon");
+        let icon: id = NSImage::imageNamed_(nil, icon_name);
+        if icon != nil {
+            NSApp().setApplicationIconImage_(icon);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_icon() {}
+
 fn main() {
     augment_path_from_login_shell();
 
@@ -15245,6 +15272,7 @@ fn main() {
     tracing::info!("Arbor starting");
 
     Application::new().run(move |cx: &mut App| {
+        set_dock_icon();
         cx.set_http_client(simple_http_client::create_http_client());
         install_app_menu_and_keys(cx);
         let startup_ui_state = ui_state_store::load_startup_state();
