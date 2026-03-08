@@ -136,6 +136,12 @@ Run the remote daemon:
 
 - `just run-httpd`
 - or `ARBOR_HTTPD_BIND=0.0.0.0:8787 cargo +nightly-2025-11-30 run -p arbor-httpd`
+- or `Arbor --daemon --bind 0.0.0.0:8787` (same as `arbor --daemon --bind ...` in packages that install a lowercase launcher)
+
+From the GUI, **Connect to Host...** accepts:
+
+- `http://IP:port/` for direct HTTP access
+- `ssh://IP/` (or `ssh://user@IP:22/`) to create a local SSH tunnel and route daemon traffic securely over SSH
 
 HTTP API:
 

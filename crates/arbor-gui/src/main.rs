@@ -39,8 +39,9 @@ use {
     std::{
         collections::{HashMap, HashSet},
         env, fs,
+        net::TcpListener,
         path::{Path, PathBuf},
-        process::{Command, Stdio},
+        process::{Child, Command, Stdio},
         sync::{Arc, Mutex, OnceLock},
         time::{Duration, Instant, SystemTime},
     },
@@ -89,6 +90,8 @@ const GITHUB_AUTH_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1200)
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
+const DEFAULT_DAEMON_PORT: u16 = 8787;
+const DEFAULT_SSH_PORT: u16 = 22;
 const DEFAULT_LEFT_PANE_WIDTH: f32 = 290.;
 const DEFAULT_RIGHT_PANE_WIDTH: f32 = 340.;
 const LEFT_PANE_MIN_WIDTH: f32 = 220.;
@@ -827,6 +830,101 @@ struct ConnectToHostModal {
     error: Option<String>,
 }
 
+enum ConnectHostTarget {
+    Http {
+        url: String,
+        auth_key: String,
+    },
+    Ssh {
+        target: SshDaemonTarget,
+        auth_key: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshDaemonTarget {
+    user: Option<String>,
+    host: String,
+    ssh_port: u16,
+    daemon_port: u16,
+}
+
+impl SshDaemonTarget {
+    fn ssh_destination(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+
+        match self.user.as_deref() {
+            Some(user) if !user.trim().is_empty() => format!("{user}@{host}"),
+            _ => host,
+        }
+    }
+}
+
+struct SshDaemonTunnel {
+    child: Child,
+    local_port: u16,
+}
+
+impl SshDaemonTunnel {
+    fn start(target: &SshDaemonTarget) -> Result<Self, String> {
+        let local_port = reserve_local_loopback_port()?;
+        let forward = format!("127.0.0.1:{local_port}:127.0.0.1:{}", target.daemon_port);
+
+        let mut command = create_command("ssh");
+        command
+            .arg("-N")
+            .arg("-T")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ExitOnForwardFailure=yes")
+            .arg("-o")
+            .arg("ServerAliveInterval=15")
+            .arg("-o")
+            .arg("ServerAliveCountMax=3")
+            .arg("-o")
+            .arg("ConnectTimeout=10")
+            .arg("-L")
+            .arg(forward)
+            .arg("-p")
+            .arg(target.ssh_port.to_string())
+            .arg(target.ssh_destination())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let child = command.spawn().map_err(|error| {
+            format!(
+                "failed to launch ssh tunnel to {}: {error}",
+                target.ssh_destination()
+            )
+        })?;
+
+        Ok(Self { child, local_port })
+    }
+
+    fn local_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.local_port)
+    }
+
+    fn stop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+impl Drop for SshDaemonTunnel {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 struct RepositoryContextMenu {
     repository_index: usize,
     position: gpui::Point<Pixels>,
@@ -902,6 +1000,7 @@ struct ArborWindow {
     active_outpost_index: Option<usize>,
     remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
     ssh_connection_pool: Arc<arbor_ssh::connection::SshConnectionPool>,
+    ssh_daemon_tunnel: Option<SshDaemonTunnel>,
     manage_hosts_modal: Option<ManageHostsModal>,
     manage_presets_modal: Option<ManagePresetsModal>,
     agent_presets: Vec<AgentPreset>,
@@ -1115,6 +1214,7 @@ impl ArborWindow {
                     active_outpost_index: None,
                     remote_hosts,
                     ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+                    ssh_daemon_tunnel: None,
                     manage_hosts_modal: None,
                     manage_presets_modal: None,
                     agent_presets,
@@ -1378,6 +1478,7 @@ impl ArborWindow {
             active_outpost_index: None,
             remote_hosts,
             ssh_connection_pool: Arc::new(arbor_ssh::connection::SshConnectionPool::new()),
+            ssh_daemon_tunnel: None,
             manage_hosts_modal: None,
             manage_presets_modal: None,
             agent_presets,
@@ -4028,8 +4129,56 @@ impl ArborWindow {
     }
 
     fn connect_to_daemon_url(&mut self, url: &str, label: Option<String>, cx: &mut Context<Self>) {
+        self.stop_active_ssh_daemon_tunnel();
+        let _ = self.connect_to_daemon_endpoint(url, label, None, cx);
+    }
+
+    fn connect_to_ssh_daemon(
+        &mut self,
+        target: SshDaemonTarget,
+        label: Option<String>,
+        auth_key: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_active_ssh_daemon_tunnel();
+
+        let tunnel = match SshDaemonTunnel::start(&target) {
+            Ok(tunnel) => tunnel,
+            Err(error) => {
+                self.notice = Some(error);
+                self.terminal_daemon = None;
+                self.connected_daemon_label = None;
+                cx.notify();
+                return;
+            },
+        };
+
+        let local_url = tunnel.local_url();
+        tracing::info!(
+            remote = %target.ssh_destination(),
+            ssh_port = target.ssh_port,
+            daemon_port = target.daemon_port,
+            local_url = %local_url,
+            "connecting to daemon through ssh tunnel"
+        );
+
+        self.ssh_daemon_tunnel = Some(tunnel);
+        let connected = self.connect_to_daemon_endpoint(&local_url, label, Some(auth_key), cx);
+        if !connected {
+            self.stop_active_ssh_daemon_tunnel();
+        }
+    }
+
+    fn connect_to_daemon_endpoint(
+        &mut self,
+        url: &str,
+        label: Option<String>,
+        auth_key: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         tracing::info!(url = %url, "connecting to daemon");
         self.daemon_base_url = url.to_owned();
+        let token_key = auth_key.unwrap_or_else(|| url.to_owned());
         let mut client = match HttpTerminalDaemon::new(url) {
             Ok(c) => c,
             Err(error) => {
@@ -4037,39 +4186,47 @@ impl ArborWindow {
                 self.terminal_daemon = None;
                 self.connected_daemon_label = None;
                 cx.notify();
-                return;
+                return false;
             },
         };
-        // Apply saved auth token for this URL if we have one
-        if let Some(token) = self.daemon_auth_tokens.get(url) {
+
+        if let Some(token) = self.daemon_auth_tokens.get(&token_key) {
             client.set_auth_token(Some(token.clone()));
         }
-        // Try to connect and list sessions
+
         match client.list_sessions() {
             Ok(records) => {
                 self.terminal_daemon = Some(client);
                 self.connected_daemon_label = label;
                 self.restore_terminal_sessions_from_records(records, true);
                 self.refresh_worktrees(cx);
+                cx.notify();
+                true
             },
             Err(error) => {
                 if error.is_unauthorized() || error.is_forbidden() {
-                    // Show auth modal
                     self.daemon_auth_modal = Some(DaemonAuthModal {
-                        daemon_url: url.to_owned(),
+                        daemon_url: token_key,
                         token: String::new(),
                         error: None,
                     });
                     self.terminal_daemon = Some(client);
                     self.connected_daemon_label = label;
+                    cx.notify();
+                    true
                 } else {
                     self.notice = Some(format!("failed to connect to {url}: {error}"));
                     self.terminal_daemon = None;
                     self.connected_daemon_label = None;
+                    cx.notify();
+                    false
                 }
             },
         }
-        cx.notify();
+    }
+
+    fn stop_active_ssh_daemon_tunnel(&mut self) {
+        let _ = self.ssh_daemon_tunnel.take();
     }
 
     fn submit_daemon_auth(&mut self, cx: &mut Context<Self>) {
@@ -5801,6 +5958,78 @@ impl ArborWindow {
             return;
         }
 
+        if self.daemon_auth_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.daemon_auth_modal = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.submit_daemon_auth(cx);
+                    cx.stop_propagation();
+                },
+                "backspace" => {
+                    if let Some(modal) = self.daemon_auth_modal.as_mut() {
+                        modal.token.pop();
+                        modal.error = None;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                },
+                _ => {
+                    if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                        if let Some(modal) = self.daemon_auth_modal.as_mut() {
+                            modal.token.push_str(key_char);
+                            modal.error = None;
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }
+                },
+            }
+            return;
+        }
+
+        if self.connect_to_host_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.connect_to_host_modal = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                },
+                "enter" | "return" => {
+                    self.submit_connect_to_host(cx);
+                    cx.stop_propagation();
+                },
+                "backspace" => {
+                    if let Some(modal) = self.connect_to_host_modal.as_mut() {
+                        modal.address.pop();
+                        modal.error = None;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                },
+                _ => {
+                    if let Some(key_char) = event.keystroke.key_char.as_ref() {
+                        if let Some(modal) = self.connect_to_host_modal.as_mut() {
+                            modal.address.push_str(key_char);
+                            modal.error = None;
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }
+                },
+            }
+            return;
+        }
+
         if self.manage_hosts_modal.is_some() {
             if event.keystroke.modifiers.platform {
                 return;
@@ -6263,6 +6492,7 @@ impl ArborWindow {
 
     fn action_confirm_quit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.sync_daemon_session_store(cx);
+        self.stop_active_ssh_daemon_tunnel();
         cx.quit();
     }
 
@@ -6273,6 +6503,7 @@ impl ArborWindow {
 
     fn action_immediate_quit(&mut self, _: &ImmediateQuit, _: &mut Window, cx: &mut Context<Self>) {
         self.sync_daemon_session_store(cx);
+        self.stop_active_ssh_daemon_tunnel();
         cx.quit();
     }
 
@@ -6346,16 +6577,28 @@ impl ArborWindow {
             cx.notify();
             return;
         }
-        // Normalize: add http:// if no scheme, add port if missing
-        let url = if addr.starts_with("http://") || addr.starts_with("https://") {
-            addr.clone()
-        } else if addr.contains(':') {
-            format!("http://{addr}")
-        } else {
-            format!("http://{addr}:8787")
+
+        let target = match parse_connect_host_target(&addr) {
+            Ok(target) => target,
+            Err(error) => {
+                self.connect_to_host_modal = Some(ConnectToHostModal {
+                    address: modal.address,
+                    error: Some(error),
+                });
+                cx.notify();
+                return;
+            },
         };
         let label = addr.clone();
-        self.connect_to_daemon_url(&url, Some(label), cx);
+        match target {
+            ConnectHostTarget::Http { url, auth_key } => {
+                self.stop_active_ssh_daemon_tunnel();
+                let _ = self.connect_to_daemon_endpoint(&url, Some(label), Some(auth_key), cx);
+            },
+            ConnectHostTarget::Ssh { target, auth_key } => {
+                self.connect_to_ssh_daemon(target, Some(label), auth_key, cx);
+            },
+        }
     }
 
     fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
@@ -7362,6 +7605,8 @@ impl ArborWindow {
             || self.manage_hosts_modal.is_some()
             || self.manage_presets_modal.is_some()
             || self.manage_repo_presets_modal.is_some()
+            || self.daemon_auth_modal.is_some()
+            || self.connect_to_host_modal.is_some()
         {
             return;
         }
@@ -12777,31 +13022,6 @@ impl ArborWindow {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if let Some(ref mut modal) = this.daemon_auth_modal {
-                            match &event.keystroke.key {
-                                key if key == "enter" => {
-                                    this.submit_daemon_auth(cx);
-                                },
-                                key if key == "backspace" => {
-                                    modal.token.pop();
-                                    modal.error = None;
-                                    cx.notify();
-                                },
-                                key if key == "escape" => {
-                                    this.daemon_auth_modal = None;
-                                    cx.notify();
-                                },
-                                _ => {
-                                    if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                                        modal.token.push_str(key_char);
-                                        modal.error = None;
-                                        cx.notify();
-                                    }
-                                },
-                            }
-                        }
-                    }))
                     .child(
                         div()
                             .text_sm()
@@ -12923,31 +13143,6 @@ impl ArborWindow {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if let Some(ref mut modal) = this.connect_to_host_modal {
-                            match &event.keystroke.key {
-                                key if key == "enter" => {
-                                    this.submit_connect_to_host(cx);
-                                },
-                                key if key == "backspace" => {
-                                    modal.address.pop();
-                                    modal.error = None;
-                                    cx.notify();
-                                },
-                                key if key == "escape" => {
-                                    this.connect_to_host_modal = None;
-                                    cx.notify();
-                                },
-                                _ => {
-                                    if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                                        modal.address.push_str(key_char);
-                                        modal.error = None;
-                                        cx.notify();
-                                    }
-                                },
-                            }
-                        }
-                    }))
                     .child(
                         div()
                             .text_sm()
@@ -12959,7 +13154,7 @@ impl ArborWindow {
                         div()
                             .text_xs()
                             .text_color(rgb(theme.text_muted))
-                            .child("Enter the address of a remote arbor-httpd instance"),
+                            .child("Use http://HOST:PORT or ssh://[user@]HOST[:ssh_port]/"),
                     )
                     .when_some(error, |this, err| {
                         this.child(div().text_xs().text_color(rgb(0xf38ba8_u32)).child(err))
@@ -12993,7 +13188,7 @@ impl ArborWindow {
                                     .child(if address.is_empty() {
                                         div()
                                             .text_color(rgb(theme.text_disabled))
-                                            .child("192.168.1.42:8787")
+                                            .child("ssh://dev@192.168.1.42/")
                                             .into_any_element()
                                     } else {
                                         div()
@@ -13660,6 +13855,171 @@ fn daemon_base_url_from_config(raw: Option<&str>) -> String {
         .to_owned()
 }
 
+fn parse_connect_host_target(raw: &str) -> Result<ConnectHostTarget, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("Address cannot be empty".to_owned());
+    }
+
+    if value.starts_with("ssh://") {
+        let target = parse_ssh_daemon_target(value)?;
+        let auth_key = format_ssh_auth_key(&target);
+        return Ok(ConnectHostTarget::Ssh { target, auth_key });
+    }
+
+    if value.starts_with("https://") {
+        return Err(
+            "https:// is not supported by arbor-httpd; use http://HOST:PORT or ssh://HOST/"
+                .to_owned(),
+        );
+    }
+
+    if value.starts_with("http://") {
+        return Ok(ConnectHostTarget::Http {
+            url: value.to_owned(),
+            auth_key: value.to_owned(),
+        });
+    }
+
+    if value.contains("://") {
+        return Err(
+            "unsupported scheme; use http://HOST:PORT or ssh://[user@]HOST[:ssh_port]/".to_owned(),
+        );
+    }
+
+    let normalized = if value.contains(':') {
+        format!("http://{value}")
+    } else {
+        format!("http://{value}:{DEFAULT_DAEMON_PORT}")
+    };
+
+    Ok(ConnectHostTarget::Http {
+        url: normalized.clone(),
+        auth_key: normalized,
+    })
+}
+
+fn parse_ssh_daemon_target(raw: &str) -> Result<SshDaemonTarget, String> {
+    let Some(without_scheme) = raw.trim().strip_prefix("ssh://") else {
+        return Err("ssh address must start with ssh://".to_owned());
+    };
+    if without_scheme.is_empty() {
+        return Err("ssh address is missing a host".to_owned());
+    }
+
+    let (authority, path_tail) = match without_scheme.split_once('/') {
+        Some((authority, tail)) => (authority, tail),
+        None => (without_scheme, ""),
+    };
+
+    if authority.trim().is_empty() {
+        return Err("ssh address is missing a host".to_owned());
+    }
+
+    let (user, host, ssh_port) = parse_ssh_authority(authority)?;
+    let daemon_port = parse_ssh_daemon_port(path_tail)?;
+
+    Ok(SshDaemonTarget {
+        user,
+        host,
+        ssh_port,
+        daemon_port,
+    })
+}
+
+fn parse_ssh_authority(authority: &str) -> Result<(Option<String>, String, u16), String> {
+    let (user, host_port) = match authority.rsplit_once('@') {
+        Some((candidate_user, host_port))
+            if !candidate_user.trim().is_empty() && !host_port.trim().is_empty() =>
+        {
+            (Some(candidate_user.trim().to_owned()), host_port.trim())
+        },
+        Some(_) => return Err("invalid ssh address: malformed user@host section".to_owned()),
+        None => (None, authority.trim()),
+    };
+
+    let (host, port) = parse_host_and_optional_port(host_port, DEFAULT_SSH_PORT)?;
+    Ok((user, host, port))
+}
+
+fn parse_ssh_daemon_port(path_tail: &str) -> Result<u16, String> {
+    let trimmed = path_tail.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_DAEMON_PORT);
+    }
+    if trimmed.contains('/') || trimmed.contains('?') || trimmed.contains('#') {
+        return Err(
+            "invalid ssh address path: only an optional daemon port is allowed, for example ssh://host/8787"
+                .to_owned(),
+        );
+    }
+
+    trimmed
+        .parse::<u16>()
+        .map_err(|error| format!("invalid daemon port `{trimmed}`: {error}"))
+}
+
+fn parse_host_and_optional_port(value: &str, default_port: u16) -> Result<(String, u16), String> {
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return Err("invalid host: missing closing `]` for IPv6 address".to_owned());
+        };
+        if host.trim().is_empty() {
+            return Err("host is empty".to_owned());
+        }
+        if suffix.is_empty() {
+            return Ok((host.to_owned(), default_port));
+        }
+        let Some(port_text) = suffix.strip_prefix(':') else {
+            return Err("invalid host: unexpected characters after IPv6 address".to_owned());
+        };
+        let port = port_text
+            .parse::<u16>()
+            .map_err(|error| format!("invalid port `{port_text}`: {error}"))?;
+        return Ok((host.to_owned(), port));
+    }
+
+    let Some((host, port_text)) = value.rsplit_once(':') else {
+        return Ok((value.to_owned(), default_port));
+    };
+
+    if host.contains(':') {
+        return Err("IPv6 hosts must be wrapped in brackets, for example [::1]".to_owned());
+    }
+    if host.trim().is_empty() {
+        return Err("host is empty".to_owned());
+    }
+    let port = port_text
+        .parse::<u16>()
+        .map_err(|error| format!("invalid port `{port_text}`: {error}"))?;
+    Ok((host.to_owned(), port))
+}
+
+fn format_ssh_auth_key(target: &SshDaemonTarget) -> String {
+    let host = if target.host.contains(':') {
+        format!("[{}]", target.host)
+    } else {
+        target.host.clone()
+    };
+    let authority = match target.user.as_deref() {
+        Some(user) if !user.trim().is_empty() => {
+            format!("{user}@{host}:{}", target.ssh_port)
+        },
+        _ => format!("{host}:{}", target.ssh_port),
+    };
+
+    format!("ssh://{authority}/{}", target.daemon_port)
+}
+
+fn reserve_local_loopback_port() -> Result<u16, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("failed to reserve local port: {error}"))?;
+    listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|error| format!("failed to resolve local tunnel port: {error}"))
+}
+
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
     worktree::paths_equivalent(left, right)
 }
@@ -13830,6 +14190,12 @@ fn load_outpost_summaries(
         .collect()
 }
 
+impl Drop for ArborWindow {
+    fn drop(&mut self) {
+        self.stop_active_ssh_daemon_tunnel();
+    }
+}
+
 impl WorktreeSummary {
     fn from_worktree(entry: &worktree::Worktree, repo_root: &Path) -> Self {
         let label = entry
@@ -13928,6 +14294,19 @@ impl EntityInputHandler for ArborWindow {
     ) {
         self.ime_marked_text = None;
         if text.is_empty() {
+            cx.notify();
+            return;
+        }
+        // When a modal with a text field is open, route IME text there instead
+        if let Some(ref mut modal) = self.daemon_auth_modal {
+            modal.token.push_str(text);
+            modal.error = None;
+            cx.notify();
+            return;
+        }
+        if let Some(ref mut modal) = self.connect_to_host_modal {
+            modal.address.push_str(text);
+            modal.error = None;
             cx.notify();
             return;
         }
@@ -18499,8 +18878,103 @@ fn set_dock_icon() {
 #[cfg(not(target_os = "macos"))]
 fn set_dock_icon() {}
 
+enum LaunchMode {
+    Gui,
+    Daemon { bind_addr: Option<String> },
+    Help,
+}
+
+fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMode, String> {
+    let mut daemon_mode = false;
+    let mut bind_addr: Option<String> = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--daemon" | "--daemon-only" | "daemon" => {
+                daemon_mode = true;
+            },
+            "--bind" | "--daemon-bind" => {
+                let Some(value) = args.next() else {
+                    return Err(format!("missing value for `{arg}`"));
+                };
+                if value.trim().is_empty() {
+                    return Err(format!("`{arg}` requires a non-empty address"));
+                }
+                bind_addr = Some(value);
+            },
+            "-h" | "--help" => return Ok(LaunchMode::Help),
+            unknown => return Err(format!("unknown argument `{unknown}`")),
+        }
+    }
+
+    if daemon_mode {
+        Ok(LaunchMode::Daemon { bind_addr })
+    } else {
+        Ok(LaunchMode::Gui)
+    }
+}
+
+fn daemon_cli_usage(program_name: &str) -> String {
+    format!(
+        "Usage:\n  {program_name}\n  {program_name} --daemon [--bind ADDR]\n\nExamples:\n  {program_name} --daemon\n  {program_name} --daemon --bind 0.0.0.0:8787"
+    )
+}
+
+fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), String> {
+    let binary = find_arbor_httpd_binary().ok_or_else(|| {
+        "could not find `arbor-httpd` in PATH or next to the current executable".to_owned()
+    })?;
+
+    let mut command = Command::new(&binary);
+    if let Some(path) = AUGMENTED_PATH.get() {
+        command.env("PATH", path);
+    }
+    if let Some(bind_addr) = bind_addr {
+        command.env("ARBOR_HTTPD_BIND", bind_addr);
+    }
+
+    let status = command.status().map_err(|error| {
+        format!(
+            "failed to start `{}`: {error}",
+            binary
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("arbor-httpd")
+        )
+    })?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(format!("arbor-httpd exited with status {status}"))
+}
+
 fn main() {
+    let program_name = env::args().next().unwrap_or_else(|| "arbor".to_owned());
+    let launch_mode = match parse_launch_mode(env::args().skip(1)) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("{error}\n\n{}", daemon_cli_usage(&program_name));
+            std::process::exit(2);
+        },
+    };
+
+    if matches!(launch_mode, LaunchMode::Help) {
+        println!("{}", daemon_cli_usage(&program_name));
+        return;
+    }
+
     augment_path_from_login_shell();
+
+    if let LaunchMode::Daemon { bind_addr } = launch_mode {
+        if let Err(error) = run_daemon_mode(bind_addr) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let log_buffer = log_layer::LogBuffer::new();
 
@@ -19146,5 +19620,54 @@ mod tests {
                 .iter()
                 .any(|line| line.left_text == "a3" && line.right_text == "a3")
         );
+    }
+
+    #[test]
+    fn parse_connect_host_target_normalizes_bare_http_host() {
+        let target = crate::parse_connect_host_target("10.0.0.5")
+            .expect("bare host should parse as http daemon target");
+
+        match target {
+            crate::ConnectHostTarget::Http { url, auth_key } => {
+                assert_eq!(url, "http://10.0.0.5:8787");
+                assert_eq!(auth_key, url);
+            },
+            crate::ConnectHostTarget::Ssh { .. } => panic!("expected http target"),
+        }
+    }
+
+    #[test]
+    fn parse_connect_host_target_supports_ssh_scheme() {
+        let target = crate::parse_connect_host_target("ssh://dev@example.com:2222/9001")
+            .expect("ssh address should parse");
+
+        match target {
+            crate::ConnectHostTarget::Ssh { target, auth_key } => {
+                assert_eq!(target.user.as_deref(), Some("dev"));
+                assert_eq!(target.host, "example.com");
+                assert_eq!(target.ssh_port, 2222);
+                assert_eq!(target.daemon_port, 9001);
+                assert_eq!(auth_key, "ssh://dev@example.com:2222/9001");
+            },
+            crate::ConnectHostTarget::Http { .. } => panic!("expected ssh target"),
+        }
+    }
+
+    #[test]
+    fn parse_launch_mode_supports_daemon_bind() {
+        let mode = crate::parse_launch_mode(vec![
+            "--daemon".to_owned(),
+            "--bind".to_owned(),
+            "0.0.0.0:8787".to_owned(),
+        ])
+        .expect("daemon args should parse");
+
+        match mode {
+            crate::LaunchMode::Daemon { bind_addr } => {
+                assert_eq!(bind_addr.as_deref(), Some("0.0.0.0:8787"));
+            },
+            crate::LaunchMode::Gui => panic!("expected daemon launch mode"),
+            crate::LaunchMode::Help => panic!("expected daemon launch mode"),
+        }
     }
 }
