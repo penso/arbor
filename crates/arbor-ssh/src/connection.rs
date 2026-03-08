@@ -51,9 +51,15 @@ impl SshConnection {
 
         session.connect()?;
 
-        // Try ssh-agent first, fall back to public key auto
-        let auth_status = session.userauth_agent(None)?;
-        if auth_status != AuthStatus::Success {
+        // Try ssh-agent first, fall back to public key auto.
+        // Agent auth can fail with an error (e.g. "Out of memory") when the
+        // agent holds key types that libssh cannot handle, such as ed25519-sk
+        // (FIDO) keys. Treat any agent error as a non-fatal skip.
+        let agent_ok = session
+            .userauth_agent(None)
+            .map(|s| s == AuthStatus::Success)
+            .unwrap_or(false);
+        if !agent_ok {
             let auto_status = session.userauth_public_key_auto(None, None)?;
             if auto_status != AuthStatus::Success {
                 return Err(SshError::AuthFailed {
