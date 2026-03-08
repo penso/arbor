@@ -144,6 +144,7 @@ dependencies = [
  "arbor-mosh",
  "arbor-ssh",
  "arbor-terminal-emulator",
+ "cocoa 0.26.0",
  "config",
  "futures",
  "git2",

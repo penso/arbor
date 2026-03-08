@@ -12,6 +12,9 @@ path = "src/main.rs"
 [features]
 vendored-openssl = ["libssh-rs-sys/vendored-openssl", "libssh-rs-sys/vendored"]
 
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+
 [dependencies]
 libssh-rs-sys = { version = "0.2", optional = true }
 anyhow = { workspace = true }
