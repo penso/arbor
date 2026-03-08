@@ -26,9 +26,66 @@ jobs:
             exit 1
           fi
 
+  fmt:
+    name: Format
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # just
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: rustfmt
+      - run: just format-check
+
+  clippy:
+    name: Clippy
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # just
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: clippy
+      - run: just lint
+
+  test:
+    name: Test
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # just
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
+      - run: just test
+
   build-macos:
     name: Build macOS app
-    needs: validate-tag
+    needs: [fmt, clippy, test]
     runs-on: macos-14
     permissions:
       contents: read
@@ -171,7 +228,7 @@ jobs:
 
   build-linux:
     name: Build Linux app (${{ matrix.target }})
-    needs: validate-tag
+    needs: [fmt, clippy, test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -257,7 +314,7 @@ jobs:
 
   build-windows:
     name: Build Windows app
-    needs: validate-tag
+    needs: [fmt, clippy, test]
     runs-on: windows-latest
     permissions:
       contents: read
