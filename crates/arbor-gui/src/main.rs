@@ -1,4 +1,5 @@
 mod app_config;
+mod github_auth_store;
 mod log_layer;
 mod notifications;
 mod repository_store;
@@ -73,6 +74,12 @@ const TITLEBAR_HEIGHT: f32 = 34.;
 const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const GITHUB_DEVICE_FLOW_POLL_MIN_INTERVAL: Duration = Duration::from_secs(5);
+const GITHUB_OAUTH_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
+const GITHUB_OAUTH_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+const GITHUB_OAUTH_SCOPE: &str = "repo read:user";
+const BUILT_IN_GITHUB_OAUTH_CLIENT_ID: Option<&str> = Some("Ov23liVexfjFZQXcuQib");
+const GITHUB_AUTH_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1200);
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
@@ -156,7 +163,8 @@ actions!(arbor, [
     NavigateWorktreeBack,
     NavigateWorktreeForward,
     CollapseAllRepositories,
-    ViewLogs
+    ViewLogs,
+    ShowAbout
 ]);
 
 #[derive(Debug, Clone)]
@@ -684,6 +692,12 @@ struct CreateModal {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct GitHubAuthModal {
+    user_code: String,
+    verification_url: String,
+}
+
 enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
     MoveActiveField,
@@ -766,6 +780,11 @@ struct ArborWindow {
     terminal_daemon: Option<HttpTerminalDaemon>,
     daemon_base_url: String,
     ui_state_store: Box<dyn ui_state_store::UiStateStore>,
+    github_auth_store: Box<dyn github_auth_store::GithubAuthStore>,
+    github_auth_state: github_auth_store::GithubAuthState,
+    github_auth_in_progress: bool,
+    github_auth_copy_feedback_active: bool,
+    github_auth_copy_feedback_generation: u64,
     config_path: PathBuf,
     config_last_modified: Option<SystemTime>,
     repositories: Vec<RepositorySummary>,
@@ -800,6 +819,7 @@ struct ArborWindow {
     terminal_selection: Option<TerminalSelection>,
     terminal_selection_drag_anchor: Option<TerminalGridPosition>,
     create_modal: Option<CreateModal>,
+    github_auth_modal: Option<GitHubAuthModal>,
     delete_modal: Option<DeleteModal>,
     outposts: Vec<OutpostSummary>,
     outpost_store: Box<dyn arbor_core::outpost_store::OutpostStore>,
@@ -812,6 +832,7 @@ struct ArborWindow {
     active_preset_tab: Option<AgentPresetKind>,
     repo_presets: Vec<RepoPreset>,
     manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
+    show_about: bool,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
@@ -869,6 +890,8 @@ impl ArborWindow {
     ) -> Self {
         let repository_store = repository_store::default_repository_store();
         let ui_state_store = ui_state_store::default_ui_state_store();
+        let github_auth_store = github_auth_store::default_github_auth_store();
+        let loaded_github_auth_state = github_auth_store.load();
         let config_path = app_config::config_path();
         let cwd = match env::current_dir() {
             Ok(path) => path,
@@ -877,6 +900,13 @@ impl ArborWindow {
                 let loaded_config = app_config::load_or_create_config();
                 notice_parts.extend(loaded_config.notices);
                 let config_last_modified = app_config::config_last_modified(&config_path);
+                let github_auth_state = match loaded_github_auth_state.clone() {
+                    Ok(state) => state,
+                    Err(error) => {
+                        notice_parts.push(format!("failed to load GitHub auth state: {error}"));
+                        github_auth_store::GithubAuthState::default()
+                    },
+                };
 
                 let repositories = match repository_store.load_roots() {
                     Ok(roots) => repository_store::resolve_repositories_from_roots(roots),
@@ -942,6 +972,11 @@ impl ArborWindow {
                     terminal_daemon: None,
                     daemon_base_url: DEFAULT_DAEMON_BASE_URL.to_owned(),
                     ui_state_store,
+                    github_auth_store,
+                    github_auth_state,
+                    github_auth_in_progress: false,
+                    github_auth_copy_feedback_active: false,
+                    github_auth_copy_feedback_generation: 0,
                     config_path,
                     config_last_modified,
                     repositories,
@@ -980,6 +1015,7 @@ impl ArborWindow {
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
                     create_modal: None,
+                    github_auth_modal: None,
                     delete_modal: None,
                     outposts,
                     outpost_store,
@@ -992,6 +1028,7 @@ impl ArborWindow {
                     active_preset_tab: None,
                     repo_presets: Vec::new(),
                     manage_repo_presets_modal: None,
+                    show_about: false,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -1037,6 +1074,13 @@ impl ArborWindow {
         let loaded_config = app_config::load_or_create_config();
         let mut notice_parts = loaded_config.notices;
         let config_last_modified = app_config::config_last_modified(&config_path);
+        let github_auth_state = match loaded_github_auth_state {
+            Ok(state) => state,
+            Err(error) => {
+                notice_parts.push(format!("failed to load GitHub auth state: {error}"));
+                github_auth_store::GithubAuthState::default()
+            },
+        };
 
         if let Err(error) = daemon_session_store.load() {
             tracing::warn!(%error, "failed to load daemon session metadata");
@@ -1168,6 +1212,11 @@ impl ArborWindow {
             terminal_daemon,
             daemon_base_url,
             ui_state_store,
+            github_auth_store,
+            github_auth_state,
+            github_auth_in_progress: false,
+            github_auth_copy_feedback_active: false,
+            github_auth_copy_feedback_generation: 0,
             config_path,
             config_last_modified,
             repositories,
@@ -1210,6 +1259,7 @@ impl ArborWindow {
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
             create_modal: None,
+            github_auth_modal: None,
             delete_modal: None,
             outposts,
             outpost_store,
@@ -1222,6 +1272,7 @@ impl ArborWindow {
             active_preset_tab: None,
             repo_presets: Vec::new(),
             manage_repo_presets_modal: None,
+            show_about: false,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
@@ -2516,6 +2567,7 @@ impl ArborWindow {
                 )
             })
             .collect();
+        let github_token = self.github_access_token();
 
         if tracked_branches.is_empty() {
             let mut changed = false;
@@ -2537,9 +2589,13 @@ impl ArborWindow {
                     tracked_branches
                         .into_iter()
                         .map(|(path, branch, repo_slug)| {
-                            let pr_number = repo_slug
-                                .as_ref()
-                                .and_then(|_| github_pr_number_for_worktree(&path, &branch));
+                            let pr_number = repo_slug.as_ref().and_then(|_| {
+                                github_pr_number_for_worktree(
+                                    &path,
+                                    &branch,
+                                    github_token.as_deref(),
+                                )
+                            });
                             let pr_url = pr_number.and_then(|pr_number| {
                                 repo_slug
                                     .as_ref()
@@ -3178,6 +3234,201 @@ impl ArborWindow {
         cx.open_url(url);
     }
 
+    fn close_github_auth_modal(&mut self, cx: &mut Context<Self>) {
+        self.github_auth_copy_feedback_active = false;
+        if self.github_auth_modal.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn copy_github_auth_code_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.github_auth_modal.as_ref() else {
+            return;
+        };
+
+        cx.write_to_clipboard(ClipboardItem::new_string(modal.user_code.clone()));
+        self.github_auth_copy_feedback_active = true;
+        self.github_auth_copy_feedback_generation =
+            self.github_auth_copy_feedback_generation.saturating_add(1);
+        let generation = self.github_auth_copy_feedback_generation;
+        self.notice = Some("GitHub device code copied to clipboard".to_owned());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move {
+                std::thread::sleep(GITHUB_AUTH_COPY_FEEDBACK_DURATION);
+            })
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if this.github_auth_copy_feedback_generation == generation
+                    && this.github_auth_copy_feedback_active
+                {
+                    this.github_auth_copy_feedback_active = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_github_auth_verification_page(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.github_auth_modal.as_ref() else {
+            return;
+        };
+
+        let url = modal.verification_url.clone();
+        self.open_external_url(&url, cx);
+    }
+
+    fn has_persisted_github_token(&self) -> bool {
+        self.github_auth_state
+            .access_token
+            .as_deref()
+            .and_then(non_empty_trimmed_str)
+            .is_some()
+    }
+
+    fn github_access_token(&self) -> Option<String> {
+        resolve_github_access_token(self.github_auth_state.access_token.as_deref())
+    }
+
+    fn persist_github_auth_state(&self) -> Result<(), String> {
+        self.github_auth_store.save(&self.github_auth_state)
+    }
+
+    fn clear_saved_github_token(&mut self, cx: &mut Context<Self>) {
+        if !self.has_persisted_github_token() {
+            self.notice = Some("no saved GitHub session to disconnect".to_owned());
+            cx.notify();
+            return;
+        }
+
+        self.github_auth_state = github_auth_store::GithubAuthState::default();
+        self.notice = match self.persist_github_auth_state() {
+            Ok(()) => Some("disconnected from GitHub".to_owned()),
+            Err(error) => Some(format!(
+                "disconnected, but failed to persist auth state: {error}"
+            )),
+        };
+        self.refresh_worktree_pull_requests(cx);
+        cx.notify();
+    }
+
+    fn run_github_auth_button_action(&mut self, cx: &mut Context<Self>) {
+        if self.github_auth_in_progress {
+            return;
+        }
+
+        if self.has_persisted_github_token() {
+            self.clear_saved_github_token(cx);
+            return;
+        }
+
+        self.start_github_oauth_sign_in(cx);
+    }
+
+    fn start_github_oauth_sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.github_auth_in_progress {
+            return;
+        }
+
+        let Some(client_id) = github_oauth_client_id() else {
+            self.notice = Some(
+                "GitHub OAuth client ID is not configured. Set ARBOR_GITHUB_OAUTH_CLIENT_ID."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+
+        self.github_auth_modal = None;
+        self.github_auth_copy_feedback_active = false;
+        self.github_auth_in_progress = true;
+        self.notice = Some("starting GitHub device authorization".to_owned());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let client_id_for_start = client_id.clone();
+            let device_code_result = cx
+                .background_spawn(async move { github_request_device_code(&client_id_for_start) })
+                .await;
+
+            let device_code = match device_code_result {
+                Ok(device_code) => device_code,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.github_auth_in_progress = false;
+                        this.github_auth_modal = None;
+                        this.github_auth_copy_feedback_active = false;
+                        this.notice = Some(error);
+                        cx.notify();
+                    });
+                    return;
+                },
+            };
+
+            let verification_url = device_code
+                .verification_uri_complete
+                .clone()
+                .unwrap_or_else(|| device_code.verification_uri.clone());
+            let user_code = device_code.user_code.clone();
+
+            if this
+                .update(cx, |this, cx| {
+                    this.github_auth_modal = Some(GitHubAuthModal {
+                        user_code: user_code.clone(),
+                        verification_url: verification_url.clone(),
+                    });
+                    this.github_auth_copy_feedback_active = false;
+                    this.open_external_url(&verification_url, cx);
+                    this.notice = Some("complete GitHub auth in browser".to_owned());
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            let poll_result = cx
+                .background_spawn(async move {
+                    github_poll_device_access_token(&client_id, &device_code)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.github_auth_in_progress = false;
+                this.github_auth_modal = None;
+                this.github_auth_copy_feedback_active = false;
+                match poll_result {
+                    Ok(token) => {
+                        this.github_auth_state = github_auth_store::GithubAuthState {
+                            access_token: Some(token.access_token),
+                            token_type: token.token_type,
+                            scope: token.scope,
+                        };
+
+                        this.notice = match this.persist_github_auth_state() {
+                            Ok(()) => Some(
+                                "GitHub connected, pull request numbers will refresh automatically"
+                                    .to_owned(),
+                            ),
+                            Err(error) => Some(format!(
+                                "GitHub connected, but failed to persist auth state: {error}"
+                            )),
+                        };
+                        this.refresh_worktree_pull_requests(cx);
+                    },
+                    Err(error) => {
+                        this.notice = Some(error);
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn close_top_bar_worktree_quick_actions(&mut self) {
         self.top_bar_quick_actions_open = false;
         self.top_bar_quick_actions_submenu = None;
@@ -3562,14 +3813,19 @@ impl ArborWindow {
             .github_repo_slug
             .clone()
             .or_else(|| github_repo_slug_for_repo(worktree_path.as_path()));
+        let github_token = self.github_access_token();
 
         self.git_action_in_flight = Some(GitActionKind::CreatePullRequest);
-        self.notice = Some("running gh pr create".to_owned());
+        self.notice = Some("creating pull request".to_owned());
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move {
-                run_create_pr_for_worktree(worktree_path.as_path(), repo_slug.as_deref())
+                run_create_pr_for_worktree(
+                    worktree_path.as_path(),
+                    repo_slug.as_deref(),
+                    github_token.as_deref(),
+                )
             });
             let result = result.await;
 
@@ -4871,6 +5127,18 @@ impl ArborWindow {
             return;
         }
 
+        if self.github_auth_modal.is_some() {
+            if event.keystroke.modifiers.platform {
+                return;
+            }
+
+            if event.keystroke.key.as_str() == "escape" {
+                self.close_github_auth_modal(cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+
         if self.delete_modal.is_some() {
             if event.keystroke.modifiers.platform {
                 return;
@@ -5410,6 +5678,11 @@ impl ArborWindow {
         self.logs_tab_open = true;
         self.logs_tab_active = true;
         self.active_diff_session_id = None;
+        cx.notify();
+    }
+
+    fn action_show_about(&mut self, _: &ShowAbout, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_about = true;
         cx.notify();
     }
 
@@ -6802,6 +7075,30 @@ impl ArborWindow {
         let worktree_quick_actions_enabled = self.selected_local_worktree_path().is_some();
         let worktree_quick_actions_open =
             worktree_quick_actions_enabled && self.top_bar_quick_actions_open;
+        let github_saved_token = self.has_persisted_github_token();
+        let github_env_token = github_access_token_from_env().is_some();
+        let github_auth_busy = self.github_auth_in_progress;
+        let github_auth_label = if github_auth_busy {
+            "Authorizing"
+        } else if github_saved_token {
+            "Disconnect"
+        } else if github_env_token {
+            "Connected (env)"
+        } else {
+            "Sign in"
+        };
+        let github_auth_icon_color = if github_auth_busy {
+            theme.accent
+        } else if github_saved_token || github_env_token {
+            0x68c38d
+        } else {
+            theme.text_muted
+        };
+        let github_auth_text_color = if github_auth_busy || github_saved_token || github_env_token {
+            theme.text_primary
+        } else {
+            theme.text_muted
+        };
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -6905,7 +7202,7 @@ impl ArborWindow {
                             .child(centered_title),
                     ),
             )
-            // Right group: worktree quick actions + report issue button
+            // Right group: GitHub auth, worktree quick actions, and report issue button
             .child(
                 div()
                     .absolute()
@@ -6915,6 +7212,37 @@ impl ArborWindow {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .child(
+                        div()
+                            .id("github-auth")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .text_color(rgb(github_auth_text_color))
+                            .when(!github_auth_busy, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(theme.panel_bg))
+                                            .text_color(rgb(theme.text_primary))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.run_github_auth_button_action(cx);
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(github_auth_icon_color))
+                                    .child("\u{f09b}"),
+                            )
+                            .child(div().text_size(px(11.)).child(github_auth_label)),
+                    )
                     .child(
                         div()
                             .id("worktree-quick-actions")
@@ -9497,6 +9825,20 @@ impl ArborWindow {
             .flex()
             .items_center()
             .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_create_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.close_create_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .w(px(620.))
@@ -9509,6 +9851,12 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     // Header
                     .child(
                         div()
@@ -9899,6 +10247,209 @@ impl ArborWindow {
             )
     }
 
+    fn render_github_auth_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.github_auth_modal.clone() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let copy_feedback_active = self.github_auth_copy_feedback_active;
+        let copy_label = if copy_feedback_active {
+            "Copied"
+        } else {
+            "Copy code"
+        };
+        let status_line = if self.github_auth_in_progress {
+            "Waiting for GitHub authorization..."
+        } else {
+            "Authorization complete."
+        };
+        let detail_line = if self.github_auth_in_progress {
+            "Arbor will continue automatically after you approve access."
+        } else {
+            "You can close this dialog."
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_github_auth_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.close_github_auth_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(560.))
+                    .max_w(px(560.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("GitHub Sign In"),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "close-github-auth-modal",
+                                    "Close",
+                                    false,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_github_auth_modal(cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child("1. Open GitHub and enter this device code."),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child("2. Return here after approving Arbor."),
+                    )
+                    .child(
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Device code"),
+                            )
+                            .child(
+                                div()
+                                    .pt_1()
+                                    .text_lg()
+                                    .font_family(FONT_MONO)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(modal.user_code),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.border))
+                            .bg(rgb(theme.panel_bg))
+                            .p_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Verification URL"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_family(FONT_MONO)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(modal.verification_url),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(if copy_feedback_active {
+                                0x68c38d
+                            } else {
+                                theme.accent
+                            }))
+                            .child(if copy_feedback_active {
+                                "Code copied to clipboard"
+                            } else {
+                                status_line
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_muted))
+                            .child(detail_line),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                action_button(
+                                    theme,
+                                    "github-auth-copy-code",
+                                    copy_label,
+                                    copy_feedback_active,
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.copy_github_auth_code_to_clipboard(cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                action_button(
+                                    theme,
+                                    "github-auth-open",
+                                    "Open GitHub",
+                                    true,
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.open_github_auth_verification_page(cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+    }
+
     fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(menu) = self.repository_context_menu.as_ref() else {
             return div();
@@ -10118,6 +10669,20 @@ impl ArborWindow {
             .flex()
             .items_center()
             .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_delete_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.close_delete_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .w(px(440.))
@@ -10130,6 +10695,12 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     // Header
                     .child(
                         div()
@@ -10292,6 +10863,20 @@ impl ArborWindow {
                 .flex()
                 .items_center()
                 .justify_center()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_manage_hosts_modal(cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_manage_hosts_modal(cx);
+                        cx.stop_propagation();
+                    }),
+                )
                 .child(
                     div()
                         .w(px(620.))
@@ -10304,6 +10889,12 @@ impl ArborWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
                         // Header
                         .child(
                             div()
@@ -10447,6 +11038,20 @@ impl ArborWindow {
             .flex()
             .items_center()
             .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_manage_hosts_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.close_manage_hosts_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .w(px(620.))
@@ -10459,6 +11064,12 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     // Header
                     .child(
                         div()
@@ -10636,6 +11247,20 @@ impl ArborWindow {
             .flex()
             .items_center()
             .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_manage_presets_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.close_manage_presets_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .w(px(620.))
@@ -10648,6 +11273,12 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .child(
                         div()
                             .flex()
@@ -10771,6 +11402,97 @@ impl ArborWindow {
             )
     }
 
+    fn render_about_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        if !self.show_about {
+            return div();
+        }
+
+        let theme = self.theme();
+        let version = env!("CARGO_PKG_VERSION");
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.show_about = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.show_about = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(340.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("About Arbor"),
+                            )
+                            .child(
+                                action_button(theme, "close-about", "Close", false, true).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.show_about = false;
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .py_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(format!("Arbor {version}")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Git worktree manager"),
+                            ),
+                    ),
+            )
+    }
+
     fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_repo_presets_modal.clone() else {
             return div();
@@ -10792,6 +11514,20 @@ impl ArborWindow {
             .flex()
             .items_center()
             .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_manage_repo_presets_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.close_manage_repo_presets_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 div()
                     .w(px(620.))
@@ -10804,6 +11540,12 @@ impl ArborWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .child(
                         div()
                             .flex()
@@ -11341,6 +12083,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_navigate_worktree_forward))
             .on_action(cx.listener(Self::action_collapse_all_repositories))
             .on_action(cx.listener(Self::action_view_logs))
+            .on_action(cx.listener(Self::action_show_about))
             .on_action(cx.listener(Self::action_request_quit))
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
@@ -11374,12 +12117,14 @@ impl Render for ArborWindow {
             .child(self.render_top_bar_worktree_quick_actions_menu(cx))
             .child(self.render_notice_toast(cx))
             .child(self.render_create_modal(cx))
+            .child(self.render_github_auth_modal(cx))
             .child(self.render_repository_context_menu(cx))
             .child(self.render_worktree_context_menu(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))
             .child(self.render_manage_repo_presets_modal(cx))
+            .child(self.render_about_modal(cx))
             .child(div().when_some(self.theme_toast.clone(), |this, toast| {
                 this.child(
                     div()
@@ -13958,6 +14703,7 @@ fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
 fn run_create_pr_for_worktree(
     worktree_path: &Path,
     repo_slug: Option<&str>,
+    github_token: Option<&str>,
 ) -> Result<String, String> {
     if !git_has_tracking_branch(worktree_path) {
         return Err("push the branch before creating a PR".to_owned());
@@ -13980,14 +14726,13 @@ fn run_create_pr_for_worktree(
 
     let owner = owner.to_owned();
     let repo_name = repo_name.to_owned();
+    let token = resolve_github_access_token(github_token)
+        .ok_or_else(|| "GitHub authentication required, click GitHub Sign in first".to_owned())?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|error| format!("failed to create runtime: {error}"))?;
 
     rt.block_on(async {
-        let token = env::var("GITHUB_TOKEN")
-            .map_err(|_| "GITHUB_TOKEN environment variable not set".to_owned())?;
-
         let octocrab = octocrab::Octocrab::builder()
             .personal_token(token)
             .build()
@@ -14075,13 +14820,17 @@ fn github_repo_slug_from_path(path: &str) -> Option<String> {
     Some(format!("{owner}/{repository}"))
 }
 
-fn github_pr_number_for_worktree(worktree_path: &Path, branch: &str) -> Option<u64> {
+fn github_pr_number_for_worktree(
+    worktree_path: &Path,
+    branch: &str,
+    github_token: Option<&str>,
+) -> Option<u64> {
     if branch.trim().is_empty() || branch == "-" {
         return None;
     }
 
-    github_pr_number_by_tracking_branch(worktree_path)
-        .or_else(|| github_pr_number_by_head_branch(worktree_path, branch))
+    github_pr_number_by_tracking_branch(worktree_path, github_token)
+        .or_else(|| github_pr_number_by_head_branch(worktree_path, branch, github_token))
 }
 
 fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
@@ -14101,24 +14850,30 @@ fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
         || branch.eq_ignore_ascii_case("trunk"))
 }
 
-fn github_pr_number_by_tracking_branch(worktree_path: &Path) -> Option<u64> {
+fn github_pr_number_by_tracking_branch(
+    worktree_path: &Path,
+    github_token: Option<&str>,
+) -> Option<u64> {
     let branch = git_branch_name_for_worktree(worktree_path).ok()?;
-    github_pr_number_by_head_branch(worktree_path, &branch)
+    github_pr_number_by_head_branch(worktree_path, &branch, github_token)
 }
 
-fn github_pr_number_by_head_branch(worktree_path: &Path, branch: &str) -> Option<u64> {
+fn github_pr_number_by_head_branch(
+    worktree_path: &Path,
+    branch: &str,
+    github_token: Option<&str>,
+) -> Option<u64> {
     let slug = github_repo_slug_for_repo(worktree_path)?;
     let (owner, repo_name) = slug.split_once('/')?;
 
     let owner = owner.to_owned();
     let repo_name = repo_name.to_owned();
     let branch = branch.to_owned();
+    let token = resolve_github_access_token(github_token)?;
 
     let rt = tokio::runtime::Runtime::new().ok()?;
 
     rt.block_on(async {
-        let token = env::var("GITHUB_TOKEN").ok()?;
-
         let octocrab = octocrab::Octocrab::builder()
             .personal_token(token)
             .build()
@@ -14140,6 +14895,267 @@ fn github_pr_number_by_head_branch(worktree_path: &Path, branch: &str) -> Option
 
 fn github_pr_url(repo_slug: &str, pr_number: u64) -> String {
     format!("https://github.com/{repo_slug}/pull/{pr_number}")
+}
+
+fn non_empty_trimmed_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn github_access_token_from_env() -> Option<String> {
+    env::var("GITHUB_TOKEN")
+        .ok()
+        .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
+}
+
+fn github_access_token_from_gh_cli() -> Option<String> {
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    non_empty_trimmed_str(&stdout).map(str::to_owned)
+}
+
+fn resolve_github_access_token(saved_token: Option<&str>) -> Option<String> {
+    let env_token = github_access_token_from_env();
+    resolve_github_access_token_from_sources(saved_token, env_token.as_deref())
+        .or_else(github_access_token_from_gh_cli)
+}
+
+fn resolve_github_access_token_from_sources(
+    saved_token: Option<&str>,
+    env_token: Option<&str>,
+) -> Option<String> {
+    saved_token
+        .and_then(non_empty_trimmed_str)
+        .map(str::to_owned)
+        .or_else(|| env_token.and_then(non_empty_trimmed_str).map(str::to_owned))
+}
+
+fn github_oauth_client_id() -> Option<String> {
+    env::var("ARBOR_GITHUB_OAUTH_CLIENT_ID")
+        .ok()
+        .or_else(|| env::var("GITHUB_OAUTH_CLIENT_ID").ok())
+        .or_else(|| BUILT_IN_GITHUB_OAUTH_CLIENT_ID.map(str::to_owned))
+        .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GitHubDeviceCode {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    interval: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GitHubDeviceCodeResponse {
+    #[serde(default)]
+    device_code: String,
+    #[serde(default)]
+    user_code: String,
+    #[serde(default)]
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    #[serde(default)]
+    expires_in: u64,
+    #[serde(default)]
+    interval: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GitHubTokenResponse {
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    token_type: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitHubAccessToken {
+    access_token: String,
+    token_type: Option<String>,
+    scope: Option<String>,
+}
+
+fn github_oauth_http_agent() -> ureq::Agent {
+    let config = ureq::config::Config::builder()
+        .http_status_as_error(false)
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+fn github_request_device_code(client_id: &str) -> Result<GitHubDeviceCode, String> {
+    let response = github_oauth_http_agent()
+        .post(GITHUB_OAUTH_DEVICE_CODE_URL)
+        .header("Accept", "application/json")
+        .header("User-Agent", "Arbor")
+        .send_form([("client_id", client_id), ("scope", GITHUB_OAUTH_SCOPE)])
+        .map_err(|error| format!("failed to start GitHub OAuth flow: {error}"))?;
+
+    let status = response.status();
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|error| format!("failed to read GitHub OAuth response: {error}"))?;
+    let payload: GitHubDeviceCodeResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("failed to parse GitHub OAuth response: {error}"))?;
+
+    if !status.is_success() {
+        let reason = payload
+            .error
+            .unwrap_or_else(|| "request_rejected".to_owned());
+        let description = payload
+            .error_description
+            .unwrap_or_else(|| "request was rejected".to_owned());
+        return Err(format!(
+            "failed to start GitHub OAuth flow: {reason} ({description})"
+        ));
+    }
+
+    let device_code = non_empty_trimmed_str(&payload.device_code)
+        .map(str::to_owned)
+        .ok_or_else(|| "GitHub OAuth response was missing device_code".to_owned())?;
+    let user_code = non_empty_trimmed_str(&payload.user_code)
+        .map(str::to_owned)
+        .ok_or_else(|| "GitHub OAuth response was missing user_code".to_owned())?;
+    let verification_uri = non_empty_trimmed_str(&payload.verification_uri)
+        .map(str::to_owned)
+        .ok_or_else(|| "GitHub OAuth response was missing verification_uri".to_owned())?;
+    let expires_in = if payload.expires_in == 0 {
+        return Err("GitHub OAuth response was missing expires_in".to_owned());
+    } else {
+        payload.expires_in
+    };
+
+    Ok(GitHubDeviceCode {
+        device_code,
+        user_code,
+        verification_uri,
+        verification_uri_complete: payload
+            .verification_uri_complete
+            .as_deref()
+            .and_then(non_empty_trimmed_str)
+            .map(str::to_owned),
+        expires_in,
+        interval: payload.interval,
+    })
+}
+
+fn github_poll_device_access_token(
+    client_id: &str,
+    device_code: &GitHubDeviceCode,
+) -> Result<GitHubAccessToken, String> {
+    let deadline = Instant::now() + Duration::from_secs(device_code.expires_in.max(5));
+    let mut poll_interval = Duration::from_secs(
+        device_code
+            .interval
+            .unwrap_or(GITHUB_DEVICE_FLOW_POLL_MIN_INTERVAL.as_secs())
+            .max(GITHUB_DEVICE_FLOW_POLL_MIN_INTERVAL.as_secs()),
+    );
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err("GitHub authorization timed out before completion".to_owned());
+        }
+
+        std::thread::sleep(poll_interval);
+
+        let payload = github_request_access_token(client_id, &device_code.device_code)?;
+        if let Some(access_token) = payload
+            .access_token
+            .as_deref()
+            .and_then(non_empty_trimmed_str)
+            .map(str::to_owned)
+        {
+            return Ok(GitHubAccessToken {
+                access_token,
+                token_type: payload.token_type,
+                scope: payload.scope,
+            });
+        }
+
+        match payload.error.as_deref() {
+            Some("authorization_pending") => continue,
+            Some("slow_down") => {
+                poll_interval += Duration::from_secs(5);
+                continue;
+            },
+            Some("access_denied") => {
+                return Err("GitHub authorization was denied".to_owned());
+            },
+            Some("expired_token") => {
+                return Err("GitHub authorization code expired".to_owned());
+            },
+            Some(other) => {
+                let description = payload
+                    .error_description
+                    .as_deref()
+                    .and_then(non_empty_trimmed_str)
+                    .unwrap_or("request failed");
+                return Err(format!("GitHub OAuth failed: {other} ({description})"));
+            },
+            None => {
+                return Err("GitHub OAuth response was missing an access token".to_owned());
+            },
+        }
+    }
+}
+
+fn github_request_access_token(
+    client_id: &str,
+    device_code: &str,
+) -> Result<GitHubTokenResponse, String> {
+    let response = github_oauth_http_agent()
+        .post(GITHUB_OAUTH_ACCESS_TOKEN_URL)
+        .header("Accept", "application/json")
+        .header("User-Agent", "Arbor")
+        .send_form([
+            ("client_id", client_id),
+            ("device_code", device_code),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ])
+        .map_err(|error| format!("failed to poll GitHub OAuth status: {error}"))?;
+
+    let status = response.status();
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|error| format!("failed to read GitHub OAuth token response: {error}"))?;
+    let payload: GitHubTokenResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("failed to parse GitHub OAuth token response: {error}"))?;
+
+    if status.is_success() || payload.error.is_some() || payload.access_token.is_some() {
+        return Ok(payload);
+    }
+
+    Err("GitHub OAuth token request failed".to_owned())
 }
 
 fn repository_display_name(path: &Path) -> String {
@@ -15174,6 +16190,8 @@ fn install_app_menu_and_keys(cx: &mut App) {
         Menu {
             name: "Arbor".into(),
             items: vec![
+                MenuItem::action("About Arbor", ShowAbout),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Quit Arbor", ImmediateQuit),
@@ -15444,7 +16462,8 @@ mod tests {
     use {
         crate::{
             DiffLineKind, TerminalSession, TerminalState, auto_commit_body, auto_commit_subject,
-            build_side_by_side_diff_lines, extract_first_url, styled_lines_for_session,
+            build_side_by_side_diff_lines, extract_first_url,
+            resolve_github_access_token_from_sources, styled_lines_for_session,
             terminal_backend::{
                 TerminalCursor, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
             },
@@ -15795,6 +16814,19 @@ mod tests {
     fn extract_first_url_ignores_punctuation() {
         let url = extract_first_url("created PR: https://github.com/acme/repo/pull/42.");
         assert_eq!(url.as_deref(), Some("https://github.com/acme/repo/pull/42"));
+    }
+
+    #[test]
+    fn github_token_resolution_prefers_saved_token() {
+        let token =
+            resolve_github_access_token_from_sources(Some(" saved-token "), Some("env-token"));
+        assert_eq!(token.as_deref(), Some("saved-token"));
+    }
+
+    #[test]
+    fn github_token_resolution_falls_back_to_environment_token() {
+        let token = resolve_github_access_token_from_sources(Some(""), Some(" env-token "));
+        assert_eq!(token.as_deref(), Some("env-token"));
     }
 
     #[test]
