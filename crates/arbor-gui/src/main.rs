@@ -8452,44 +8452,48 @@ impl ArborWindow {
                                                         .px_2()
                                                         .py_1()
                                                         .flex()
-                                                        .flex_col()
-                                                        .gap(px(1.))
-                                                        .justify_center()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap(px(4.))
                                                         .when(is_active, |this| {
                                                             this.bg(rgb(theme.panel_active_bg))
                                                         })
-                                                    // Line 1: [icon] [spinner] [name] ... [+- lines] [time ago]
+                                                    // Git branch icon — vertically centered
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .w(px(18.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(16.))
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .child("\u{e725}"),
+                                                    )
+                                                    // Two-line text column
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(1.))
+                                                    // Line 1: [spinner] [name] ... [+- lines] [time ago]
                                                     .child(
                                                         div()
                                                             .flex()
                                                             .items_center()
-                                                            .gap_1()
-                                                            // Git branch icon
-                                                            .child(
-                                                                div()
-                                                                    .flex_none()
-                                                                    .text_size(px(10.))
-                                                                    .text_color(rgb(theme.text_muted))
-                                                                    .child("\u{e725}"),
-                                                            )
+                                                            .gap(px(2.))
                                                             // Activity spinner dot
-                                                            .child(
-                                                                div()
-                                                                    .flex_none()
-                                                                    .w(px(8.))
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .justify_center()
-                                                                    .when_some(agent_dot_color, |this, color| {
-                                                                        this.child(
-                                                                            div()
-                                                                                .flex_none()
-                                                                                .size(px(6.))
-                                                                                .rounded_full()
-                                                                                .bg(rgb(color)),
-                                                                        )
-                                                                    }),
-                                                            )
+                                                            .when_some(agent_dot_color, |this, color| {
+                                                                this.child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .size(px(6.))
+                                                                        .rounded_full()
+                                                                        .bg(rgb(color)),
+                                                                )
+                                                            })
                                                             // Name/label
                                                             .child(
                                                                 div()
@@ -8572,7 +8576,6 @@ impl ArborWindow {
                                                     // Line 2: [agent task or dir name] ... [PR number]
                                                     .child(
                                                         div()
-                                                            .pl(px(22.))
                                                             .flex()
                                                             .items_center()
                                                             .gap_2()
@@ -8624,7 +8627,8 @@ impl ArborWindow {
                                                                 }
                                                             }),
                                                     )
-                                                    )
+                                                    ) // text column
+                                                    ) // bordered cell
                                             }),
                                         ),
                                 )
@@ -8672,34 +8676,35 @@ impl ArborWindow {
                                                             .px_2()
                                                             .py_1()
                                                             .flex()
-                                                            .flex_col()
-                                                            .gap(px(1.))
-                                                            .justify_center()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap(px(4.))
                                                             .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
-                                                        // Line 1: [icon] [spinner placeholder] [branch@host] ... [+- lines] [time ago]
+                                                        // Globe icon — vertically centered
+                                                        .child(
+                                                            div()
+                                                                .flex_none()
+                                                                .w(px(18.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .text_size(px(18.))
+                                                                .text_color(rgb(status_color))
+                                                                .child("\u{f0ac}"),
+                                                        )
+                                                        // Two-line text column
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .gap(px(1.))
+                                                        // Line 1: branch@host
                                                         .child(
                                                             div()
                                                                 .flex()
                                                                 .items_center()
-                                                                .gap_1()
-                                                                // Globe icon
-                                                                .child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .text_size(px(10.))
-                                                                        .text_color(rgb(status_color))
-                                                                        .child("\u{f0ac}"),
-                                                                )
-                                                                // Activity spinner dot placeholder (matches worktree layout)
-                                                                .child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .w(px(8.))
-                                                                        .flex()
-                                                                        .items_center()
-                                                                        .justify_center(),
-                                                                )
-                                                                // Name: branch@host
                                                                 .child(
                                                                     div()
                                                                         .min_w_0()
@@ -8713,10 +8718,9 @@ impl ArborWindow {
                                                                         .child(format!("{}@{}", outpost.branch, outpost.hostname)),
                                                                 ),
                                                         )
-                                                        // Line 2: [outpost label / directory]
+                                                        // Line 2: outpost label
                                                         .child(
                                                             div()
-                                                                .pl(px(22.))
                                                                 .flex()
                                                                 .items_center()
                                                                 .gap_2()
@@ -8731,6 +8735,7 @@ impl ArborWindow {
                                                                         .text_color(rgb(theme.text_disabled))
                                                                         .child(outpost.label.clone()),
                                                                 ),
+                                                        )
                                                         )
                                                         )
                                                 }),
