@@ -206,6 +206,7 @@ dependencies = [
  "arbor-core",
  "libssh-rs",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

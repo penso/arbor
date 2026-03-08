@@ -691,7 +691,6 @@ enum CreateModalTab {
 enum CreateOutpostField {
     HostSelector,
     CloneUrl,
-    Branch,
     OutpostName,
 }
 
@@ -711,7 +710,6 @@ struct CreateModal {
     // Outpost fields
     host_index: usize,
     clone_url: String,
-    branch: String,
     outpost_name: String,
     outpost_active_field: CreateOutpostField,
     // Shared
@@ -792,6 +790,11 @@ struct RepositoryContextMenu {
 
 struct WorktreeContextMenu {
     worktree_index: usize,
+    position: gpui::Point<Pixels>,
+}
+
+struct OutpostContextMenu {
+    outpost_index: usize,
     position: gpui::Point<Pixels>,
 }
 
@@ -885,6 +888,7 @@ struct ArborWindow {
     collapsed_repositories: HashSet<usize>,
     repository_context_menu: Option<RepositoryContextMenu>,
     worktree_context_menu: Option<WorktreeContextMenu>,
+    outpost_context_menu: Option<OutpostContextMenu>,
     worktree_nav_back: Vec<usize>,
     worktree_nav_forward: Vec<usize>,
     log_buffer: log_layer::LogBuffer,
@@ -1083,6 +1087,7 @@ impl ArborWindow {
                     collapsed_repositories: HashSet::new(),
                     repository_context_menu: None,
                     worktree_context_menu: None,
+                    outpost_context_menu: None,
                     worktree_nav_back: Vec::new(),
                     worktree_nav_forward: Vec::new(),
                     log_buffer: log_buffer.clone(),
@@ -1318,6 +1323,7 @@ impl ArborWindow {
             collapsed_repositories: HashSet::new(),
             repository_context_menu: None,
             worktree_context_menu: None,
+            outpost_context_menu: None,
             worktree_nav_back: Vec::new(),
             worktree_nav_forward: Vec::new(),
             last_persisted_ui_state: startup_ui_state,
@@ -1664,6 +1670,17 @@ impl ArborWindow {
         attach_runtime: bool,
     ) -> bool {
         if records.is_empty() {
+            return false;
+        }
+
+        // Don't restore terminals without a live runtime — they become
+        // non-functional "ghost" sessions that show old output but cannot
+        // accept input.  A fresh terminal will be created on demand.
+        if !attach_runtime {
+            tracing::debug!(
+                count = records.len(),
+                "skipping cold terminal restore (no daemon runtime available)"
+            );
             return false;
         }
 
@@ -4135,7 +4152,6 @@ impl ArborWindow {
             worktree_active_field: CreateWorktreeField::WorktreeName,
             host_index: 0,
             clone_url,
-            branch: "main".to_owned(),
             outpost_name: String::new(),
             outpost_active_field: CreateOutpostField::CloneUrl,
             is_creating: false,
@@ -4436,6 +4452,7 @@ impl ArborWindow {
                         }
                     },
                     Err(error) => {
+                        tracing::error!("worktree creation failed: {error}");
                         if let Some(modal) = this.create_modal.as_mut() {
                             modal.is_creating = false;
                             modal.error = Some(error);
@@ -4981,13 +4998,11 @@ impl ArborWindow {
             OutpostModalInputEvent::MoveActiveField(reverse) => {
                 modal.outpost_active_field = match (modal.outpost_active_field, reverse) {
                     (CreateOutpostField::HostSelector, false) => CreateOutpostField::CloneUrl,
-                    (CreateOutpostField::CloneUrl, false) => CreateOutpostField::Branch,
-                    (CreateOutpostField::Branch, false) => CreateOutpostField::OutpostName,
+                    (CreateOutpostField::CloneUrl, false) => CreateOutpostField::OutpostName,
                     (CreateOutpostField::OutpostName, false) => CreateOutpostField::HostSelector,
                     (CreateOutpostField::HostSelector, true) => CreateOutpostField::OutpostName,
                     (CreateOutpostField::CloneUrl, true) => CreateOutpostField::HostSelector,
-                    (CreateOutpostField::Branch, true) => CreateOutpostField::CloneUrl,
-                    (CreateOutpostField::OutpostName, true) => CreateOutpostField::Branch,
+                    (CreateOutpostField::OutpostName, true) => CreateOutpostField::CloneUrl,
                 };
             },
             OutpostModalInputEvent::CycleHost(reverse) => {
@@ -5007,7 +5022,6 @@ impl ArborWindow {
                 let field_value = match modal.outpost_active_field {
                     CreateOutpostField::HostSelector => return,
                     CreateOutpostField::CloneUrl => &mut modal.clone_url,
-                    CreateOutpostField::Branch => &mut modal.branch,
                     CreateOutpostField::OutpostName => &mut modal.outpost_name,
                 };
                 let _ = field_value.pop();
@@ -5019,7 +5033,6 @@ impl ArborWindow {
                 let field_value = match modal.outpost_active_field {
                     CreateOutpostField::HostSelector => return,
                     CreateOutpostField::CloneUrl => &mut modal.clone_url,
-                    CreateOutpostField::Branch => &mut modal.branch,
                     CreateOutpostField::OutpostName => &mut modal.outpost_name,
                 };
                 field_value.push_str(&text);
@@ -5042,17 +5055,11 @@ impl ArborWindow {
 
         modal.error = None;
         let clone_url = modal.clone_url.trim().to_owned();
-        let branch = modal.branch.trim().to_owned();
         let outpost_name = modal.outpost_name.trim().to_owned();
         let host_index = modal.host_index;
 
         if clone_url.is_empty() {
             modal.error = Some("Clone URL is required.".to_owned());
-            cx.notify();
-            return;
-        }
-        if branch.is_empty() {
-            modal.error = Some("Branch is required.".to_owned());
             cx.notify();
             return;
         }
@@ -5066,6 +5073,8 @@ impl ArborWindow {
             cx.notify();
             return;
         };
+
+        let branch = derive_branch_name(&outpost_name);
 
         modal.is_creating = true;
         cx.notify();
@@ -5126,6 +5135,7 @@ impl ArborWindow {
                         this.create_modal = None;
                     },
                     Err(error) => {
+                        tracing::error!("outpost creation failed: {error}");
                         if let Some(modal) = this.create_modal.as_mut() {
                             modal.is_creating = false;
                             modal.error = Some(error);
@@ -8628,8 +8638,6 @@ impl ArborWindow {
                                             .children(
                                                 repo_outposts.into_iter().map(|(outpost_index, outpost)| {
                                                     let is_active = self.active_outpost_index == Some(outpost_index);
-                                                    let op_label = outpost.label.clone();
-                                                    let op_branch = outpost.branch.clone();
                                                     let status_color = match outpost.status {
                                                         arbor_core::outpost::OutpostStatus::Available => theme.accent,
                                                         arbor_core::outpost::OutpostStatus::Unreachable => 0xeb6f92,
@@ -8637,7 +8645,6 @@ impl ArborWindow {
                                                     };
                                                     div()
                                                         .id(("outpost-row", outpost_index))
-                                                        .group("op-row")
                                                         .font_family(FONT_MONO)
                                                         .cursor_pointer()
                                                         .flex()
@@ -8645,47 +8652,15 @@ impl ArborWindow {
                                                         .on_click(cx.listener(move |this, _, window, cx| {
                                                             this.select_outpost(outpost_index, window, cx);
                                                         }))
-                                                        // X delete button in 24px left column (hidden until row hover)
-                                                        .child(
-                                                            div()
-                                                                .flex_none()
-                                                                .w(px(24.))
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .child(
-                                                                    div()
-                                                                        .id(("outpost-delete", outpost_index))
-                                                                        .w(px(18.))
-                                                                        .h(px(18.))
-                                                                        .flex()
-                                                                        .items_center()
-                                                                        .justify_center()
-                                                                        .font_family(FONT_MONO)
-                                                                        .text_size(px(16.))
-                                                                        .text_color(rgb(theme.text_muted))
-                                                                        .hover(|s| s.text_color(rgb(theme.text_primary)))
-                                                                        .invisible()
-                                                                        .group_hover("op-row", |s| s.visible())
-                                                                        .child("\u{f00d}")
-                                                                        .on_mouse_down(
-                                                                            MouseButton::Left,
-                                                                            cx.listener({
-                                                                                let op_label = op_label.clone();
-                                                                                let op_branch = op_branch.clone();
-                                                                                move |this, _: &MouseDownEvent, _, cx| {
-                                                                                    cx.stop_propagation();
-                                                                                    this.open_delete_modal(
-                                                                                        DeleteTarget::Outpost(outpost_index),
-                                                                                        op_label.clone(),
-                                                                                        op_branch.clone(),
-                                                                                        cx,
-                                                                                    );
-                                                                                }
-                                                                            }),
-                                                                        ),
-                                                                ),
-                                                        )
+                                                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.outpost_context_menu = Some(OutpostContextMenu {
+                                                                outpost_index,
+                                                                position: event.position,
+                                                            });
+                                                            cx.notify();
+                                                        }))
+                                                        // Bordered cell
                                                         .child(
                                                         div()
                                                             .flex_1()
@@ -8701,7 +8676,7 @@ impl ArborWindow {
                                                             .gap(px(1.))
                                                             .justify_center()
                                                             .when(is_active, |this| this.bg(rgb(theme.panel_active_bg)))
-                                                        // Line 1: [icon] [name] ... [@hostname]
+                                                        // Line 1: [icon] [spinner placeholder] [branch@host] ... [+- lines] [time ago]
                                                         .child(
                                                             div()
                                                                 .flex()
@@ -8715,7 +8690,16 @@ impl ArborWindow {
                                                                         .text_color(rgb(status_color))
                                                                         .child("\u{f0ac}"),
                                                                 )
-                                                                // Name/label
+                                                                // Activity spinner dot placeholder (matches worktree layout)
+                                                                .child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .w(px(8.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center(),
+                                                                )
+                                                                // Name: branch@host
                                                                 .child(
                                                                     div()
                                                                         .min_w_0()
@@ -8726,21 +8710,13 @@ impl ArborWindow {
                                                                         .text_xs()
                                                                         .font_weight(FontWeight::SEMIBOLD)
                                                                         .text_color(rgb(theme.text_primary))
-                                                                        .child(outpost.label.clone()),
-                                                                )
-                                                                // Right side: @hostname
-                                                                .child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .text_xs()
-                                                                        .text_color(rgb(theme.text_muted))
-                                                                        .child(format!("@{}", outpost.hostname)),
+                                                                        .child(format!("{}@{}", outpost.branch, outpost.hostname)),
                                                                 ),
                                                         )
-                                                        // Line 2: [branch name]
+                                                        // Line 2: [outpost label / directory]
                                                         .child(
                                                             div()
-                                                                .pl(px(14.))
+                                                                .pl(px(22.))
                                                                 .flex()
                                                                 .items_center()
                                                                 .gap_2()
@@ -8753,7 +8729,7 @@ impl ArborWindow {
                                                                         .text_ellipsis()
                                                                         .text_xs()
                                                                         .text_color(rgb(theme.text_disabled))
-                                                                        .child(outpost.branch.clone()),
+                                                                        .child(outpost.label.clone()),
                                                                 ),
                                                         )
                                                         )
@@ -10069,12 +10045,11 @@ impl ArborWindow {
             .unwrap_or_else(|| "-".to_owned());
         let host_active = modal.outpost_active_field == CreateOutpostField::HostSelector;
         let clone_url_active = modal.outpost_active_field == CreateOutpostField::CloneUrl;
-        let branch_active = modal.outpost_active_field == CreateOutpostField::Branch;
         let outpost_name_active = modal.outpost_active_field == CreateOutpostField::OutpostName;
+        let outpost_branch_preview = derive_branch_name(&modal.outpost_name);
         let outpost_create_disabled = modal.is_creating
             || modal.clone_url.trim().is_empty()
             || modal.outpost_name.trim().is_empty()
-            || modal.branch.trim().is_empty()
             || self.remote_hosts.is_empty();
 
         let create_disabled = if is_worktree_tab {
@@ -10408,24 +10383,6 @@ impl ArborWindow {
                         .child(
                             modal_input_field(
                                 theme,
-                                "outpost-branch-input",
-                                "Branch",
-                                &modal.branch,
-                                "main",
-                                branch_active,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.update_create_outpost_modal_input(
-                                    OutpostModalInputEvent::SetActiveField(
-                                        CreateOutpostField::Branch,
-                                    ),
-                                    cx,
-                                );
-                            })),
-                        )
-                        .child(
-                            modal_input_field(
-                                theme,
                                 "outpost-name-input",
                                 "Outpost Name",
                                 &modal.outpost_name,
@@ -10440,6 +10397,27 @@ impl ArborWindow {
                                     cx,
                                 );
                             })),
+                        )
+                        .child(
+                            div()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .bg(rgb(theme.panel_bg))
+                                .p_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("Branch"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(FONT_MONO)
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(outpost_branch_preview),
+                                ),
                         )
                         .child(
                             div()
@@ -10884,6 +10862,99 @@ impl ArborWindow {
                                     DeleteTarget::Worktree(index),
                                     wt_label,
                                     wt_branch,
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(16.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("\u{f1f8}"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(0xeb6f92))
+                                    .child("Delete"),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_outpost_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(menu) = self.outpost_context_menu.as_ref() else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let index = menu.outpost_index;
+        let position = menu.position;
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.outpost_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.outpost_context_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .w(px(180.))
+                    .py(px(4.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.chrome_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .id("outpost-context-delete")
+                            .h(px(30.))
+                            .mx(px(4.))
+                            .px(px(8.))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(0x3a2030)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.outpost_context_menu = None;
+                                let op_label = this
+                                    .outposts
+                                    .get(index)
+                                    .map(|op| op.label.clone())
+                                    .unwrap_or_default();
+                                let op_branch = this
+                                    .outposts
+                                    .get(index)
+                                    .map(|op| op.branch.clone())
+                                    .unwrap_or_default();
+                                this.open_delete_modal(
+                                    DeleteTarget::Outpost(index),
+                                    op_label,
+                                    op_branch,
                                     cx,
                                 );
                             }))
@@ -12521,6 +12592,7 @@ impl Render for ArborWindow {
             .child(self.render_github_auth_modal(cx))
             .child(self.render_repository_context_menu(cx))
             .child(self.render_worktree_context_menu(cx))
+            .child(self.render_outpost_context_menu(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))

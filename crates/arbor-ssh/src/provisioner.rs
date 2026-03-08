@@ -43,9 +43,17 @@ impl RemoteProvisioner for SshProvisioner<'_> {
         let already_cloned = check_output.stdout.trim() == "exists";
 
         if !already_cloned {
+            // Clone the default branch first, then create the new branch.
+            // Using --branch would fail if the branch doesn't exist on the
+            // remote yet (which is the common case for new outposts).
             let clone_cmd = format!(
-                "GIT_SSH_COMMAND='ssh -F /dev/null' \
-                 git clone --branch {branch} --single-branch {clone_url} {remote_path}"
+                "GIT_SSH_COMMAND='ssh -F /dev/null' git clone {clone_url} {remote_path}"
+            );
+            tracing::info!(
+                clone_url,
+                branch,
+                remote_path,
+                "cloning repository on remote host"
             );
             #[cfg(unix)]
             let clone_output = self
@@ -54,11 +62,38 @@ impl RemoteProvisioner for SshProvisioner<'_> {
             #[cfg(not(unix))]
             let clone_output = self.connection.run_command(&clone_cmd)?;
             if clone_output.exit_code != Some(0) {
+                tracing::error!(
+                    clone_url,
+                    branch,
+                    remote_path,
+                    stderr = clone_output.stderr.as_str(),
+                    "git clone failed on remote host"
+                );
                 return Err(RemoteError::Command(format!(
                     "git clone failed: {}",
                     clone_output.stderr,
                 )));
             }
+        }
+
+        // Create and switch to the target branch.  If it already exists
+        // (e.g. the repo was already cloned), just check it out.
+        let checkout_cmd = format!(
+            "cd {remote_path} && \
+             git checkout {branch} 2>/dev/null || git checkout -b {branch}"
+        );
+        let checkout_output = self.connection.run_command(&checkout_cmd)?;
+        if checkout_output.exit_code != Some(0) {
+            tracing::error!(
+                branch,
+                remote_path,
+                stderr = checkout_output.stderr.as_str(),
+                "branch checkout failed on remote host"
+            );
+            return Err(RemoteError::Command(format!(
+                "branch checkout failed: {}",
+                checkout_output.stderr,
+            )));
         }
 
         let has_remote_daemon = detect_remote_daemon(self.connection, self.host);
