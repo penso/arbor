@@ -44,6 +44,16 @@ use {
 
 const AGENT_SESSION_EXPIRY_SECS: u64 = 300;
 
+/// Cached PR lookup result with expiry.
+#[derive(Clone)]
+struct PrCacheEntry {
+    pr_number: Option<u64>,
+    pr_url: Option<String>,
+    fetched_at: std::time::Instant,
+}
+
+const PR_CACHE_TTL_SECS: u64 = 120;
+
 #[derive(Clone)]
 struct AppState {
     repository_store_path: PathBuf,
@@ -51,6 +61,7 @@ struct AppState {
     process_manager: Arc<Mutex<ProcessManager>>,
     agent_sessions: Arc<Mutex<HashMap<String, AgentSession>>>,
     agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
+    pr_cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         process_manager: Arc::new(Mutex::new(process_manager)),
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
+        pr_cache: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Spawn background task to monitor process lifecycle
