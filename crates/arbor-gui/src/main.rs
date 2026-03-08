@@ -53,6 +53,9 @@ use {
 
 const FONT_UI: &str = ".ZedSans";
 const FONT_MONO: &str = "CaskaydiaMono Nerd Font Mono";
+#[cfg(target_os = "macos")]
+const TERMINAL_FONT_FAMILIES: [&str; 5] = [FONT_MONO, "SF Mono", "Menlo", "Monaco", "Courier New"];
+#[cfg(not(target_os = "macos"))]
 const TERMINAL_FONT_FAMILIES: [&str; 6] = [
     FONT_MONO,
     ".ZedMono",
