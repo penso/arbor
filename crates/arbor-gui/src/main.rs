@@ -162,6 +162,7 @@ actions!(arbor, [
     UseOneDarkTheme,
     UseAyuDarkTheme,
     UseGruvboxTheme,
+    UseDraculaTheme,
     UseEmbeddedBackend,
     UseAlacrittyBackend,
     UseGhosttyBackend,
@@ -5559,6 +5560,15 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         self.switch_theme(ThemeKind::Gruvbox, cx);
+    }
+
+    fn action_use_dracula_theme(
+        &mut self,
+        _: &UseDraculaTheme,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.switch_theme(ThemeKind::Dracula, cx);
     }
 
     fn action_use_embedded_backend(
@@ -12220,6 +12230,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_use_one_dark_theme))
             .on_action(cx.listener(Self::action_use_ayu_dark_theme))
             .on_action(cx.listener(Self::action_use_gruvbox_theme))
+            .on_action(cx.listener(Self::action_use_dracula_theme))
             .on_action(cx.listener(Self::action_use_embedded_backend))
             .on_action(cx.listener(Self::action_use_alacritty_backend))
             .on_action(cx.listener(Self::action_use_ghostty_backend))
@@ -16380,8 +16391,9 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
         "one-dark" | "onedark" => Ok(ThemeKind::One),
         "ayu-dark" | "ayu" => Ok(ThemeKind::Ayu),
         "gruvbox-dark" | "gruvbox" => Ok(ThemeKind::Gruvbox),
+        "dracula" => Ok(ThemeKind::Dracula),
         _ => Err(format!(
-            "invalid theme `{value}` in config, expected one-dark/ayu-dark/gruvbox-dark"
+            "invalid theme `{value}` in config, expected one-dark/ayu-dark/gruvbox-dark/dracula"
         )),
     }
 }
@@ -16433,6 +16445,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-1", UseOneDarkTheme, None),
         KeyBinding::new("cmd-shift-2", UseAyuDarkTheme, None),
         KeyBinding::new("cmd-shift-3", UseGruvboxTheme, None),
+        KeyBinding::new("cmd-shift-4", UseDraculaTheme, None),
         KeyBinding::new("cmd-1", UseEmbeddedBackend, None),
         KeyBinding::new("cmd-2", UseAlacrittyBackend, None),
         KeyBinding::new("cmd-3", UseGhosttyBackend, None),
@@ -16483,6 +16496,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
                 MenuItem::action("Use One Dark", UseOneDarkTheme),
                 MenuItem::action("Use Ayu Dark", UseAyuDarkTheme),
                 MenuItem::action("Use Gruvbox Dark", UseGruvboxTheme),
+                MenuItem::action("Use Dracula", UseDraculaTheme),
             ],
         },
         Menu {

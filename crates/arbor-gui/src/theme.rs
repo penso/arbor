@@ -3,6 +3,7 @@ pub enum ThemeKind {
     One,
     Ayu,
     Gruvbox,
+    Dracula,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +35,7 @@ impl ThemeKind {
             ThemeKind::One => "One Dark",
             ThemeKind::Ayu => "Ayu Dark",
             ThemeKind::Gruvbox => "Gruvbox Dark",
+            ThemeKind::Dracula => "Dracula",
         }
     }
 
@@ -101,6 +103,27 @@ impl ThemeKind {
                 terminal_cursor: 0xebdbb2,
                 terminal_selection_bg: 0x504945,
                 terminal_selection_fg: 0xebdbb2,
+            },
+            ThemeKind::Dracula => ThemePalette {
+                chrome_bg: 0x343746,
+                chrome_border: 0x44475a,
+                app_bg: 0x282a36,
+                sidebar_bg: 0x2d2f3f,
+                terminal_bg: 0x282a36,
+                panel_bg: 0x2d2f3f,
+                panel_active_bg: 0x3a3d52,
+                tab_bg: 0x2d2f3f,
+                tab_active_bg: 0x282a36,
+                border: 0x44475a,
+                text_primary: 0xf8f8f2,
+                text_muted: 0x9ea0b0,
+                text_disabled: 0x6272a4,
+                notice_bg: 0x55304a,
+                notice_text: 0xffe4f0,
+                accent: 0xbd93f9,
+                terminal_cursor: 0xf8f8f2,
+                terminal_selection_bg: 0x44475a,
+                terminal_selection_fg: 0xf8f8f2,
             },
         }
     }
