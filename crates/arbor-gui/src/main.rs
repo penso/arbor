@@ -153,7 +153,8 @@ actions!(arbor, [
     NavigateWorktreeBack,
     NavigateWorktreeForward,
     CollapseAllRepositories,
-    ViewLogs
+    ViewLogs,
+    ShowAbout
 ]);
 
 #[derive(Debug, Clone)]
@@ -809,6 +810,7 @@ struct ArborWindow {
     active_preset_tab: Option<AgentPresetKind>,
     repo_presets: Vec<RepoPreset>,
     manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
+    show_about: bool,
     pending_diff_scroll_to_file: Option<PathBuf>,
     focus_terminal_on_next_render: bool,
     git_action_in_flight: Option<GitActionKind>,
@@ -989,6 +991,7 @@ impl ArborWindow {
                     active_preset_tab: None,
                     repo_presets: Vec::new(),
                     manage_repo_presets_modal: None,
+                    show_about: false,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
                     git_action_in_flight: None,
@@ -1219,6 +1222,7 @@ impl ArborWindow {
             active_preset_tab: None,
             repo_presets: Vec::new(),
             manage_repo_presets_modal: None,
+            show_about: false,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
             git_action_in_flight: None,
@@ -5407,6 +5411,11 @@ impl ArborWindow {
         self.logs_tab_open = true;
         self.logs_tab_active = true;
         self.active_diff_session_id = None;
+        cx.notify();
+    }
+
+    fn action_show_about(&mut self, _: &ShowAbout, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_about = true;
         cx.notify();
     }
 
@@ -10657,6 +10666,75 @@ impl ArborWindow {
             )
     }
 
+    fn render_about_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        if !self.show_about {
+            return div();
+        }
+
+        let theme = self.theme();
+        let version = env!("CARGO_PKG_VERSION");
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgb(0x10131a))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(340.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_primary))
+                                    .child("About Arbor"),
+                            )
+                            .child(
+                                action_button(theme, "close-about", "Close", false, true).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.show_about = false;
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .py_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(format!("Arbor {version}")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Git worktree manager"),
+                            ),
+                    ),
+            )
+    }
+
     fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_repo_presets_modal.clone() else {
             return div();
@@ -11227,6 +11305,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_navigate_worktree_forward))
             .on_action(cx.listener(Self::action_collapse_all_repositories))
             .on_action(cx.listener(Self::action_view_logs))
+            .on_action(cx.listener(Self::action_show_about))
             .on_action(cx.listener(Self::action_request_quit))
             .on_action(cx.listener(Self::action_immediate_quit))
             .child(self.render_top_bar(cx))
@@ -11266,6 +11345,7 @@ impl Render for ArborWindow {
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))
             .child(self.render_manage_repo_presets_modal(cx))
+            .child(self.render_about_modal(cx))
             .child(div().when_some(self.theme_toast.clone(), |this, toast| {
                 this.child(
                     div()
@@ -15056,6 +15136,8 @@ fn install_app_menu_and_keys(cx: &mut App) {
         Menu {
             name: "Arbor".into(),
             items: vec![
+                MenuItem::action("About Arbor", ShowAbout),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Quit Arbor", ImmediateQuit),
