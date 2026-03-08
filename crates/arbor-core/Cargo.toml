@@ -5,7 +5,11 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+vendored-openssl = ["openssl-sys/vendored"]
+
 [dependencies]
+openssl-sys = { version = "0.9", optional = true }
 git2 = { workspace = true }
 gix = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }

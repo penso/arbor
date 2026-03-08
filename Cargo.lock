@@ -128,6 +128,7 @@ dependencies = [
  "git2",
  "gix",
  "gix-diff",
+ "openssl-sys",
  "serde",
  "serde_json",
  "sysinfo 0.35.2",

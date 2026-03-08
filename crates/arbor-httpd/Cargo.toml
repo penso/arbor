@@ -9,6 +9,9 @@ version.workspace = true
 name = "arbor-httpd"
 path = "src/main.rs"
 
+[features]
+vendored-openssl = ["arbor-core/vendored-openssl"]
+
 [dependencies]
 arbor-core = { path = "../arbor-core" }
 arbor-web-ui = { path = "../arbor-web-ui" }

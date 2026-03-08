@@ -49,8 +49,8 @@ jobs:
         run: |
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target aarch64-apple-darwin
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-apple-darwin
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target aarch64-apple-darwin
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target x86_64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target aarch64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target x86_64-apple-darwin
       - name: Package macOS app
         shell: bash
         env:
@@ -240,7 +240,7 @@ jobs:
             export PKG_CONFIG_ALLOW_CROSS=1
           fi
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "$TARGET"
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target "$TARGET"
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target "$TARGET"
       - name: Package Linux app
         shell: bash
         env:
@@ -275,7 +275,7 @@ jobs:
           ARBOR_VERSION: ${{ github.ref_name }}
         run: |
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --target x86_64-pc-windows-msvc
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target x86_64-pc-windows-msvc
       - name: Package Windows app
         env:
           TAG: ${{ github.ref_name }}
