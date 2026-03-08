@@ -492,6 +492,19 @@ mod tests {
         assert!(emulator.snapshot_cursor().is_some());
     }
 
+    #[test]
+    fn osc_1337_bel_terminated_silently_consumed() {
+        let mut emulator = TerminalEmulator::new();
+        let seq =
+            "\x1b]1337;RemoteHost=penso@m4max\x07\x1b]1337;CurrentDir=/home\x07\x1b]133;C\x07";
+        emulator.process(seq.as_bytes());
+        let rendered = styled_lines_to_string(&emulator.collect_styled_lines());
+        assert!(
+            !rendered.contains("1337"),
+            "BEL-terminated OSC leaked: {rendered:?}"
+        );
+    }
+
     fn styled_line_to_string(line: Option<&TerminalStyledLine>) -> String {
         line.map(|line| {
             line.runs
@@ -500,5 +513,13 @@ mod tests {
                 .collect::<String>()
         })
         .unwrap_or_default()
+    }
+
+    fn styled_lines_to_string(lines: &[TerminalStyledLine]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect()
     }
 }

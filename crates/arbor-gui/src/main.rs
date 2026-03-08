@@ -1894,8 +1894,10 @@ impl ArborWindow {
                             let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
                             if session.output != snapshot.output_tail {
                                 session.output = snapshot.output_tail;
-                                session.styled_output.clear();
-                                session.cursor = None;
+                                let (styled, cursor) =
+                                    emulate_raw_output(&session.output, session.rows, session.cols);
+                                session.styled_output = styled;
+                                session.cursor = cursor;
                                 changed = true;
                             }
                             if session.state != snapshot_state {
@@ -1995,8 +1997,10 @@ impl ArborWindow {
                             let snapshot_state = terminal_state_from_daemon_state(snapshot.state);
                             if session.output != snapshot.output_tail {
                                 session.output = snapshot.output_tail;
-                                session.styled_output.clear();
-                                session.cursor = None;
+                                let (styled, cursor) =
+                                    emulate_raw_output(&session.output, session.rows, session.cols);
+                                session.styled_output = styled;
+                                session.cursor = cursor;
                                 changed = true;
                             }
                             if session.state != snapshot_state {
@@ -11791,6 +11795,16 @@ fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionStat
         TerminalState::Completed => TerminalSessionState::Completed,
         TerminalState::Failed => TerminalSessionState::Failed,
     }
+}
+
+fn emulate_raw_output(
+    raw: &str,
+    rows: u16,
+    cols: u16,
+) -> (Vec<TerminalStyledLine>, Option<TerminalCursor>) {
+    let mut emulator = arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols);
+    emulator.process(raw.as_bytes());
+    (emulator.collect_styled_lines(), emulator.snapshot_cursor())
 }
 
 fn terminal_state_from_daemon_state(state: TerminalSessionState) -> TerminalState {
