@@ -1,3 +1,4 @@
+mod auth;
 mod github_service;
 mod mdns;
 mod process_manager;
@@ -236,6 +237,78 @@ enum WsServerEvent {
     },
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct DaemonConfig {
+    auth_token: Option<String>,
+}
+
+fn daemon_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    PathBuf::from(home).join(".config/arbor/config.toml")
+}
+
+fn load_daemon_config() -> DaemonConfig {
+    let path = daemon_config_path();
+    if !path.exists() {
+        return DaemonConfig::default();
+    }
+    let settings = config::Config::builder()
+        .add_source(config::File::from(path.as_path()).required(false))
+        .build();
+    match settings {
+        Ok(s) => {
+            // Try to extract just the [daemon] section
+            s.get::<DaemonConfig>("daemon").unwrap_or_default()
+        },
+        Err(_) => DaemonConfig::default(),
+    }
+}
+
+fn ensure_auth_token(config: &mut DaemonConfig) {
+    if config.auth_token.is_some() {
+        return;
+    }
+
+    use rand::Rng;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+    let path = daemon_config_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Read existing file or start empty
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    match content.parse::<toml_edit::DocumentMut>() {
+        Ok(mut doc) => {
+            let daemon_table = doc
+                .entry("daemon")
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_mut();
+            if let Some(table) = daemon_table {
+                table.insert("auth_token", toml_edit::value(&token));
+            }
+            if let Err(e) = std::fs::write(&path, doc.to_string()) {
+                eprintln!(
+                    "warning: failed to write auth token to {}: {e}",
+                    path.display()
+                );
+            }
+        },
+        Err(e) => {
+            eprintln!("warning: failed to parse {}: {e}", path.display());
+        },
+    }
+
+    println!("generated daemon auth token: {token}");
+    config.auth_token = Some(token);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = resolve_bind_addr()?;
@@ -243,6 +316,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = &web_ui_result {
         eprintln!("web-ui build skipped: {error}");
     }
+
+    // Load daemon config and ensure auth token exists
+    let mut daemon_config = load_daemon_config();
+    ensure_auth_token(&mut daemon_config);
+    let auth_state = auth::AuthState::new(daemon_config.auth_token);
 
     let daemon_store = JsonDaemonSessionStore::default();
     let (agent_broadcast, _) = tokio::sync::broadcast::channel::<AgentWsEvent>(64);
@@ -307,7 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let shutdown_signal = state.shutdown_signal.clone();
-    let app = router(state);
+    let app = auth::with_auth(router(state), auth_state);
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -328,9 +406,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown_signal.notified().await })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown_signal.notified().await })
+    .await?;
 
     Ok(())
 }

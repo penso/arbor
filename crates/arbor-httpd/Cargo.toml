@@ -1,9 +1,9 @@
 [package]
-name = "arbor-httpd"
-edition.workspace = true
-license.workspace = true
+edition.workspace      = true
+license.workspace      = true
+name                   = "arbor-httpd"
 rust-version.workspace = true
-version.workspace = true
+version.workspace      = true
 
 [[bin]]
 name = "arbor-httpd"
@@ -13,20 +13,25 @@ path = "src/main.rs"
 vendored-openssl = ["arbor-core/vendored-openssl"]
 
 [dependencies]
-arbor-core = { path = "../arbor-core" }
+arbor-core   = { path = "../arbor-core" }
 arbor-web-ui = { path = "../arbor-web-ui" }
-axum = { workspace = true, features = ["ws"] }
+axum         = { features = ["ws"], workspace = true }
+config       = { workspace = true }
 futures-util = "0.3"
-hostname = "0.4"
-mdns-sd = { workspace = true }
-octocrab = { workspace = true }
+hmac         = { workspace = true }
+hostname     = "0.4"
+mdns-sd      = { workspace = true }
+octocrab     = { workspace = true }
 portable-pty = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-toml = "0.8"
-tower-http = { workspace = true }
+rand         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+sha2         = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+toml         = "0.8"
+toml_edit    = { workspace = true }
+tower-http   = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

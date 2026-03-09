@@ -54,6 +54,13 @@ pub struct ArborConfig {
     pub preferred_editor: Option<String>,
     pub agent_presets: Vec<AgentPresetConfig>,
     pub remote_hosts: Vec<RemoteHostConfig>,
+    pub daemon: Option<DaemonConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
