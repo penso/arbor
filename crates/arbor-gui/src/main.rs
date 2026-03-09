@@ -9484,6 +9484,17 @@ impl ArborWindow {
                                                 let diff_summary = worktree.diff_summary;
                                                 let pr_number = worktree.pr_number;
                                                 let pr_url = worktree.pr_url.clone();
+                                                let is_merged_pr = worktree
+                                                    .pr_details
+                                                    .as_ref()
+                                                    .is_some_and(|pr| {
+                                                        pr.state == github_service::PrState::Merged
+                                                    });
+                                                let pr_badge_color = if is_merged_pr {
+                                                    0xbb9af7_u32
+                                                } else {
+                                                    theme.accent
+                                                };
                                                 let is_primary = worktree.is_primary_checkout;
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
@@ -9550,6 +9561,9 @@ impl ArborWindow {
                                                         .when(is_active, |this| {
                                                             this.bg(rgb(theme.panel_active_bg))
                                                                 .border_color(rgb(theme.accent))
+                                                        })
+                                                        .when(is_merged_pr && !is_active, |this| {
+                                                            this.opacity(0.72)
                                                         })
                                                     // Git branch icon — vertically centered
                                                     .child(
@@ -9700,7 +9714,7 @@ impl ArborWindow {
                                                                             .cursor_pointer()
                                                                             .flex_none()
                                                                             .text_xs()
-                                                                            .text_color(rgb(theme.accent))
+                                                                            .text_color(rgb(pr_badge_color))
                                                                             .child(pr_text)
                                                                             .on_click(cx.listener(
                                                                                 move |this, _, _, cx| {
