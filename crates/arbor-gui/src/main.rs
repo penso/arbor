@@ -888,7 +888,13 @@ enum AgentPresetKind {
 }
 
 impl AgentPresetKind {
-    const ORDER: [Self; 5] = [Self::Codex, Self::Claude, Self::Pi, Self::OpenCode, Self::Copilot];
+    const ORDER: [Self; 5] = [
+        Self::Codex,
+        Self::Claude,
+        Self::Pi,
+        Self::OpenCode,
+        Self::Copilot,
+    ];
 
     fn key(self) -> &'static str {
         match self {
@@ -2327,6 +2333,7 @@ impl ArborWindow {
         if self.daemon_base_url != next_daemon_base_url {
             // Remove hooks pointing at the old daemon before switching
             remove_claude_code_hooks();
+            remove_pi_agent_extension();
             self.daemon_base_url = next_daemon_base_url.clone();
             self.terminal_daemon =
                 match terminal_daemon_http::default_terminal_daemon_client(&next_daemon_base_url) {
@@ -2351,6 +2358,7 @@ impl ArborWindow {
                     if daemon_error_is_connection_refused(&error_text) {
                         self.terminal_daemon = None;
                         remove_claude_code_hooks();
+                        remove_pi_agent_extension();
                         changed = true;
                     } else {
                         notices.push(format!(
@@ -16542,6 +16550,107 @@ fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
     Ok(())
 }
 
+const PI_AGENT_EXTENSION_FILENAME: &str = "arbor-activity.ts";
+const PI_AGENT_EXTENSION_MARKER: &str = "Managed by Arbor: Pi activity bridge";
+
+fn install_pi_agent_extension(daemon_base_url: &str) -> Result<(), String> {
+    let home = env::var("HOME").map_err(|_| "HOME not set".to_owned())?;
+    let extensions_dir = PathBuf::from(&home)
+        .join(".pi")
+        .join("agent")
+        .join("extensions");
+    fs::create_dir_all(&extensions_dir)
+        .map_err(|e| format!("failed to create Pi extensions dir: {e}"))?;
+
+    let extension_path = extensions_dir.join(PI_AGENT_EXTENSION_FILENAME);
+    let next_content = render_pi_agent_extension(daemon_base_url);
+
+    if extension_path.exists() {
+        let existing = fs::read_to_string(&extension_path)
+            .map_err(|e| format!("failed to read Pi extension: {e}"))?;
+        if !existing.contains(PI_AGENT_EXTENSION_MARKER) {
+            return Err(format!(
+                "refusing to overwrite existing Pi extension `{}`",
+                extension_path.display()
+            ));
+        }
+        if existing == next_content {
+            tracing::debug!("Pi activity extension already installed");
+            return Ok(());
+        }
+    }
+
+    fs::write(&extension_path, next_content)
+        .map_err(|e| format!("failed to write Pi extension: {e}"))?;
+    tracing::info!(path = %extension_path.display(), "installed Pi activity extension");
+    Ok(())
+}
+
+fn render_pi_agent_extension(daemon_base_url: &str) -> String {
+    let notify_url = format!("{daemon_base_url}/api/v1/agent/notify");
+    format!(
+        r#"// {PI_AGENT_EXTENSION_MARKER}
+import type {{ ExtensionAPI }} from "@mariozechner/pi-coding-agent";
+
+const NOTIFY_URL = {notify_url:?};
+
+async function notify(hookEventName: "UserPromptSubmit" | "Stop", sessionId: string, cwd: string) {{
+  try {{
+    await fetch(NOTIFY_URL, {{
+      method: "POST",
+      headers: {{ "content-type": "application/json" }},
+      body: JSON.stringify({{
+        hook_event_name: hookEventName,
+        session_id: sessionId,
+        cwd,
+      }}),
+    }});
+  }} catch {{
+    // Ignore daemon reachability errors.
+  }}
+}}
+
+export default function (pi: ExtensionAPI) {{
+  pi.on("before_agent_start", async (_event, ctx) => {{
+    await notify("UserPromptSubmit", ctx.sessionManager.getSessionId(), ctx.cwd);
+  }});
+
+  pi.on("agent_end", async (_event, ctx) => {{
+    await notify("Stop", ctx.sessionManager.getSessionId(), ctx.cwd);
+  }});
+}}
+"#
+    )
+}
+
+fn remove_pi_agent_extension() {
+    let Ok(home) = env::var("HOME") else {
+        return;
+    };
+    let extension_path = PathBuf::from(&home)
+        .join(".pi")
+        .join("agent")
+        .join("extensions")
+        .join(PI_AGENT_EXTENSION_FILENAME);
+    if !extension_path.exists() {
+        return;
+    }
+
+    let Ok(content) = fs::read_to_string(&extension_path) else {
+        return;
+    };
+    if !content.contains(PI_AGENT_EXTENSION_MARKER) {
+        return;
+    }
+
+    match fs::remove_file(&extension_path) {
+        Ok(()) => tracing::info!(path = %extension_path.display(), "removed Pi activity extension"),
+        Err(error) => {
+            tracing::warn!(path = %extension_path.display(), %error, "failed to remove Pi activity extension")
+        },
+    }
+}
+
 fn remove_claude_code_hooks() {
     let Ok(home) = env::var("HOME") else {
         return;
@@ -18139,12 +18248,14 @@ fn action_button(
 fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
     static CLAUDE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
     static CODEX_ICON: OnceLock<Arc<Image>> = OnceLock::new();
+    static PI_ICON: OnceLock<Arc<Image>> = OnceLock::new();
     static OPENCODE_ICON: OnceLock<Arc<Image>> = OnceLock::new();
     static COPILOT_ICON: OnceLock<Arc<Image>> = OnceLock::new();
 
     let lock = match kind {
         AgentPresetKind::Codex => &CODEX_ICON,
         AgentPresetKind::Claude => &CLAUDE_ICON,
+        AgentPresetKind::Pi => &PI_ICON,
         AgentPresetKind::OpenCode => &OPENCODE_ICON,
         AgentPresetKind::Copilot => &COPILOT_ICON,
     };
@@ -18168,6 +18279,7 @@ fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
     match kind {
         AgentPresetKind::Codex => PRESET_ICON_CODEX_SVG,
         AgentPresetKind::Claude => PRESET_ICON_CLAUDE_PNG,
+        AgentPresetKind::Pi => PRESET_ICON_PI_SVG,
         AgentPresetKind::OpenCode => PRESET_ICON_OPENCODE_SVG,
         AgentPresetKind::Copilot => PRESET_ICON_COPILOT_SVG,
     }
@@ -18175,9 +18287,10 @@ fn preset_icon_bytes(kind: AgentPresetKind) -> &'static [u8] {
 
 fn preset_icon_format(kind: AgentPresetKind) -> ImageFormat {
     match kind {
-        AgentPresetKind::Codex | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => {
-            ImageFormat::Svg
-        },
+        AgentPresetKind::Codex
+        | AgentPresetKind::Pi
+        | AgentPresetKind::OpenCode
+        | AgentPresetKind::Copilot => ImageFormat::Svg,
         AgentPresetKind::Claude => ImageFormat::Png,
     }
 }
@@ -18186,6 +18299,7 @@ fn preset_icon_asset_path(kind: AgentPresetKind) -> &'static str {
     match kind {
         AgentPresetKind::Codex => "assets/preset-icons/codex-white.svg",
         AgentPresetKind::Claude => "assets/preset-icons/claude.png",
+        AgentPresetKind::Pi => "assets/preset-icons/pi-white.svg",
         AgentPresetKind::OpenCode => "assets/preset-icons/opencode-white.svg",
         AgentPresetKind::Copilot => "assets/preset-icons/copilot-white.svg",
     }
@@ -18194,12 +18308,14 @@ fn preset_icon_asset_path(kind: AgentPresetKind) -> &'static str {
 fn log_preset_icon_fallback_once(kind: AgentPresetKind, fallback_glyph: &'static str) {
     static CLAUDE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
     static CODEX_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
+    static PI_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
     static OPENCODE_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
     static COPILOT_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
 
     let once = match kind {
         AgentPresetKind::Codex => &CODEX_FALLBACK_LOGGED,
         AgentPresetKind::Claude => &CLAUDE_FALLBACK_LOGGED,
+        AgentPresetKind::Pi => &PI_FALLBACK_LOGGED,
         AgentPresetKind::OpenCode => &OPENCODE_FALLBACK_LOGGED,
         AgentPresetKind::Copilot => &COPILOT_FALLBACK_LOGGED,
     };
@@ -18225,12 +18341,14 @@ fn log_preset_icon_fallback_once(kind: AgentPresetKind, fallback_glyph: &'static
 fn log_preset_icon_render_once(kind: AgentPresetKind) {
     static CLAUDE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
     static CODEX_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
+    static PI_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
     static OPENCODE_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
     static COPILOT_RENDER_LOGGED: OnceLock<()> = OnceLock::new();
 
     let once = match kind {
         AgentPresetKind::Codex => &CODEX_RENDER_LOGGED,
         AgentPresetKind::Claude => &CLAUDE_RENDER_LOGGED,
+        AgentPresetKind::Pi => &PI_RENDER_LOGGED,
         AgentPresetKind::OpenCode => &OPENCODE_RENDER_LOGGED,
         AgentPresetKind::Copilot => &COPILOT_RENDER_LOGGED,
     };
@@ -18247,7 +18365,10 @@ fn log_preset_icon_render_once(kind: AgentPresetKind) {
 fn preset_icon_render_size_px(kind: AgentPresetKind) -> f32 {
     match kind {
         AgentPresetKind::Codex => 20.,
-        AgentPresetKind::Claude | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => 14.,
+        AgentPresetKind::Claude
+        | AgentPresetKind::Pi
+        | AgentPresetKind::OpenCode
+        | AgentPresetKind::Copilot => 14.,
     }
 }
 
@@ -18258,13 +18379,17 @@ fn agent_preset_button_content(kind: AgentPresetKind, text_color: u32) -> Div {
     let icon_slot_size = icon_size.max(14.);
     let fallback_color = match kind {
         AgentPresetKind::Claude => 0xD97757,
-        AgentPresetKind::Codex | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => text_color,
+        AgentPresetKind::Codex
+        | AgentPresetKind::Pi
+        | AgentPresetKind::OpenCode
+        | AgentPresetKind::Copilot => text_color,
     };
     let fallback_glyph = match kind {
         AgentPresetKind::Claude => "C",
-        AgentPresetKind::Codex | AgentPresetKind::OpenCode | AgentPresetKind::Copilot => {
-            kind.fallback_icon()
-        },
+        AgentPresetKind::Codex
+        | AgentPresetKind::Pi
+        | AgentPresetKind::OpenCode
+        | AgentPresetKind::Copilot => kind.fallback_icon(),
     };
     div()
         .flex()

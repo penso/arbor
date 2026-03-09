@@ -4,13 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Extract the initial user prompt from the most recent Claude or Codex session
+/// Extract the initial user prompt from the most recent Claude, Codex, or Pi
+/// session
 /// associated with `worktree_path`.
 ///
-/// Tries Claude first (O(1) directory lookup), then falls back to scanning
-/// Codex session files (date-ordered, up to 30 days back).
+/// Tries Claude first (O(1) directory lookup), then Pi (same), then falls back
+/// to scanning Codex session files (date-ordered, up to 30 days back).
 pub fn extract_agent_task(worktree_path: &Path) -> Option<String> {
-    extract_claude_task(worktree_path).or_else(|| extract_codex_task(worktree_path))
+    extract_claude_task(worktree_path)
+        .or_else(|| extract_pi_task(worktree_path))
+        .or_else(|| extract_codex_task(worktree_path))
 }
 
 /// Encode a worktree path the same way Claude CLI names its project dirs:
@@ -82,6 +85,76 @@ fn extract_claude_user_prompt(path: &Path) -> Option<String> {
             }
         }
     }
+    None
+}
+
+/// Encode a worktree path the same way Pi names its session dirs.
+fn pi_project_key(worktree_path: &Path) -> String {
+    let path = worktree_path.to_string_lossy();
+    let trimmed = path.trim_start_matches(['/', '\\']);
+    format!("--{}--", trimmed.replace(['/', '\\', ':'], "-"))
+}
+
+/// Look up the most recent `.jsonl` in `~/.pi/agent/sessions/{key}/` and
+/// extract the first user message content.
+fn extract_pi_task(worktree_path: &Path) -> Option<String> {
+    let home = home_dir()?;
+    let key = pi_project_key(worktree_path);
+    let project_dir = home.join(".pi").join("agent").join("sessions").join(&key);
+
+    if !project_dir.is_dir() {
+        return None;
+    }
+
+    let mut jsonl_files: Vec<_> = fs::read_dir(&project_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+
+    jsonl_files.sort_by(|a, b| {
+        let ma = a.metadata().and_then(|m| m.modified()).ok();
+        let mb = b.metadata().and_then(|m| m.modified()).ok();
+        mb.cmp(&ma)
+    });
+
+    let newest = jsonl_files.first()?;
+    extract_pi_user_prompt(&newest.path())
+}
+
+/// Read through a Pi `.jsonl` session file and return the text of the first
+/// `message.role == "user"` entry.
+fn extract_pi_user_prompt(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let reader = io::BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&line).ok()?;
+        if value.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+
+        let message = value.get("message")?;
+        if message.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+
+        if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+            return Some(truncate_prompt(content));
+        }
+        if let Some(blocks) = message.get("content").and_then(|v| v.as_array()) {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    return Some(truncate_prompt(text));
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -249,6 +322,12 @@ mod tests {
     }
 
     #[test]
+    fn pi_project_key_encodes_correctly() {
+        let path = Path::new("/Users/penso/code/arbor");
+        assert_eq!(pi_project_key(path), "--Users-penso-code-arbor--");
+    }
+
+    #[test]
     fn truncate_prompt_short_text() {
         assert_eq!(truncate_prompt("fix the bug"), "fix the bug");
     }
@@ -321,5 +400,29 @@ mod tests {
         fs::write(&file_path, content).unwrap();
         let result = extract_codex_user_prompt_if_matching(&file_path, "/repos/project");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_pi_user_prompt_string_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("session.jsonl");
+        let content = r#"{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/repos/project"}
+{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"implement pi support"}}
+"#;
+        fs::write(&file_path, content).unwrap();
+        let result = extract_pi_user_prompt(&file_path);
+        assert_eq!(result.as_deref(), Some("implement pi support"));
+    }
+
+    #[test]
+    fn extract_pi_user_prompt_array_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("session.jsonl");
+        let content = r#"{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/repos/project"}
+{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"summarize recent changes"}]}}
+"#;
+        fs::write(&file_path, content).unwrap();
+        let result = extract_pi_user_prompt(&file_path);
+        assert_eq!(result.as_deref(), Some("summarize recent changes"));
     }
 }

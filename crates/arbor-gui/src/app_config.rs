@@ -17,12 +17,16 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # notifications = true
 #
 # [[agent_presets]]
-# key = "codex"     # codex | claude | opencode | copilot
+# key = "codex"     # codex | claude | pi | opencode | copilot
 # command = "codex"
 #
 # [[agent_presets]]
 # key = "claude"
 # command = "claude"
+#
+# [[agent_presets]]
+# key = "pi"
+# command = "pi"
 #
 # [[agent_presets]]
 # key = "opencode"
