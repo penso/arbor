@@ -90,6 +90,8 @@ const BUILT_IN_GITHUB_OAUTH_CLIENT_ID: Option<&str> = Some("Ov23liVexfjFZQXcuQib
 const GITHUB_AUTH_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1200);
 const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
+const INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
+const IDLE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
 const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_DAEMON_PORT: u16 = 8787;
 const DEFAULT_SSH_PORT: u16 = 22;
@@ -235,6 +237,7 @@ struct TerminalSession {
     styled_output: Vec<TerminalStyledLine>,
     cursor: Option<TerminalCursor>,
     modes: TerminalModes,
+    last_runtime_sync_at: Option<Instant>,
     runtime: Option<SharedTerminalRuntime>,
 }
 
@@ -421,6 +424,7 @@ trait EmulatorRuntimeBackend: Clone {
 
 trait TerminalRuntimeHandle {
     fn kind(&self) -> TerminalRuntimeKind;
+    fn sync_interval(&self, is_active: bool, session_state: TerminalState) -> Duration;
     fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), String>;
     fn sync(
         &self,
@@ -556,6 +560,10 @@ where
         self.kind
     }
 
+    fn sync_interval(&self, _is_active: bool, _session_state: TerminalState) -> Duration {
+        Duration::ZERO
+    }
+
     fn write_input(&self, _session: &TerminalSession, input: &[u8]) -> Result<(), String> {
         self.backend.write_input(input)
     }
@@ -627,6 +635,10 @@ where
 impl TerminalRuntimeHandle for DaemonTerminalRuntime {
     fn kind(&self) -> TerminalRuntimeKind {
         self.kind
+    }
+
+    fn sync_interval(&self, is_active: bool, session_state: TerminalState) -> Duration {
+        daemon_terminal_sync_interval(is_active, session_state)
     }
 
     fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), String> {
@@ -2458,6 +2470,7 @@ impl ArborWindow {
                     styled_output: Vec::new(),
                     cursor: None,
                     modes: TerminalModes::default(),
+                    last_runtime_sync_at: None,
                     runtime: attach_runtime
                         .then(|| {
                             self.terminal_daemon
@@ -2512,13 +2525,15 @@ impl ArborWindow {
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
         let target_grid_size =
             terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
+        let now = Instant::now();
         if let Some((rows, cols, ..)) = target_grid_size {
             self.last_terminal_grid_size = Some((rows, cols));
         }
         let mut sessions_to_close = Vec::new();
         let mut pending_notifications = Vec::new();
+        let sync_indices = ordered_terminal_sync_indices(&self.terminals, active_terminal_id);
 
-        for index in 0..self.terminals.len() {
+        for index in sync_indices {
             let Some(runtime) = self
                 .terminals
                 .get(index)
@@ -2528,13 +2543,21 @@ impl ArborWindow {
             };
 
             let session_id = self.terminals[index].id;
+            let is_active = active_terminal_id == Some(session_id);
+            let sync_interval = runtime.sync_interval(is_active, self.terminals[index].state);
+            if sync_interval > Duration::ZERO
+                && self.terminals[index]
+                    .last_runtime_sync_at
+                    .is_some_and(|last_sync| {
+                        now.saturating_duration_since(last_sync) < sync_interval
+                    })
+            {
+                continue;
+            }
+            self.terminals[index].last_runtime_sync_at = Some(now);
             let outcome = {
                 let session = &mut self.terminals[index];
-                runtime.sync(
-                    session,
-                    active_terminal_id == Some(session_id),
-                    target_grid_size,
-                )
+                runtime.sync(session, is_active, target_grid_size)
             };
 
             changed |= outcome.changed;
@@ -7018,6 +7041,7 @@ impl ArborWindow {
             styled_output: Vec::new(),
             cursor: None,
             modes: TerminalModes::default(),
+            last_runtime_sync_at: None,
             runtime: None,
         };
 
@@ -7227,6 +7251,7 @@ impl ArborWindow {
             styled_output: Vec::new(),
             cursor: None,
             modes: TerminalModes::default(),
+            last_runtime_sync_at: None,
             runtime: None,
         };
 
@@ -14760,6 +14785,26 @@ fn track_terminal_command_keystroke(session: &mut TerminalSession, keystroke: &K
     }
 }
 
+fn daemon_terminal_sync_interval(is_active: bool, session_state: TerminalState) -> Duration {
+    if is_active {
+        return Duration::ZERO;
+    }
+
+    match session_state {
+        TerminalState::Running => INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL,
+        TerminalState::Completed | TerminalState::Failed => IDLE_DAEMON_TERMINAL_SYNC_INTERVAL,
+    }
+}
+
+fn ordered_terminal_sync_indices(
+    terminals: &[TerminalSession],
+    active_terminal_id: Option<u64>,
+) -> Vec<usize> {
+    let mut indices = (0..terminals.len()).collect::<Vec<_>>();
+    indices.sort_by_key(|&index| active_terminal_id != Some(terminals[index].id));
+    indices
+}
+
 fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
     match state {
         TerminalState::Running => TerminalSessionState::Running,
@@ -20347,6 +20392,7 @@ mod tests {
             daemon,
         },
         gpui::{Keystroke, point, px},
+        std::time::Duration,
     };
 
     fn session_with_styled_line(
@@ -20389,6 +20435,7 @@ mod tests {
             }],
             cursor,
             modes: TerminalModes::default(),
+            last_runtime_sync_at: None,
             runtime: None,
         }
     }
@@ -20423,6 +20470,40 @@ mod tests {
     fn derives_default_branch_name_when_empty() {
         let branch = crate::derive_branch_name(" !!! ");
         assert_eq!(branch, "worktree");
+    }
+
+    #[test]
+    fn active_terminal_sync_is_prioritized() {
+        let mut first = session_with_styled_line("one", 0xffffff, 0x000000, None);
+        first.id = 10;
+        let mut second = session_with_styled_line("two", 0xffffff, 0x000000, None);
+        second.id = 20;
+        let mut third = session_with_styled_line("three", 0xffffff, 0x000000, None);
+        third.id = 30;
+
+        let indices = crate::ordered_terminal_sync_indices(&[first, second, third], Some(30));
+
+        assert_eq!(indices, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn daemon_terminal_sync_interval_keeps_active_session_unthrottled() {
+        assert_eq!(
+            crate::daemon_terminal_sync_interval(true, TerminalState::Running),
+            Duration::ZERO
+        );
+        assert_eq!(
+            crate::daemon_terminal_sync_interval(false, TerminalState::Running),
+            crate::INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+        assert_eq!(
+            crate::daemon_terminal_sync_interval(false, TerminalState::Completed),
+            crate::IDLE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+        assert_eq!(
+            crate::daemon_terminal_sync_interval(false, TerminalState::Failed),
+            crate::IDLE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
     }
 
     #[test]
