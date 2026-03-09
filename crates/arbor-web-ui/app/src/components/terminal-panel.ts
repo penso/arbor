@@ -215,7 +215,7 @@ function createXtermInstance(sessionId: string): void {
 }
 
 function connectWebSocket(instance: TerminalInstance): void {
-  const wsUrl = buildWsUrl(instance.sessionId);
+  const wsUrl = buildWsUrl(instance.sessionId, instance.xterm.cols, instance.xterm.rows);
   const socket = new WebSocket(wsUrl);
   socket.binaryType = "arraybuffer";
   instance.socket = socket;

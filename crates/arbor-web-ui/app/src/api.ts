@@ -246,9 +246,13 @@ export function serializeWsClientEvent(event: WsClientEvent): string {
   return JSON.stringify(event);
 }
 
-export function buildWsUrl(sessionId: string): string {
+export function buildWsUrl(sessionId: string, cols?: number, rows?: number): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/v1/terminals/${encodeURIComponent(sessionId)}/ws`;
+  let url = `${protocol}//${window.location.host}/api/v1/terminals/${encodeURIComponent(sessionId)}/ws`;
+  if (cols !== undefined && rows !== undefined) {
+    url += `?cols=${cols}&rows=${rows}`;
+  }
+  return url;
 }
 
 // ── Process management ───────────────────────────────────────────────

@@ -160,6 +160,15 @@ impl TerminalEmulator {
     pub fn collect_styled_lines(&self) -> Vec<TerminalStyledLine> {
         collect_styled_lines(&self.term)
     }
+
+    /// Render the emulator's current visual state to an ANSI escape-sequence
+    /// string.  Unlike the raw `output_tail` buffer this reflects the
+    /// emulator's *current* column width (including any reflow after a
+    /// resize) so it can be safely written into an xterm.js instance of the
+    /// same dimensions.
+    pub fn render_ansi_snapshot(&self, max_lines: usize) -> String {
+        render_ansi_snapshot(&self.term, max_lines)
+    }
 }
 
 impl Default for TerminalEmulator {
@@ -212,6 +221,62 @@ fn snapshot_modes(term: &Term<VoidListener>) -> TerminalModes {
         app_cursor: mode.contains(TermMode::APP_CURSOR),
         alt_screen: mode.contains(TermMode::ALT_SCREEN),
     }
+}
+
+fn render_ansi_snapshot(term: &Term<VoidListener>, max_lines: usize) -> String {
+    let lines = collect_styled_lines(term);
+    let keep_from = if max_lines == 0 {
+        0
+    } else {
+        lines.len().saturating_sub(max_lines)
+    };
+
+    let mut output = String::new();
+    for (index, line) in lines[keep_from..].iter().enumerate() {
+        if index > 0 {
+            output.push_str("\r\n");
+        }
+        for run in &line.runs {
+            let r_fg = (run.fg >> 16) & 0xFF;
+            let g_fg = (run.fg >> 8) & 0xFF;
+            let b_fg = run.fg & 0xFF;
+
+            if run.bg != TERMINAL_DEFAULT_BG {
+                let r_bg = (run.bg >> 16) & 0xFF;
+                let g_bg = (run.bg >> 8) & 0xFF;
+                let b_bg = run.bg & 0xFF;
+                output.push_str(&format!(
+                    "\x1b[38;2;{r_fg};{g_fg};{b_fg};48;2;{r_bg};{g_bg};{b_bg}m"
+                ));
+            } else {
+                output.push_str(&format!("\x1b[38;2;{r_fg};{g_fg};{b_fg}m"));
+            }
+            output.push_str(&run.text);
+        }
+        output.push_str("\x1b[0m");
+    }
+
+    // Restore cursor to the correct position.  The emulator tracks the
+    // cursor on the visible grid (line 0 = first screen row).  After
+    // writing all the lines above we need to move the cursor back to the
+    // emulator's position so the shell prompt appears in the right spot.
+    if let Some(cursor) = snapshot_cursor(term) {
+        // The total visible lines we emitted (from keep_from to the end).
+        let emitted_lines = lines.len() - keep_from;
+        // After writing all lines the cursor sits at the last emitted line.
+        // The cursor's line is relative to the full lines vec, so adjust.
+        let cursor_line_in_emitted = cursor.line.saturating_sub(keep_from);
+        let lines_up = emitted_lines
+            .saturating_sub(1)
+            .saturating_sub(cursor_line_in_emitted);
+        if lines_up > 0 {
+            output.push_str(&format!("\x1b[{lines_up}A"));
+        }
+        // Move cursor to the exact column.
+        output.push_str(&format!("\x1b[{}G", cursor.column + 1));
+    }
+
+    output
 }
 
 fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalStyledLine> {

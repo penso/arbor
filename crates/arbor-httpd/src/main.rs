@@ -873,6 +873,7 @@ async fn detach_terminal(
 async fn terminal_ws(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> ApiResponse {
     {
@@ -891,34 +892,81 @@ async fn terminal_ws(
         }
     }
 
+    let initial_size = match (query.get("cols"), query.get("rows")) {
+        (Some(cols_str), Some(rows_str)) => {
+            if let (Ok(cols), Ok(rows)) = (cols_str.parse::<u16>(), rows_str.parse::<u16>()) {
+                if cols > 0 && rows > 0 {
+                    Some((cols, rows))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        },
+        _ => None,
+    };
+
     Ok(ws
-        .on_upgrade(move |socket| handle_terminal_ws(state, session_id, socket))
+        .on_upgrade(move |socket| handle_terminal_ws(state, session_id, socket, initial_size))
         .into_response())
 }
 
-async fn handle_terminal_ws(state: AppState, session_id: String, mut socket: WebSocket) {
-    let (snapshot, mut subscription) = {
-        let daemon = state.daemon.lock().await;
+async fn handle_terminal_ws(
+    state: AppState,
+    session_id: String,
+    mut socket: WebSocket,
+    initial_size: Option<(u16, u16)>,
+) {
+    let (ansi_output, snapshot_state, snapshot_exit_code, snapshot_updated_at, mut subscription) = {
+        let mut daemon = state.daemon.lock().await;
+
+        // Resize the PTY before generating the snapshot so the emulator
+        // reflows content to the client's actual terminal dimensions.
+        if let Some((cols, rows)) = initial_size {
+            let _ = daemon.resize(ResizeRequest {
+                session_id: session_id.clone(),
+                cols,
+                rows,
+            });
+        }
+
         let snapshot = match daemon.snapshot(SnapshotRequest {
             session_id: session_id.clone(),
-            max_lines: 180,
+            max_lines: 1,
         }) {
             Ok(Some(snapshot)) => snapshot,
             _ => return,
         };
+
+        // Render the emulator's visual state to ANSI instead of replaying
+        // raw output_tail bytes which were captured at potentially different
+        // terminal dimensions.
+        let ansi_output = daemon
+            .render_ansi_snapshot(&session_id, 180)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
         let subscription = match daemon.subscribe(&session_id) {
             Ok(subscription) => subscription,
             Err(_) => return,
         };
 
-        (snapshot, subscription)
+        (
+            ansi_output,
+            snapshot.state,
+            snapshot.exit_code,
+            snapshot.updated_at_unix_ms,
+            subscription,
+        )
     };
 
     if send_ws_event(&mut socket, WsServerEvent::Snapshot {
-        output_tail: snapshot.output_tail,
-        state: snapshot.state,
-        exit_code: snapshot.exit_code,
-        updated_at_unix_ms: snapshot.updated_at_unix_ms,
+        output_tail: ansi_output,
+        state: snapshot_state,
+        exit_code: snapshot_exit_code,
+        updated_at_unix_ms: snapshot_updated_at,
     })
     .await
     .is_err()

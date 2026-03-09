@@ -346,6 +346,14 @@ impl LiveSession {
             updated_at_unix_ms: *lock_or_recover(&self.updated_at_unix_ms),
         }
     }
+
+    /// Render the emulator's current visual state to ANSI escape sequences.
+    /// Unlike `output_tail`, this reflects the emulator's current dimensions
+    /// (including reflow after resize).
+    fn render_ansi_snapshot(&self, max_lines: usize) -> String {
+        let emulator = lock_or_recover(&self.emulator);
+        emulator.render_ansi_snapshot(max_lines)
+    }
 }
 
 fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, session: Arc<LiveSession>) {
@@ -474,6 +482,19 @@ impl LocalTerminalDaemon {
         let next = self.next_session_id;
         self.next_session_id = self.next_session_id.saturating_add(1);
         format!("{DAEMON_SESSION_PREFIX}{next}")
+    }
+
+    /// Render the emulator's current screen to ANSI escape sequences.
+    /// This reflects the emulator's current dimensions (including reflow).
+    pub fn render_ansi_snapshot(
+        &self,
+        session_id: &str,
+        max_lines: usize,
+    ) -> Result<Option<String>, LocalTerminalDaemonError> {
+        let Some(session) = self.sessions.get(session_id) else {
+            return Ok(None);
+        };
+        Ok(Some(session.render_ansi_snapshot(max_lines)))
     }
 }
 
