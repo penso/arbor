@@ -1,4 +1,5 @@
 mod app_config;
+mod connection_history;
 mod github_auth_store;
 mod github_service;
 mod log_layer;
@@ -853,6 +854,7 @@ struct SettingsModal {
     daemon_url: String,
     preferred_editor: String,
     notifications: bool,
+    daemon_auth_token: String,
     error: Option<String>,
 }
 
@@ -1391,6 +1393,7 @@ struct ArborWindow {
     daemon_auth_modal: Option<DaemonAuthModal>,
     start_daemon_modal: bool,
     connect_to_host_modal: Option<ConnectToHostModal>,
+    connection_history: Vec<connection_history::ConnectionHistoryEntry>,
     daemon_auth_tokens: HashMap<String, String>,
     connected_daemon_label: Option<String>,
     pending_diff_scroll_to_file: Option<PathBuf>,
@@ -1434,7 +1437,6 @@ struct ArborWindow {
     logs_tab_open: bool,
     logs_tab_active: bool,
     quit_overlay_until: Option<Instant>,
-    agent_ws_connected: bool,
     ime_marked_text: Option<String>,
     welcome_clone_url: String,
     welcome_clone_url_active: bool,
@@ -1614,7 +1616,8 @@ impl ArborWindow {
                     daemon_auth_modal: None,
                     start_daemon_modal: false,
                     connect_to_host_modal: None,
-                    daemon_auth_tokens: HashMap::new(),
+                    connection_history: connection_history::load_history(),
+                    daemon_auth_tokens: connection_history::load_tokens(),
                     connected_daemon_label: None,
                     pending_diff_scroll_to_file: None,
                     focus_terminal_on_next_render: true,
@@ -1657,7 +1660,6 @@ impl ArborWindow {
                     logs_tab_open: false,
                     logs_tab_active: false,
                     quit_overlay_until: None,
-                    agent_ws_connected: false,
                     ime_marked_text: None,
                     welcome_clone_url: String::new(),
                     welcome_clone_url_active: false,
@@ -1906,7 +1908,8 @@ impl ArborWindow {
             daemon_auth_modal: None,
             start_daemon_modal: false,
             connect_to_host_modal: None,
-            daemon_auth_tokens: HashMap::new(),
+            connection_history: connection_history::load_history(),
+            daemon_auth_tokens: connection_history::load_tokens(),
             connected_daemon_label: None,
             pending_diff_scroll_to_file: None,
             focus_terminal_on_next_render: true,
@@ -1949,7 +1952,6 @@ impl ArborWindow {
             logs_tab_open: false,
             logs_tab_active: false,
             quit_overlay_until: None,
-            agent_ws_connected: false,
             ime_marked_text: None,
             welcome_clone_url: String::new(),
             welcome_clone_url_active: false,
@@ -2032,7 +2034,6 @@ impl ArborWindow {
                     }
 
                     this.refresh_worktree_diff_summaries(cx);
-                    this.refresh_agent_activity(cx);
                     if this.active_outpost_index.is_some() {
                         this.refresh_remote_changed_files(cx);
                     } else if this.reload_changed_files() {
@@ -2187,6 +2188,8 @@ impl ArborWindow {
 
         let next_daemon_base_url = daemon_base_url_from_config(loaded.config.daemon_url.as_deref());
         if self.daemon_base_url != next_daemon_base_url {
+            // Remove hooks pointing at the old daemon before switching
+            remove_claude_code_hooks();
             self.daemon_base_url = next_daemon_base_url.clone();
             self.terminal_daemon =
                 match terminal_daemon_http::default_terminal_daemon_client(&next_daemon_base_url) {
@@ -2210,6 +2213,7 @@ impl ArborWindow {
                     let error_text = error.to_string();
                     if daemon_error_is_connection_refused(&error_text) {
                         self.terminal_daemon = None;
+                        remove_claude_code_hooks();
                         changed = true;
                     } else {
                         notices.push(format!(
@@ -2835,49 +2839,6 @@ impl ArborWindow {
         .detach();
     }
 
-    fn refresh_agent_activity(&mut self, cx: &mut Context<Self>) {
-        if self.agent_ws_connected {
-            return;
-        }
-
-        let worktree_paths: Vec<PathBuf> = self
-            .worktrees
-            .iter()
-            .map(|worktree| worktree.path.clone())
-            .collect();
-        if worktree_paths.is_empty() {
-            return;
-        }
-
-        cx.spawn(async move |this, cx| {
-            let active_worktrees = cx
-                .background_spawn(async move {
-                    let cwds = arbor_core::agent::detect_agent_cwds();
-                    arbor_core::agent::worktrees_with_agents(&cwds, &worktree_paths)
-                })
-                .await;
-
-            let _ = this.update(cx, |this, cx| {
-                let mut changed = false;
-                for worktree in &mut this.worktrees {
-                    let new_state = if active_worktrees.contains(&worktree.path) {
-                        Some(AgentState::Working)
-                    } else {
-                        None
-                    };
-                    if worktree.agent_state != new_state {
-                        worktree.agent_state = new_state;
-                        changed = true;
-                    }
-                }
-                if changed {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
     fn start_agent_activity_ws(&mut self, cx: &mut Context<Self>) {
         let daemon_base_url = self.daemon_base_url.clone();
         cx.spawn(async move |this, cx| {
@@ -2920,9 +2881,6 @@ impl ArborWindow {
                 if let Ok(Some(text)) = first {
                     tracing::info!("agent activity WS connected");
                     backoff_secs = 3;
-                    let _ = this.update(cx, |this, _| {
-                        this.agent_ws_connected = true;
-                    });
                     // Process the first message
                     process_agent_ws_message(&this, cx, &text);
 
@@ -2933,9 +2891,6 @@ impl ArborWindow {
                 }
 
                 tracing::debug!("agent activity WS disconnected, will retry");
-                let _ = this.update(cx, |this, _| {
-                    this.agent_ws_connected = false;
-                });
 
                 cx.background_spawn(async move {
                     std::thread::sleep(Duration::from_secs(backoff_secs));
@@ -4236,6 +4191,8 @@ impl ArborWindow {
         };
         let url = daemon.base_url();
         let label = daemon.display_name().to_owned();
+        connection_history::record_connection(&url, Some(&label));
+        self.connection_history = connection_history::load_history();
         self.connect_to_daemon_url(&url, Some(label), cx);
         self.active_discovered_daemon = Some(index);
     }
@@ -4266,6 +4223,7 @@ impl ArborWindow {
         };
 
         let local_url = tunnel.local_url();
+        let local_port = tunnel.local_port;
         tracing::info!(
             remote = %target.ssh_destination(),
             ssh_port = target.ssh_port,
@@ -4275,10 +4233,46 @@ impl ArborWindow {
         );
 
         self.ssh_daemon_tunnel = Some(tunnel);
-        let connected = self.connect_to_daemon_endpoint(&local_url, label, Some(auth_key), cx);
-        if !connected {
-            self.stop_active_ssh_daemon_tunnel();
-        }
+        self.notice = Some(format!(
+            "connecting to {} via SSH tunnel\u{2026}",
+            target.ssh_destination()
+        ));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let ready = cx
+                .background_spawn(async move {
+                    for _ in 0..40 {
+                        if std::net::TcpStream::connect(("127.0.0.1", local_port)).is_ok() {
+                            return true;
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    false
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.notice = None;
+                if ready {
+                    let connected =
+                        this.connect_to_daemon_endpoint(&local_url, label, Some(auth_key), cx);
+                    if !connected {
+                        this.stop_active_ssh_daemon_tunnel();
+                    }
+                } else {
+                    tracing::warn!(
+                        local_port = local_port,
+                        "SSH tunnel did not become ready in time"
+                    );
+                    this.notice =
+                        Some("SSH tunnel timed out — is the remote daemon running?".to_owned());
+                    this.stop_active_ssh_daemon_tunnel();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn connect_to_daemon_endpoint(
@@ -4294,6 +4288,7 @@ impl ArborWindow {
         let client = match terminal_daemon_http::default_terminal_daemon_client(url) {
             Ok(c) => c,
             Err(error) => {
+                tracing::warn!(url = %url, %error, "failed to create daemon client");
                 self.notice = Some(format!("failed to connect to {url}: {error}"));
                 self.terminal_daemon = None;
                 self.connected_daemon_label = None;
@@ -4316,7 +4311,15 @@ impl ArborWindow {
                 true
             },
             Err(error) => {
-                if error.is_unauthorized() || error.is_forbidden() {
+                if error.is_forbidden() {
+                    self.notice = Some(
+                        "Remote host has no auth token configured. Set [daemon] auth_token in ~/.config/arbor/config.toml on the remote host.".to_owned(),
+                    );
+                    self.terminal_daemon = None;
+                    self.connected_daemon_label = None;
+                    cx.notify();
+                    false
+                } else if error.is_unauthorized() {
                     self.daemon_auth_modal = Some(DaemonAuthModal {
                         daemon_url: token_key,
                         token: String::new(),
@@ -4327,6 +4330,7 @@ impl ArborWindow {
                     cx.notify();
                     true
                 } else {
+                    tracing::warn!(url = %url, %error, "failed to connect to daemon");
                     self.notice = Some(format!("failed to connect to {url}: {error}"));
                     self.terminal_daemon = None;
                     self.connected_daemon_label = None;
@@ -4386,6 +4390,7 @@ impl ArborWindow {
             match client.list_sessions() {
                 Ok(records) => {
                     self.daemon_auth_tokens.insert(url, token);
+                    connection_history::save_tokens(&self.daemon_auth_tokens);
                     self.restore_terminal_sessions_from_records(records, true);
                     self.refresh_worktrees(cx);
                 },
@@ -6752,6 +6757,8 @@ impl ArborWindow {
             },
         };
         let label = addr.clone();
+        connection_history::record_connection(&addr, None);
+        self.connection_history = connection_history::load_history();
         match target {
             ConnectHostTarget::Http { url, auth_key } => {
                 self.stop_active_ssh_daemon_tunnel();
@@ -6765,11 +6772,17 @@ impl ArborWindow {
 
     fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
         let loaded = self.app_config_store.load_or_create_config();
+        let daemon_auth_token = loaded
+            .config
+            .daemon
+            .and_then(|d| d.auth_token)
+            .unwrap_or_default();
         self.settings_modal = Some(SettingsModal {
             active_field: SettingsField::DaemonUrl,
             daemon_url: self.daemon_base_url.clone(),
             preferred_editor: loaded.config.preferred_editor.unwrap_or_default(),
             notifications: self.notifications_enabled,
+            daemon_auth_token,
             error: None,
         });
         cx.notify();
@@ -12334,7 +12347,13 @@ impl ArborWindow {
                 // Expanded checks list
                 if checks_expanded {
                     let mut checks_list = div().flex().flex_col().gap(px(2.)).pl_2();
-                    for (name, status) in &pr.checks {
+                    let mut sorted_checks: Vec<_> = pr.checks.iter().collect();
+                    sorted_checks.sort_by_key(|(_, status)| match status {
+                        github_service::CheckStatus::Failure => 0,
+                        github_service::CheckStatus::Pending => 1,
+                        github_service::CheckStatus::Success => 2,
+                    });
+                    for (name, status) in sorted_checks {
                         let (icon, color) = match status {
                             github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
                             github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
@@ -12376,9 +12395,33 @@ impl ArborWindow {
             )
             .child(
                 div()
+                    .id("worktree-hover-popover-zone")
                     .absolute()
-                    .left(left_pane_x + px(4.))
-                    .top(mouse_y - px(8.))
+                    .left(left_pane_x + px(4.) - px(12.))
+                    .top(mouse_y - px(8.) - px(12.))
+                    .p(px(12.))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this._hover_dismiss_task = None;
+                        } else {
+                            this._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
+                                cx.background_spawn(async {
+                                    smol::Timer::after(Duration::from_millis(300)).await;
+                                })
+                                .await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if this
+                                        .worktree_hover_popover
+                                        .as_ref()
+                                        .is_some_and(|p| p.worktree_index == popover_wt_index)
+                                    {
+                                        this.worktree_hover_popover = None;
+                                        cx.notify();
+                                    }
+                                });
+                            }));
+                        }
+                    }))
                     .child(card),
             )
     }
@@ -13519,7 +13562,9 @@ impl ArborWindow {
                         div()
                             .text_xs()
                             .text_color(rgb(theme.text_muted))
-                            .child(format!("Enter the auth token for {daemon_url}")),
+                            .child(format!(
+                                "Enter the auth token for {daemon_url}. Find it in Settings (\u{2318},) on the remote host, or in ~/.config/arbor/config.toml under [daemon] auth_token."
+                            )),
                     )
                     .when_some(error, |this, err| {
                         this.child(div().text_xs().text_color(rgb(0xf38ba8_u32)).child(err))
@@ -13669,7 +13714,11 @@ impl ArborWindow {
         };
         let theme = self.theme();
         let address = modal.address.clone();
+        let address_empty = address.is_empty();
         let error = modal.error.clone();
+        let history = self.connection_history.clone();
+        let has_history = !history.is_empty();
+        let has_daemons = !self.discovered_daemons.is_empty();
 
         div()
             .absolute()
@@ -13700,6 +13749,7 @@ impl ArborWindow {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
+                    // Title
                     .child(
                         div()
                             .text_sm()
@@ -13707,7 +13757,140 @@ impl ArborWindow {
                             .text_color(rgb(theme.text_primary))
                             .child("Connect to Host"),
                     )
-                    .when(!self.discovered_daemons.is_empty(), |modal_div| {
+                    // Recent section
+                    .when(has_history, |modal_div| {
+                        modal_div.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_family(FONT_MONO)
+                                                .text_size(px(12.))
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("\u{f1da}"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("Recent"),
+                                        ),
+                                )
+                                .children(history.into_iter().enumerate().map(|(idx, entry)| {
+                                    let display = entry
+                                        .label
+                                        .clone()
+                                        .unwrap_or_else(|| entry.address.clone());
+                                    let subtitle = entry.address.clone();
+                                    let has_label = entry.label.is_some();
+                                    let connect_addr = entry.address.clone();
+                                    let remove_addr = entry.address.clone();
+                                    div()
+                                        .id(("connect-modal-history", idx))
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .bg(rgb(theme.panel_bg))
+                                        .hover(|s| s.bg(rgb(theme.panel_active_bg)))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(modal) =
+                                                this.connect_to_host_modal.as_mut()
+                                            {
+                                                modal.address = connect_addr.clone();
+                                            }
+                                            this.submit_connect_to_host(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .font_family(FONT_MONO)
+                                                .text_size(px(14.))
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("\u{f1da}"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .child(display),
+                                                )
+                                                .when(has_label, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(theme.text_muted))
+                                                            .overflow_hidden()
+                                                            .whitespace_nowrap()
+                                                            .text_ellipsis()
+                                                            .child(subtitle),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("connect-modal-history-remove", idx))
+                                                .flex_none()
+                                                .w(px(20.))
+                                                .h(px(20.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .font_family(FONT_MONO)
+                                                .text_color(rgb(theme.text_muted))
+                                                .hover(|s| {
+                                                    s.bg(rgb(theme.panel_active_bg))
+                                                        .text_color(rgb(theme.text_primary))
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        connection_history::remove_entry(
+                                                            &remove_addr,
+                                                        );
+                                                        this.daemon_auth_tokens
+                                                            .retain(|k, _| !k.contains(&*remove_addr));
+                                                        connection_history::save_tokens(
+                                                            &this.daemon_auth_tokens,
+                                                        );
+                                                        this.connection_history =
+                                                            connection_history::load_history();
+                                                        cx.stop_propagation();
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child("\u{f00d}"),
+                                        )
+                                })),
+                        )
+                    })
+                    // Discovered on LAN section
+                    .when(has_daemons, |modal_div| {
                         let daemons = self.discovered_daemons.clone();
                         modal_div.child(
                             div()
@@ -13741,7 +13924,7 @@ impl ArborWindow {
                                         .first()
                                         .cloned()
                                         .unwrap_or_else(|| daemon.host.clone());
-                                    let subtitle = format!("{}:{}", addr, daemon.port,);
+                                    let subtitle = format!("{}:{}", addr, daemon.port);
                                     div()
                                         .id(("connect-modal-daemon", idx))
                                         .cursor_pointer()
@@ -13795,16 +13978,19 @@ impl ArborWindow {
                                 })),
                         )
                     })
+                    // Manual address label
                     .child(div().text_xs().text_color(rgb(theme.text_muted)).child(
-                        if self.discovered_daemons.is_empty() {
-                            "Use http://HOST:PORT or ssh://[user@]HOST[:ssh_port]/"
-                        } else {
+                        if has_history || has_daemons {
                             "Or enter an address manually:"
+                        } else {
+                            "Use http://HOST:PORT or ssh://[user@]HOST[:ssh_port]/"
                         },
                     ))
+                    // Error display
                     .when_some(error, |this, err| {
                         this.child(div().text_xs().text_color(rgb(0xf38ba8_u32)).child(err))
                     })
+                    // Address input
                     .child(
                         div()
                             .flex()
@@ -13831,7 +14017,7 @@ impl ArborWindow {
                                     .text_sm()
                                     .font_family(FONT_MONO)
                                     .text_color(rgb(theme.text_primary))
-                                    .child(if address.is_empty() {
+                                    .child(if address_empty {
                                         div()
                                             .text_color(rgb(theme.text_disabled))
                                             .child("ssh://dev@192.168.1.42/")
@@ -13853,6 +14039,7 @@ impl ArborWindow {
                                     }),
                             ),
                     )
+                    // Buttons
                     .child(
                         div()
                             .flex()
@@ -13866,10 +14053,16 @@ impl ArborWindow {
                                     })),
                             )
                             .child(
-                                action_button(theme, "submit-connect", "Connect", false, true)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.submit_connect_to_host(cx);
-                                    })),
+                                action_button(
+                                    theme,
+                                    "submit-connect",
+                                    "Connect",
+                                    false,
+                                    address_empty,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.submit_connect_to_host(cx);
+                                })),
                             ),
                     ),
             )
@@ -14062,6 +14255,38 @@ impl ArborWindow {
                                         "Enabled"
                                     } else {
                                         "Disabled"
+                                    }),
+                            ),
+                    )
+                    // Daemon Auth Token (read-only)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Daemon Auth Token"),
+                            )
+                            .child(
+                                div()
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .bg(rgb(theme.panel_bg))
+                                    .text_sm()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(if modal.daemon_auth_token.is_empty() {
+                                        "(not configured)".to_owned()
+                                    } else {
+                                        modal.daemon_auth_token.clone()
                                     }),
                             ),
                     )
@@ -14851,12 +15076,18 @@ fn try_auto_start_daemon(
         },
     };
 
-    let bind_addr = daemon_base_url
+    // Bind to 0.0.0.0 so the daemon is reachable on the LAN (for mDNS
+    // discovery and direct connections), while the GUI still connects via
+    // 127.0.0.1.
+    let port = daemon_base_url
         .strip_prefix("http://")
-        .unwrap_or("127.0.0.1:8787");
+        .and_then(|s| s.rsplit_once(':'))
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(8787);
+    let bind_addr = format!("0.0.0.0:{port}");
 
     let mut cmd = Command::new(&binary);
-    cmd.env("ARBOR_HTTPD_BIND", bind_addr)
+    cmd.env("ARBOR_HTTPD_BIND", &bind_addr)
         .stdin(Stdio::null())
         .stdout(stdout_file)
         .stderr(stderr_file);
@@ -14945,6 +15176,7 @@ fn load_outpost_summaries(
 impl Drop for ArborWindow {
     fn drop(&mut self) {
         self.stop_active_ssh_daemon_tunnel();
+        remove_claude_code_hooks();
     }
 }
 
@@ -15400,8 +15632,7 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
 
     for (cwd, state, updated_at) in entries {
         let cwd_path = Path::new(cwd);
-        // Find the most specific (longest) worktree path that is a prefix of this cwd,
-        // same logic as worktrees_with_agents().
+        // Find the most specific (longest) worktree path that is a prefix of this cwd.
         let best_match = worktree_paths
             .iter()
             .filter(|wt_path| cwd_path.starts_with(wt_path))
@@ -15488,6 +15719,65 @@ fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
 
     tracing::info!(path = %settings_path.display(), "installed Claude Code hooks");
     Ok(())
+}
+
+fn remove_claude_code_hooks() {
+    let Ok(home) = env::var("HOME") else {
+        return;
+    };
+    let settings_path = PathBuf::from(&home).join(".claude").join("settings.json");
+    if !settings_path.exists() {
+        return;
+    }
+
+    let Ok(content) = fs::read_to_string(&settings_path) else {
+        return;
+    };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+
+    let Some(hooks) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    // Check if any hook references our notify endpoint
+    if !hooks
+        .values()
+        .any(|v| v.to_string().contains("/api/v1/agent/notify"))
+    {
+        return;
+    }
+
+    // Remove entries containing our notify URL from each hook array
+    let hook_keys: Vec<String> = hooks.keys().cloned().collect();
+    for key in hook_keys {
+        if let Some(arr) = hooks.get_mut(&key).and_then(|v| v.as_array_mut()) {
+            arr.retain(|entry| !entry.to_string().contains("/api/v1/agent/notify"));
+            if arr.is_empty() {
+                hooks.remove(&key);
+            }
+        }
+    }
+
+    if hooks.is_empty()
+        && let Some(obj) = settings.as_object_mut()
+    {
+        obj.remove("hooks");
+    }
+
+    match serde_json::to_string_pretty(&settings) {
+        Ok(serialized) => {
+            if let Err(e) = fs::write(&settings_path, serialized) {
+                tracing::warn!(error = %e, "failed to write settings.json during hook removal");
+            } else {
+                tracing::info!(path = %settings_path.display(), "removed Claude Code hooks");
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize settings during hook removal");
+        },
+    }
 }
 
 fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary]) -> bool {

@@ -15,7 +15,6 @@ gix = { workspace = true }
 gix-diff = { workspace = true, features = ["blob-experimental"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sysinfo = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

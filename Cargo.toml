@@ -1,25 +1,25 @@
 [workspace]
 default-members = ["crates/arbor-core", "crates/arbor-gui", "crates/arbor-httpd"]
 members = [
-    "crates/arbor-core",
-    "crates/arbor-gui",
-    "crates/arbor-httpd",
-    "crates/arbor-mcp",
-    "crates/arbor-mosh",
-    "crates/arbor-ssh",
-    "crates/arbor-terminal-emulator",
-    "crates/arbor-web-ui",
+  "crates/arbor-core",
+  "crates/arbor-gui",
+  "crates/arbor-httpd",
+  "crates/arbor-mcp",
+  "crates/arbor-mosh",
+  "crates/arbor-ssh",
+  "crates/arbor-terminal-emulator",
+  "crates/arbor-web-ui",
 ]
 resolver = "2"
 
 [workspace.package]
-edition = "2024"
-license = "MIT"
+edition      = "2024"
+license      = "MIT"
 rust-version = "1.93"
-version = "0.1.0"
+version      = "0.1.0"
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+unsafe_code           = "deny"
 unused_qualifications = "deny"
 
 [workspace.lints.clippy]
@@ -28,31 +28,33 @@ unwrap_used = "deny"
 
 [workspace.dependencies]
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
-anyhow = "1"
-axum = "0.8.4"
-config = "0.15.19"
-futures = "0.3"
-git2 = "0.20"
-gix = "0.80.0"
-gix-diff = "0.60.0"
-gpui = "0.2.2"
-gpui_http_client = "0.2.2"
-imara-diff = "0.2.0"
-libssh-rs = "0.3.6"
-mdns-sd = "0.18"
-notify-rust = "4"
-octocrab = "0.49.5"
-portable-pty = "0.9.0"
-ropey = "1.6.1"
-serde = { version = "1", features = ["derive"] }
-smol = "2"
-serde_json = "1"
-sysinfo = "0.35"
-syntect = "5.3.0"
-thiserror = "2"
-tokio = { version = "1.48.0", features = ["full"] }
-toml_edit = "0.22"
-tower-http = { version = "0.6.6", features = ["fs"] }
-tracing = "0.1"
-ureq = "3"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+anyhow             = "1"
+axum               = "0.8.4"
+config             = "0.15.19"
+futures            = "0.3"
+git2               = "0.20"
+gix                = "0.80.0"
+gix-diff           = "0.60.0"
+gpui               = "0.2.2"
+gpui_http_client   = "0.2.2"
+hmac               = "0.12"
+imara-diff         = "0.2.0"
+libssh-rs          = "0.3.6"
+mdns-sd            = "0.18"
+notify-rust        = "4"
+octocrab           = "0.49.5"
+portable-pty       = "0.9.0"
+rand               = "0.9"
+ropey              = "1.6.1"
+serde              = { features = ["derive"], version = "1" }
+serde_json         = "1"
+sha2               = "0.10"
+smol               = "2"
+syntect            = "5.3.0"
+thiserror          = "2"
+tokio              = { features = ["full"], version = "1.48.0" }
+toml_edit          = "0.22"
+tower-http         = { features = ["fs"], version = "0.6.6" }
+tracing            = "0.1"
+tracing-subscriber = { features = ["env-filter", "registry"], version = "0.3" }
+ureq               = "3"
