@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentation | Arbor</title>
+  <meta name="description" content="Arbor documentation — remote access, HTTP API, building, and development guides.">
+  <link rel="icon" type="image/png" href="../images/arbor-icon-1024.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Outfit:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ["Manrope", "system-ui", "sans-serif"],
+            display: ["Outfit", "Manrope", "sans-serif"],
+            mono: ["IBM Plex Mono", "monospace"]
+          },
+          colors: {
+            arbor: {
+              50: "#f3faf5",
+              100: "#def5e5",
+              500: "#1f9a63",
+              600: "#117a4c",
+              700: "#0d623d"
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      background:
+        radial-gradient(1100px 500px at 0% -10%, rgba(31, 154, 99, 0.13), transparent 60%),
+        radial-gradient(800px 420px at 100% 8%, rgba(14, 116, 144, 0.12), transparent 55%),
+        #f8fafc;
+    }
+  </style>
+</head>
+<body class="font-sans text-slate-900 antialiased">
+  <header class="sticky top-0 z-40 border-b border-slate-200/80 bg-white/85 backdrop-blur-lg">
+    <div class="mx-auto flex h-16 w-full max-w-4xl items-center gap-6 px-4 sm:px-6">
+      <a class="inline-flex items-center gap-2.5" href="../">
+        <img src="../images/arbor-icon-1024.png" alt="Arbor" width="28" height="28" class="rounded-md ring-1 ring-slate-200">
+        <span class="font-display text-lg font-bold tracking-tight">Arbor</span>
+      </a>
+      <nav class="ml-auto flex items-center gap-5 text-sm font-medium text-slate-600" aria-label="Main">
+        <a class="text-slate-900" href="./">Docs</a>
+        <a class="transition hover:text-slate-900" href="../#features">Features</a>
+        <a class="transition hover:text-slate-900" href="../#install">Install</a>
+        <a class="transition hover:text-slate-900" href="https://github.com/penso/arbor" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6 sm:py-14">
+    <div class="mb-8">
+      <p class="text-xs font-bold uppercase tracking-[0.18em] text-arbor-700">Documentation</p>
+      <h1 class="mt-2 font-display text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">Arbor Docs</h1>
+      <p class="mt-3 max-w-2xl text-base leading-relaxed text-slate-600">Guides and references for using and developing Arbor.</p>
+    </div>
+
+    <div class="grid gap-4 sm:grid-cols-2">
+      <a href="./remote-access.html" class="group rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:border-arbor-500/40 hover:shadow-md">
+        <div class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200 bg-amber-50 text-amber-700">
+          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm7.8 9h-3.1a15.9 15.9 0 0 0-1.2-5A8 8 0 0 1 19.8 11ZM12 4c1 1.3 1.8 3.6 2.1 7H9.9c.3-3.4 1.1-5.7 2.1-7ZM8.5 6a15.9 15.9 0 0 0-1.2 5H4.2a8 8 0 0 1 4.3-5Zm-4.3 7h3.1a15.9 15.9 0 0 0 1.2 5 8 8 0 0 1-4.3-5Zm7.8 7c-1-1.3-1.8-3.6-2.1-7h4.2c-.3 3.4-1.1 5.7-2.1 7Zm3.5-2a15.9 15.9 0 0 0 1.2-5h3.1a8 8 0 0 1-4.3 5Z"></path></svg>
+        </div>
+        <h2 class="font-display text-lg font-semibold tracking-tight group-hover:text-arbor-600">Remote Access &amp; HTTP API</h2>
+        <p class="mt-2 text-sm leading-relaxed text-slate-600">Run the remote daemon, connect from the GUI, and explore the full HTTP API and WebSocket interface.</p>
+      </a>
+
+      <a href="./development.html" class="group rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:border-arbor-500/40 hover:shadow-md">
+        <div class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700">
+          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor"><path d="M7 6a3 3 0 1 0-2 2.83V11a2 2 0 0 0 2 2h3v2.17A3 3 0 1 0 12 15v-2h5a2 2 0 0 0 2-2V8.83A3 3 0 1 0 17 9v2h-5V8.83A3 3 0 0 0 7 6Z"></path></svg>
+        </div>
+        <h2 class="font-display text-lg font-semibold tracking-tight group-hover:text-arbor-600">Building &amp; Development</h2>
+        <p class="mt-2 text-sm leading-relaxed text-slate-600">Task runner commands, CI workflows, release process, changelog tooling, and crate architecture.</p>
+      </a>
+    </div>
+  </main>
+
+  <footer class="mx-auto mt-6 flex w-full max-w-4xl flex-wrap items-center justify-between gap-3 px-4 pb-10 text-sm text-slate-500 sm:px-6">
+    <p>Arbor is open source software built in Rust + GPUI.</p>
+    <p class="inline-flex items-center gap-3">
+      <a class="transition hover:text-slate-700" href="https://github.com/penso/arbor" target="_blank" rel="noreferrer">GitHub</a>
+      <a class="transition hover:text-slate-700" href="https://github.com/penso/arbor/releases" target="_blank" rel="noreferrer">Releases</a>
+      <a class="transition hover:text-slate-700" href="../">Website</a>
+    </p>
+  </footer>
+</body>
+</html>

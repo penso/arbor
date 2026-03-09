@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remote Access &amp; HTTP API | Arbor Docs</title>
+  <meta name="description" content="Arbor remote daemon setup, connection methods, and full HTTP API reference.">
+  <link rel="icon" type="image/png" href="../images/arbor-icon-1024.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Outfit:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ["Manrope", "system-ui", "sans-serif"],
+            display: ["Outfit", "Manrope", "sans-serif"],
+            mono: ["IBM Plex Mono", "monospace"]
+          },
+          colors: {
+            arbor: {
+              50: "#f3faf5",
+              100: "#def5e5",
+              500: "#1f9a63",
+              600: "#117a4c",
+              700: "#0d623d"
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      background:
+        radial-gradient(1100px 500px at 0% -10%, rgba(31, 154, 99, 0.13), transparent 60%),
+        radial-gradient(800px 420px at 100% 8%, rgba(14, 116, 144, 0.12), transparent 55%),
+        #f8fafc;
+    }
+  </style>
+</head>
+<body class="font-sans text-slate-900 antialiased">
+  <header class="sticky top-0 z-40 border-b border-slate-200/80 bg-white/85 backdrop-blur-lg">
+    <div class="mx-auto flex h-16 w-full max-w-4xl items-center gap-6 px-4 sm:px-6">
+      <a class="inline-flex items-center gap-2.5" href="../">
+        <img src="../images/arbor-icon-1024.png" alt="Arbor" width="28" height="28" class="rounded-md ring-1 ring-slate-200">
+        <span class="font-display text-lg font-bold tracking-tight">Arbor</span>
+      </a>
+      <nav class="ml-auto flex items-center gap-5 text-sm font-medium text-slate-600" aria-label="Main">
+        <a class="transition hover:text-slate-900" href="./">Docs</a>
+        <a class="transition hover:text-slate-900" href="../#features">Features</a>
+        <a class="transition hover:text-slate-900" href="../#install">Install</a>
+        <a class="transition hover:text-slate-900" href="https://github.com/penso/arbor" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6 sm:py-14">
+    <p class="text-sm text-slate-500"><a class="transition hover:text-slate-700" href="./">&larr; Docs</a></p>
+
+    <div class="mt-4 mb-10">
+      <p class="text-xs font-bold uppercase tracking-[0.18em] text-arbor-700">Documentation</p>
+      <h1 class="mt-2 font-display text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">Remote Access &amp; HTTP API</h1>
+    </div>
+
+    <!-- Remote Access -->
+    <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Running the Remote Daemon</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">Start the daemon with any of these methods:</p>
+      <ul class="mt-3 space-y-2 text-sm text-slate-700">
+        <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>just run-httpd</code></li>
+        <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>ARBOR_HTTPD_BIND=0.0.0.0:8787 cargo +nightly-2025-11-30 run -p arbor-httpd</code></li>
+        <li class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs"><code>Arbor --daemon --bind 0.0.0.0:8787</code></li>
+      </ul>
+
+      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Connecting from the GUI</h3>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">From the GUI, <strong>Connect to Host...</strong> accepts:</p>
+      <ul class="mt-2 list-disc pl-5 text-sm text-slate-700 space-y-1">
+        <li><code class="font-mono text-xs">http://IP:port/</code> — direct HTTP access</li>
+        <li><code class="font-mono text-xs">ssh://IP/</code> or <code class="font-mono text-xs">ssh://user@IP:22/</code> — creates a local SSH tunnel and routes daemon traffic securely over SSH</li>
+      </ul>
+
+      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Desktop Daemon URL Override</h3>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">
+        Set <code class="font-mono text-xs">daemon_url = "http://127.0.0.1:8787"</code> in <code class="font-mono text-xs">~/.config/arbor/config.toml</code>.
+      </p>
+
+      <h3 class="mt-6 font-display text-lg font-semibold tracking-tight text-slate-950">Web UI</h3>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">
+        If <code class="font-mono text-xs">crates/arbor-web-ui/app/dist/index.html</code> is missing, the daemon attempts an on-demand build with <code class="font-mono text-xs">npm</code>.
+      </p>
+    </section>
+
+    <!-- HTTP API Reference -->
+    <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">HTTP API Reference (v1)</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">
+        Base URL defaults to <code class="font-mono text-xs">http://0.0.0.0:8787</code> (set via <code class="font-mono text-xs">ARBOR_HTTPD_BIND</code>).
+      </p>
+
+      <!-- Health -->
+      <div class="mt-6 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/health</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns daemon health.</p>
+      </div>
+
+      <!-- Repositories -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/repositories</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns known repository roots from <code class="font-mono text-xs">~/.arbor/repositories.json</code>.</p>
+      </div>
+
+      <!-- Worktrees -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/worktrees</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns worktrees across known repositories.</p>
+        <p class="mt-1 text-xs text-slate-500">Query param: <code class="font-mono">repo_root</code> (optional) — filter to one repository root path.</p>
+      </div>
+
+      <!-- List terminals -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/terminals</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns merged terminal session records from the daemon runtime and <code class="font-mono text-xs">~/.arbor/daemon/sessions.json</code>.</p>
+      </div>
+
+      <!-- Create terminal -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/terminals</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Creates or attaches a terminal session.</p>
+        <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{
+  "session_id": "daemon-1",
+  "workspace_id": "/Users/me/code/project",
+  "cwd": "/Users/me/code/project",
+  "shell": "/bin/zsh",
+  "cols": 120,
+  "rows": 35,
+  "title": "term-project"
+}</code></pre>
+        <p class="mt-2 text-xs text-slate-500"><code class="font-mono">session_id</code> is optional — the daemon generates one when omitted.</p>
+      </div>
+
+      <!-- Snapshot -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/terminals/:session_id/snapshot</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Returns output tail and state for one session.</p>
+        <p class="mt-1 text-xs text-slate-500">Query param: <code class="font-mono">max_lines</code> (optional, default <code class="font-mono">180</code>, max <code class="font-mono">2000</code>).</p>
+      </div>
+
+      <!-- Write -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/terminals/:session_id/write</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Writes UTF-8 input to a terminal.</p>
+        <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{ "data": "ls -la\n" }</code></pre>
+      </div>
+
+      <!-- Resize -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/terminals/:session_id/resize</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Resizes a terminal grid.</p>
+        <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{ "cols": 120, "rows": 35 }</code></pre>
+      </div>
+
+      <!-- Signal -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/terminals/:session_id/signal</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Sends a signal to a terminal session.</p>
+        <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{ "signal": "interrupt" }</code></pre>
+        <p class="mt-2 text-xs text-slate-500">Allowed values: <code class="font-mono">interrupt</code>, <code class="font-mono">terminate</code>, <code class="font-mono">kill</code>.</p>
+      </div>
+
+      <!-- Detach -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-cyan-700">POST <span class="text-slate-800">/api/v1/terminals/:session_id/detach</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Detaches the current client from a daemon-managed terminal session without killing it.</p>
+      </div>
+
+      <!-- Delete -->
+      <div class="mt-5 border-t border-slate-100 pt-5">
+        <h3 class="font-mono text-sm font-semibold text-rose-700">DELETE <span class="text-slate-800">/api/v1/terminals/:session_id</span></h3>
+        <p class="mt-1 text-sm text-slate-600">Kills and removes a daemon-managed terminal session.</p>
+      </div>
+    </section>
+
+    <!-- WebSocket -->
+    <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">WebSocket Streaming</h2>
+      <h3 class="mt-4 font-mono text-sm font-semibold text-emerald-700">GET <span class="text-slate-800">/api/v1/terminals/:session_id/ws</span></h3>
+      <p class="mt-2 text-sm leading-relaxed text-slate-600">WebSocket stream for interactive terminal I/O.</p>
+
+      <h4 class="mt-5 text-sm font-semibold text-slate-700">Client messages</h4>
+      <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{"type":"input","data":"echo hi\n"}
+{"type":"resize","cols":140,"rows":40}
+{"type":"signal","signal":"interrupt"}
+{"type":"detach"}</code></pre>
+
+      <h4 class="mt-5 text-sm font-semibold text-slate-700">Server messages</h4>
+      <pre class="mt-2 overflow-x-auto rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-slate-300"><code>{"type":"snapshot", ...}
+{"type":"output", ...}
+{"type":"exit", ...}
+{"type":"error", ...}</code></pre>
+    </section>
+  </main>
+
+  <footer class="mx-auto mt-6 flex w-full max-w-4xl flex-wrap items-center justify-between gap-3 px-4 pb-10 text-sm text-slate-500 sm:px-6">
+    <p>Arbor is open source software built in Rust + GPUI.</p>
+    <p class="inline-flex items-center gap-3">
+      <a class="transition hover:text-slate-700" href="https://github.com/penso/arbor" target="_blank" rel="noreferrer">GitHub</a>
+      <a class="transition hover:text-slate-700" href="https://github.com/penso/arbor/releases" target="_blank" rel="noreferrer">Releases</a>
+      <a class="transition hover:text-slate-700" href="../">Website</a>
+    </p>
+  </footer>
+</body>
+</html>

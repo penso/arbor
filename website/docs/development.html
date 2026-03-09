@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Building &amp; Development | Arbor Docs</title>
+  <meta name="description" content="Arbor development guide — task runner commands, CI, releases, and changelog tooling.">
+  <link rel="icon" type="image/png" href="../images/arbor-icon-1024.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Outfit:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ["Manrope", "system-ui", "sans-serif"],
+            display: ["Outfit", "Manrope", "sans-serif"],
+            mono: ["IBM Plex Mono", "monospace"]
+          },
+          colors: {
+            arbor: {
+              50: "#f3faf5",
+              100: "#def5e5",
+              500: "#1f9a63",
+              600: "#117a4c",
+              700: "#0d623d"
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      background:
+        radial-gradient(1100px 500px at 0% -10%, rgba(31, 154, 99, 0.13), transparent 60%),
+        radial-gradient(800px 420px at 100% 8%, rgba(14, 116, 144, 0.12), transparent 55%),
+        #f8fafc;
+    }
+  </style>
+</head>
+<body class="font-sans text-slate-900 antialiased">
+  <header class="sticky top-0 z-40 border-b border-slate-200/80 bg-white/85 backdrop-blur-lg">
+    <div class="mx-auto flex h-16 w-full max-w-4xl items-center gap-6 px-4 sm:px-6">
+      <a class="inline-flex items-center gap-2.5" href="../">
+        <img src="../images/arbor-icon-1024.png" alt="Arbor" width="28" height="28" class="rounded-md ring-1 ring-slate-200">
+        <span class="font-display text-lg font-bold tracking-tight">Arbor</span>
+      </a>
+      <nav class="ml-auto flex items-center gap-5 text-sm font-medium text-slate-600" aria-label="Main">
+        <a class="transition hover:text-slate-900" href="./">Docs</a>
+        <a class="transition hover:text-slate-900" href="../#features">Features</a>
+        <a class="transition hover:text-slate-900" href="../#install">Install</a>
+        <a class="transition hover:text-slate-900" href="https://github.com/penso/arbor" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6 sm:py-14">
+    <p class="text-sm text-slate-500"><a class="transition hover:text-slate-700" href="./">&larr; Docs</a></p>
+
+    <div class="mt-4 mb-10">
+      <p class="text-xs font-bold uppercase tracking-[0.18em] text-arbor-700">Documentation</p>
+      <h1 class="mt-2 font-display text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">Building &amp; Development</h1>
+    </div>
+
+    <!-- Task Runner Commands -->
+    <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Task Runner Commands</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">
+        Arbor uses <a class="text-arbor-600 underline" href="https://github.com/casey/just" target="_blank" rel="noreferrer">just</a> as its task runner.
+        All commands apply the pinned Rust nightly toolchain (<code class="font-mono text-xs">nightly-2025-11-30</code>) automatically.
+      </p>
+      <div class="mt-4 overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-slate-200 text-left">
+              <th class="pb-2 pr-4 font-semibold text-slate-700">Command</th>
+              <th class="pb-2 font-semibold text-slate-700">Description</th>
+            </tr>
+          </thead>
+          <tbody class="text-slate-600">
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just setup-macos</td>
+              <td class="py-2">Install macOS dependencies (one-time)</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just setup-linux</td>
+              <td class="py-2">Install Linux dependencies (one-time)</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just format</td>
+              <td class="py-2">Auto-fix formatting</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just format-check</td>
+              <td class="py-2">Check formatting without modifying files</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just lint</td>
+              <td class="py-2">Run clippy with <code class="font-mono text-xs">-D warnings</code></td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just test</td>
+              <td class="py-2">Run all tests</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just ci</td>
+              <td class="py-2">Full CI suite (format-check + lint + test)</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just run</td>
+              <td class="py-2">Build and run the desktop app</td>
+            </tr>
+            <tr>
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just run-httpd</td>
+              <td class="py-2">Build and run the HTTP daemon</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Crate Architecture -->
+    <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Crate Architecture</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">The project is split into four crates:</p>
+      <div class="mt-4 overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-slate-200 text-left">
+              <th class="pb-2 pr-4 font-semibold text-slate-700">Crate</th>
+              <th class="pb-2 font-semibold text-slate-700">Description</th>
+            </tr>
+          </thead>
+          <tbody class="text-slate-600">
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-core</td>
+              <td class="py-2">Worktree primitives, change detection, agent hooks</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-gui</td>
+              <td class="py-2">GPUI desktop app (<code class="font-mono text-xs">arbor</code> binary)</td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-httpd</td>
+              <td class="py-2">Remote HTTP daemon (<code class="font-mono text-xs">arbor-httpd</code> binary)</td>
+            </tr>
+            <tr>
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">arbor-web-ui</td>
+              <td class="py-2">TypeScript dashboard assets + helper crate</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- CI -->
+    <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">CI</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">
+        GitHub Actions runs format, lint, and test checks on pushes to <code class="font-mono text-xs">main</code> and pull requests.
+      </p>
+      <p class="mt-2 text-sm text-slate-600">
+        Workflow: <a class="text-arbor-600 underline" href="https://github.com/penso/arbor/actions/workflows/ci.yml" target="_blank" rel="noreferrer">CI</a>
+      </p>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">On pushes to <code class="font-mono text-xs">main</code>, CI also runs a cross-platform build matrix:</p>
+      <ul class="mt-2 list-disc pl-5 text-sm text-slate-700 space-y-1">
+        <li>Linux (<code class="font-mono text-xs">x86_64-unknown-linux-gnu</code>, <code class="font-mono text-xs">aarch64-unknown-linux-gnu</code>)</li>
+        <li>macOS (<code class="font-mono text-xs">aarch64-apple-darwin</code>, <code class="font-mono text-xs">x86_64-apple-darwin</code>)</li>
+        <li>Windows (<code class="font-mono text-xs">x86_64-pc-windows-msvc</code>)</li>
+      </ul>
+    </section>
+
+    <!-- Releases -->
+    <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Releases</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">
+        Push a tag in <code class="font-mono text-xs">YYYYMMDD.NN</code> format (example: <code class="font-mono text-xs">20260301.01</code>) to trigger an automated release.
+      </p>
+      <p class="mt-2 text-sm text-slate-600">
+        Workflow: <a class="text-arbor-600 underline" href="https://github.com/penso/arbor/actions/workflows/release.yml" target="_blank" rel="noreferrer">Release</a>
+      </p>
+      <h3 class="mt-4 text-sm font-semibold text-slate-700">Artifacts</h3>
+      <ul class="mt-2 list-disc pl-5 text-sm text-slate-700 space-y-1">
+        <li>macOS <code class="font-mono text-xs">.app</code> bundle (zipped, universal2, with <code class="font-mono text-xs">Info.plist</code> and app icon)</li>
+        <li>Linux <code class="font-mono text-xs">tar.gz</code> bundles (<code class="font-mono text-xs">x86_64</code> and <code class="font-mono text-xs">aarch64</code>)</li>
+        <li>Windows <code class="font-mono text-xs">.zip</code> bundle (<code class="font-mono text-xs">x86_64</code>)</li>
+      </ul>
+    </section>
+
+    <!-- Changelog -->
+    <section class="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+      <h2 class="font-display text-xl font-bold tracking-tight text-slate-950">Changelog</h2>
+      <p class="mt-3 text-sm leading-relaxed text-slate-600">
+        This project uses <a class="text-arbor-600 underline" href="https://git-cliff.org/" target="_blank" rel="noreferrer">git-cliff</a> for changelog generation. Config lives in <code class="font-mono text-xs">cliff.toml</code>.
+      </p>
+      <div class="mt-4 overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-slate-200 text-left">
+              <th class="pb-2 pr-4 font-semibold text-slate-700">Command</th>
+              <th class="pb-2 font-semibold text-slate-700">Description</th>
+            </tr>
+          </thead>
+          <tbody class="text-slate-600">
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just changelog</td>
+              <td class="py-2">Generate/update <code class="font-mono text-xs">CHANGELOG.md</code></td>
+            </tr>
+            <tr class="border-b border-slate-100">
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just changelog-unreleased</td>
+              <td class="py-2">Preview unreleased entries in stdout</td>
+            </tr>
+            <tr>
+              <td class="py-2 pr-4 font-mono text-xs text-slate-800">just changelog-release &lt;version&gt;</td>
+              <td class="py-2">Preview a release section tagged as <code class="font-mono text-xs">v&lt;version&gt;</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="mx-auto mt-6 flex w-full max-w-4xl flex-wrap items-center justify-between gap-3 px-4 pb-10 text-sm text-slate-500 sm:px-6">
+    <p>Arbor is open source software built in Rust + GPUI.</p>
+    <p class="inline-flex items-center gap-3">
+      <a class="transition hover:text-slate-700" href="https://github.com/penso/arbor" target="_blank" rel="noreferrer">GitHub</a>
+      <a class="transition hover:text-slate-700" href="https://github.com/penso/arbor/releases" target="_blank" rel="noreferrer">Releases</a>
+      <a class="transition hover:text-slate-700" href="../">Website</a>
+    </p>
+  </footer>
+</body>
+</html>

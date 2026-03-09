@@ -7,6 +7,11 @@
 # Arbor
 
 [![CI](https://github.com/penso/arbor/actions/workflows/ci.yml/badge.svg)](https://github.com/penso/arbor/actions/workflows/ci.yml)
+[![Rust Nightly](https://img.shields.io/badge/rust-nightly--2025--11--30-orange?logo=rust)](https://rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/penso/arbor?label=release)](https://github.com/penso/arbor/releases)
+[![macOS](https://img.shields.io/badge/macOS-supported-brightgreen)](#install)
+[![Linux](https://img.shields.io/badge/Linux-supported-brightgreen)](#install)
 
 Arbor is a **fully native app for agentic coding** built with Rust and [GPUI](https://gpui.rs).
 It gives you one place to manage repositories, parallel worktrees, embedded terminals, diffs, and AI coding agent activity.
@@ -79,26 +84,9 @@ cd arbor
 just run
 ```
 
-## Website (Static)
+## Documentation
 
-This repository includes a standalone static product site in `website/`.
-Live site: [https://penso.github.io/arbor/](https://penso.github.io/arbor/)
-
-Feature screenshots:
-
-- [Worktrees](website/images/features/worktrees.png)
-- [Terminal](website/images/features/terminal.png)
-- [Diff](website/images/features/diff.png)
-- [Agent Activity](website/images/features/agent-activity.png)
-- [Remote Outposts](website/images/features/remote-outposts.png)
-- [Themes](website/images/features/themes.png)
-
-Local preview:
-
-```bash
-cd website
-python3 -m http.server 4173
-```
+Full documentation is available at [penso.github.io/arbor/docs](https://penso.github.io/arbor/docs/).
 
 ## Crates
 
@@ -145,75 +133,6 @@ sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
 Then install the [CaskaydiaMono Nerd Font](https://www.nerdfonts.com/font-downloads) to `~/.local/share/fonts/`.
 
-### Build & Run
-
-Use `just` as the task runner.
-
-- `just setup-macos` / `just setup-linux` — install dependencies (one-time)
-- `just format`
-- `just format-check`
-- `just lint`
-- `just test`
-- `just run`
-- `just run-httpd`
-
-## Remote Access
-
-Run the remote daemon:
-
-- `just run-httpd`
-- or `ARBOR_HTTPD_BIND=0.0.0.0:8787 cargo +nightly-2025-11-30 run -p arbor-httpd`
-- or `Arbor --daemon --bind 0.0.0.0:8787` (same as `arbor --daemon --bind ...` in packages that install a lowercase launcher)
-
-From the GUI, **Connect to Host...** accepts:
-
-- `http://IP:port/` for direct HTTP access
-- `ssh://IP/` (or `ssh://user@IP:22/`) to create a local SSH tunnel and route daemon traffic securely over SSH
-
-HTTP API:
-
-- `GET /api/v1/health`
-- `GET /api/v1/repositories`
-- `GET /api/v1/worktrees`
-- `GET /api/v1/terminals`
-- `POST /api/v1/terminals`
-- `GET /api/v1/terminals/:session_id/snapshot`
-- `POST /api/v1/terminals/:session_id/write`
-- `POST /api/v1/terminals/:session_id/resize`
-- `POST /api/v1/terminals/:session_id/signal`
-- `POST /api/v1/terminals/:session_id/detach`
-- `DELETE /api/v1/terminals/:session_id`
-- `GET /api/v1/terminals/:session_id/ws`
-
-If `crates/arbor-web-ui/app/dist/index.html` is missing, the daemon attempts an on-demand build with `npm`.
-
-Desktop daemon URL override:
-
-- `~/.config/arbor/config.toml`
-- `daemon_url = "http://127.0.0.1:8787"`
-
-## CI
-
-GitHub Actions runs format, lint, and test checks on pushes to `main` and pull requests:
-
-- Workflow: [`CI`](https://github.com/penso/arbor/actions/workflows/ci.yml)
-
-On pushes to `main`, CI also runs a cross-platform build matrix for:
-
-- Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`)
-- macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`)
-- Windows (`x86_64-pc-windows-msvc`)
-
-## Releases
-
-Push a tag in `YYYYMMDD.NN` format (example: `20260301.01`) to trigger an automated release:
-
-- Workflow: [`Release`](https://github.com/penso/arbor/actions/workflows/release.yml)
-- Artifacts:
-  - macOS `.app` bundle (zipped, universal2, with `Info.plist` and app icon)
-  - Linux `tar.gz` bundles (`x86_64` and `aarch64`)
-  - Windows `.zip` bundle (`x86_64`)
-
 ## Similar Tools
 
 - [Superset](https://superset.sh) — terminal-based worktree manager
@@ -223,16 +142,6 @@ Push a tag in `YYYYMMDD.NN` format (example: `20260301.01`) to trigger an automa
 ## Acknowledgements
 
 Thanks to [Zed](https://zed.dev) for building and open-sourcing [GPUI](https://gpui.rs), the GPU-accelerated UI framework that powers Arbor.
-
-## Changelog
-
-This repo uses [`git-cliff`](https://git-cliff.org/) for changelog generation.
-
-- `just changelog`: generate/update `CHANGELOG.md`
-- `just changelog-unreleased`: preview unreleased entries in stdout
-- `just changelog-release <version>`: preview a release section tagged as `v<version>`
-
-Config lives in `cliff.toml`.
 
 ## Star History
 
