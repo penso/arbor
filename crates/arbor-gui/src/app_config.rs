@@ -38,6 +38,7 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 
 # [daemon]
 # auth_token = "your-secret-token"  # required for remote access
+# bind = "all-interfaces"           # all-interfaces | localhost
 # tls = true                        # HTTPS with self-signed certs (default: true)
 
 # [[remote_hosts]]
@@ -69,6 +70,7 @@ pub struct ArborConfig {
 #[serde(default)]
 pub struct DaemonConfig {
     pub auth_token: Option<String>,
+    pub bind: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -120,6 +122,7 @@ pub trait AppConfigStore {
     ) -> Result<(), String>;
     fn remove_repo_preset(&self, repo_root: &Path, name: &str) -> Result<(), String>;
     fn save_scalar_settings(&self, settings: &[(&str, Option<&str>)]) -> Result<(), String>;
+    fn save_daemon_bind_mode(&self, bind_mode: Option<&str>) -> Result<(), String>;
     fn save_agent_presets(&self, presets: &[AgentPresetConfig]) -> Result<(), String>;
 }
 
@@ -178,6 +181,10 @@ impl AppConfigStore for FileAppConfigStore {
 
     fn save_scalar_settings(&self, settings: &[(&str, Option<&str>)]) -> Result<(), String> {
         save_scalar_settings_at(&self.path, settings)
+    }
+
+    fn save_daemon_bind_mode(&self, bind_mode: Option<&str>) -> Result<(), String> {
+        save_daemon_bind_mode_at(&self.path, bind_mode)
     }
 
     fn save_agent_presets(&self, presets: &[AgentPresetConfig]) -> Result<(), String> {
@@ -425,6 +432,35 @@ fn save_scalar_settings_at(path: &Path, settings: &[(&str, Option<&str>)]) -> Re
                 doc.remove(key);
             },
         }
+    }
+
+    fs::write(path, doc.to_string()).map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+fn save_daemon_bind_mode_at(path: &Path, bind_mode: Option<&str>) -> Result<(), String> {
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+    match bind_mode.filter(|value| !value.trim().is_empty()) {
+        Some(value) => {
+            let daemon_table = doc
+                .entry("daemon")
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| "daemon is not a table".to_owned())?;
+            daemon_table.insert("bind", toml_edit::value(value));
+        },
+        None => {
+            if let Some(daemon_table) = doc.get_mut("daemon").and_then(|item| item.as_table_mut()) {
+                daemon_table.remove("bind");
+                if daemon_table.is_empty() {
+                    doc.remove("daemon");
+                }
+            }
+        },
     }
 
     fs::write(path, doc.to_string()).map_err(|e| format!("failed to write {}: {e}", path.display()))

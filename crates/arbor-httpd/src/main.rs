@@ -168,6 +168,7 @@ enum WsServerEvent {
 #[serde(default)]
 struct DaemonConfig {
     auth_token: Option<String>,
+    bind: Option<String>,
 }
 
 fn daemon_config_path() -> PathBuf {
@@ -249,7 +250,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load daemon config and ensure auth token exists
     let mut daemon_config = load_daemon_config();
     ensure_auth_token(&mut daemon_config);
-    let bind_addr = resolve_bind_addr(daemon_config.auth_token.as_deref())?;
+    let bind_addr = resolve_bind_addr(
+        daemon_config.auth_token.as_deref(),
+        daemon_config.bind.as_deref(),
+    )?;
     let auth_state = auth::AuthState::new(daemon_config.auth_token);
 
     let daemon_store = JsonDaemonSessionStore::default();
@@ -346,7 +350,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn resolve_bind_addr(auth_token: Option<&str>) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+fn resolve_bind_addr(
+    auth_token: Option<&str>,
+    configured_bind: Option<&str>,
+) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     if let Ok(raw) = std::env::var("ARBOR_HTTPD_BIND") {
         let parsed: SocketAddr = raw.parse()?;
         return Ok(parsed);
@@ -357,7 +364,28 @@ fn resolve_bind_addr(auth_token: Option<&str>) -> Result<SocketAddr, Box<dyn std
         Err(_) => 8787,
     };
 
-    Ok(default_bind_addr(auth_token, port))
+    Ok(configured_bind_addr(configured_bind, auth_token, port))
+}
+
+fn configured_bind_addr(
+    configured_bind: Option<&str>,
+    auth_token: Option<&str>,
+    port: u16,
+) -> SocketAddr {
+    match configured_bind.and_then(parse_bind_host) {
+        Some(host) => format!("{host}:{port}")
+            .parse()
+            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port))),
+        None => default_bind_addr(auth_token, port),
+    }
+}
+
+fn parse_bind_host(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "localhost" | "local" | "loopback" | "127.0.0.1" => Some("127.0.0.1"),
+        "all" | "all-interfaces" | "public" | "0.0.0.0" => Some("0.0.0.0"),
+        _ => None,
+    }
 }
 
 fn default_bind_addr(auth_token: Option<&str>, port: u16) -> SocketAddr {
@@ -1868,6 +1896,18 @@ mod tests {
         assert_eq!(
             default_bind_addr(Some("   "), 8787),
             SocketAddr::from(([127, 0, 0, 1], 8787))
+        );
+    }
+
+    #[test]
+    fn configured_bind_addr_overrides_default_bind_mode() {
+        assert_eq!(
+            configured_bind_addr(Some("localhost"), Some("secret-token"), 8787),
+            SocketAddr::from(([127, 0, 0, 1], 8787))
+        );
+        assert_eq!(
+            configured_bind_addr(Some("all-interfaces"), None, 8787),
+            SocketAddr::from(([0, 0, 0, 0], 8787))
         );
     }
 

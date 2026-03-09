@@ -979,32 +979,66 @@ struct AgentPreset {
 
 #[derive(Debug, Clone)]
 struct SettingsModal {
-    active_field: SettingsField,
-    daemon_url: String,
-    daemon_url_cursor: usize,
+    active_control: SettingsControl,
+    daemon_bind_mode: DaemonBindMode,
+    initial_daemon_bind_mode: DaemonBindMode,
     notifications: bool,
     daemon_auth_token: String,
     error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsField {
-    DaemonUrl,
+enum SettingsControl {
+    DaemonBindMode,
+    Notifications,
 }
 
-impl SettingsField {
+impl SettingsControl {
     fn cycle(self, reverse: bool) -> Self {
-        let _ = reverse;
-        self
+        const ORDER: [SettingsControl; 2] = [
+            SettingsControl::DaemonBindMode,
+            SettingsControl::Notifications,
+        ];
+        let current = ORDER
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0);
+        if reverse {
+            ORDER[(current + ORDER.len() - 1) % ORDER.len()]
+        } else {
+            ORDER[(current + 1) % ORDER.len()]
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonBindMode {
+    Localhost,
+    AllInterfaces,
+}
+
+impl DaemonBindMode {
+    fn from_config(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("localhost" | "local" | "loopback" | "127.0.0.1") => Self::Localhost,
+            Some("all" | "all-interfaces" | "public" | "0.0.0.0") => Self::AllInterfaces,
+            _ => Self::AllInterfaces,
+        }
+    }
+
+    fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Localhost => "localhost",
+            Self::AllInterfaces => "all-interfaces",
+        }
     }
 }
 
 enum SettingsModalInputEvent {
-    SetActiveField(SettingsField),
-    CycleField(bool),
-    Edit(TextEditAction),
+    CycleControl(bool),
+    SelectDaemonBindMode(DaemonBindMode),
+    ToggleActiveControl,
     ToggleNotifications,
-    ClearError,
 }
 
 #[derive(Debug, Clone)]
@@ -6558,6 +6592,11 @@ impl ArborWindow {
         }
 
         if self.settings_modal.is_some() {
+            let active_control = self
+                .settings_modal
+                .as_ref()
+                .map(|modal| modal.active_control)
+                .unwrap_or(SettingsControl::DaemonBindMode);
             match event.keystroke.key.as_str() {
                 "escape" => {
                     self.close_settings_modal(cx);
@@ -6566,7 +6605,33 @@ impl ArborWindow {
                 },
                 "tab" => {
                     self.update_settings_modal_input(
-                        SettingsModalInputEvent::CycleField(event.keystroke.modifiers.shift),
+                        SettingsModalInputEvent::CycleControl(event.keystroke.modifiers.shift),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "left" if active_control == SettingsControl::DaemonBindMode => {
+                    self.update_settings_modal_input(
+                        SettingsModalInputEvent::SelectDaemonBindMode(DaemonBindMode::Localhost),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "right" if active_control == SettingsControl::DaemonBindMode => {
+                    self.update_settings_modal_input(
+                        SettingsModalInputEvent::SelectDaemonBindMode(
+                            DaemonBindMode::AllInterfaces,
+                        ),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                },
+                "space" => {
+                    self.update_settings_modal_input(
+                        SettingsModalInputEvent::ToggleActiveControl,
                         cx,
                     );
                     cx.stop_propagation();
@@ -6578,11 +6643,6 @@ impl ArborWindow {
                     return;
                 },
                 _ => {},
-            }
-            if let Some(action) = text_edit_action_for_event(event, cx) {
-                self.update_settings_modal_input(SettingsModalInputEvent::ClearError, cx);
-                self.update_settings_modal_input(SettingsModalInputEvent::Edit(action), cx);
-                cx.stop_propagation();
             }
             return;
         }
@@ -7215,12 +7275,20 @@ impl ArborWindow {
         let daemon_auth_token = loaded
             .config
             .daemon
-            .and_then(|d| d.auth_token)
+            .as_ref()
+            .and_then(|daemon| daemon.auth_token.clone())
             .unwrap_or_default();
+        let daemon_bind_mode = DaemonBindMode::from_config(
+            loaded
+                .config
+                .daemon
+                .as_ref()
+                .and_then(|daemon| daemon.bind.as_deref()),
+        );
         self.settings_modal = Some(SettingsModal {
-            active_field: SettingsField::DaemonUrl,
-            daemon_url_cursor: char_count(&self.daemon_base_url),
-            daemon_url: self.daemon_base_url.clone(),
+            active_control: SettingsControl::DaemonBindMode,
+            daemon_bind_mode,
+            initial_daemon_bind_mode: daemon_bind_mode,
             notifications: self.notifications_enabled,
             daemon_auth_token,
             error: None,
@@ -7242,28 +7310,29 @@ impl ArborWindow {
             return;
         };
 
+        modal.error = None;
         match input {
-            SettingsModalInputEvent::SetActiveField(field) => {
-                modal.active_field = field;
-                if field == SettingsField::DaemonUrl {
-                    modal.daemon_url_cursor = char_count(&modal.daemon_url);
-                }
+            SettingsModalInputEvent::CycleControl(reverse) => {
+                modal.active_control = modal.active_control.cycle(reverse);
             },
-            SettingsModalInputEvent::CycleField(reverse) => {
-                modal.active_field = modal.active_field.cycle(reverse);
+            SettingsModalInputEvent::SelectDaemonBindMode(bind_mode) => {
+                modal.active_control = SettingsControl::DaemonBindMode;
+                modal.daemon_bind_mode = bind_mode;
             },
-            SettingsModalInputEvent::Edit(action) => {
-                apply_text_edit_action(
-                    &mut modal.daemon_url,
-                    &mut modal.daemon_url_cursor,
-                    &action,
-                );
+            SettingsModalInputEvent::ToggleActiveControl => match modal.active_control {
+                SettingsControl::DaemonBindMode => {
+                    modal.daemon_bind_mode = match modal.daemon_bind_mode {
+                        DaemonBindMode::Localhost => DaemonBindMode::AllInterfaces,
+                        DaemonBindMode::AllInterfaces => DaemonBindMode::Localhost,
+                    };
+                },
+                SettingsControl::Notifications => {
+                    modal.notifications = !modal.notifications;
+                },
             },
             SettingsModalInputEvent::ToggleNotifications => {
+                modal.active_control = SettingsControl::Notifications;
                 modal.notifications = !modal.notifications;
-            },
-            SettingsModalInputEvent::ClearError => {
-                modal.error = None;
             },
         }
 
@@ -7276,23 +7345,15 @@ impl ArborWindow {
             return;
         };
 
-        let daemon_url = modal.daemon_url.trim();
         let notifications_str = if modal.notifications {
             "true"
         } else {
             "false"
         };
         let theme_slug = self.theme_kind.slug();
+        let daemon_bind_changed = modal.daemon_bind_mode != modal.initial_daemon_bind_mode;
 
         if let Err(error) = self.app_config_store.save_scalar_settings(&[
-            (
-                "daemon_url",
-                if daemon_url.is_empty() {
-                    None
-                } else {
-                    Some(daemon_url)
-                },
-            ),
             ("notifications", Some(notifications_str)),
             ("theme", Some(theme_slug)),
         ]) {
@@ -7303,11 +7364,64 @@ impl ArborWindow {
             return;
         }
 
+        if let Err(error) = self
+            .app_config_store
+            .save_daemon_bind_mode(Some(modal.daemon_bind_mode.as_config_value()))
+        {
+            if let Some(modal_state) = self.settings_modal.as_mut() {
+                modal_state.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
         self.config_last_modified = None;
         self.refresh_config_if_changed(cx);
         self.settings_modal = None;
-        self.notice = Some("Settings saved".to_owned());
+        if daemon_bind_changed && daemon_url_is_local(&self.daemon_base_url) {
+            self.restart_local_daemon_after_settings_save(cx);
+        } else {
+            self.notice = Some("Settings saved".to_owned());
+            cx.notify();
+        }
+    }
+
+    fn restart_local_daemon_after_settings_save(&mut self, cx: &mut Context<Self>) {
+        let Some(daemon) = self.terminal_daemon.clone() else {
+            self.notice = Some("Settings saved".to_owned());
+            cx.notify();
+            return;
+        };
+        let daemon_base_url = self.daemon_base_url.clone();
+        self.notice = Some("Settings saved. Restarting daemon…".to_owned());
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let _ = daemon.shutdown();
+                    std::thread::sleep(Duration::from_millis(500));
+                    try_auto_start_daemon(&daemon_base_url)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                if let Some(client) = result {
+                    let records = client.list_sessions().unwrap_or_default();
+                    this.terminal_daemon = Some(client);
+                    this.restore_terminal_sessions_from_records(records, true);
+                    this.refresh_worktrees(cx);
+                    this.notice = Some("Settings saved".to_owned());
+                } else {
+                    this.notice = Some(
+                        "Settings saved, but Arbor could not restart the daemon automatically."
+                            .to_owned(),
+                    );
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn spawn_terminal_session_inner(&mut self, show_notice_on_missing_worktree: bool) -> bool {
@@ -14670,25 +14784,49 @@ impl ArborWindow {
                 .p_3()
                 .flex()
                 .flex_col()
-                .gap_3()
+                .gap_2()
         };
-        let section_heading = |eyebrow: &str, title: &str, detail: &str| {
+        let section_heading = |title: &str| {
             div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme.text_primary))
+                .child(title.to_owned())
+        };
+        let bind_mode_button = |mode: DaemonBindMode, title: &str, detail: &str| {
+            let selected = modal.daemon_bind_mode == mode;
+            let active = modal.active_control == SettingsControl::DaemonBindMode;
+            div()
+                .flex_1()
+                .min_w_0()
+                .cursor_pointer()
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(if selected || active {
+                    theme.accent
+                } else {
+                    theme.border
+                }))
+                .bg(rgb(if selected {
+                    theme.panel_active_bg
+                } else {
+                    theme.sidebar_bg
+                }))
+                .px_3()
+                .py_2()
                 .flex()
                 .flex_col()
                 .gap(px(3.))
+                .hover(|style| style.opacity(0.92))
                 .child(
                     div()
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.accent))
-                        .child(eyebrow.to_owned()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.text_primary))
+                        .text_color(rgb(if selected {
+                            theme.text_primary
+                        } else {
+                            theme.text_muted
+                        }))
                         .child(title.to_owned()),
                 )
                 .child(
@@ -14697,37 +14835,57 @@ impl ArborWindow {
                         .text_color(rgb(theme.text_muted))
                         .child(detail.to_owned()),
                 )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.update_settings_modal_input(
+                            SettingsModalInputEvent::SelectDaemonBindMode(mode),
+                            cx,
+                        );
+                    }),
+                )
         };
-        let settings_text_field =
-            |field: SettingsField, label: &str, value: &str, cursor: usize, active: bool| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme.text_muted))
-                            .child(label.to_owned()),
-                    )
-                    .child(
-                        single_line_input_field(
-                            theme,
-                            ElementId::Name(format!("settings-field-{label}").into()),
-                            value,
-                            cursor,
-                            "(not set)",
-                            active,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.update_settings_modal_input(
-                                SettingsModalInputEvent::SetActiveField(field),
-                                cx,
-                            );
-                        })),
-                    )
-            };
+        let daemon_helper_text = match modal.daemon_bind_mode {
+            DaemonBindMode::Localhost => "Only this machine can connect to the daemon.",
+            DaemonBindMode::AllInterfaces => {
+                "Other Arbor instances can connect with your host IP and the token below."
+            },
+        };
+        let notifications_enabled = modal.notifications;
+        let notifications_active = modal.active_control == SettingsControl::Notifications;
+        let notifications_toggle = div()
+            .id("settings-notifications-toggle")
+            .cursor_pointer()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(if notifications_active {
+                theme.accent
+            } else {
+                theme.border
+            }))
+            .bg(rgb(if notifications_enabled {
+                theme.accent
+            } else {
+                theme.sidebar_bg
+            }))
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(if notifications_enabled {
+                theme.app_bg
+            } else {
+                theme.text_muted
+            }))
+            .hover(|s| s.opacity(0.85))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.update_settings_modal_input(SettingsModalInputEvent::ToggleNotifications, cx);
+            }))
+            .child(if notifications_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            });
 
         div()
             .absolute()
@@ -14752,7 +14910,7 @@ impl ArborWindow {
             .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.15))
             .child(
                 div()
-                    .w(px(560.))
+                    .w(px(500.))
                     .flex_none()
                     .overflow_hidden()
                     .rounded_md()
@@ -14771,51 +14929,41 @@ impl ArborWindow {
                     })
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .pb_3()
-                            .border_b_1()
-                            .border_color(rgb(theme.border))
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child("Settings"),
+                    )
+                    .child(
+                        section_card(div())
+                            .child(section_heading("Daemon settings"))
                             .child(
                                 div()
                                     .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.accent))
-                                    .child("Settings"),
+                                    .text_color(rgb(theme.text_muted))
+                                    .child("Choose who can reach this Arbor daemon."),
                             )
                             .child(
                                 div()
-                                    .text_size(px(16.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme.text_primary))
-                                    .child("Arbor Preferences"),
+                                    .flex()
+                                    .gap_2()
+                                    .child(bind_mode_button(
+                                        DaemonBindMode::Localhost,
+                                        "Localhost only",
+                                        "Keep the daemon private to this machine.",
+                                    ))
+                                    .child(bind_mode_button(
+                                        DaemonBindMode::AllInterfaces,
+                                        "All interfaces",
+                                        "Allow other machines to connect with a token.",
+                                    )),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(rgb(theme.text_muted))
-                                    .child(
-                                        "Configure Arbor's daemon connection and how it reports background activity.",
-                                    ),
-                            ),
-                    )
-                    .child(
-                        section_card(div())
-                            .child(
-                                section_heading(
-                                    "Daemon",
-                                    "Daemon settings",
-                                    "Set the daemon endpoint and reuse the current auth token when connecting other Arbor instances.",
-                                ),
+                                    .child(daemon_helper_text),
                             )
-                            .child(settings_text_field(
-                                SettingsField::DaemonUrl,
-                                "Daemon URL",
-                                &modal.daemon_url,
-                                modal.daemon_url_cursor,
-                                modal.active_field == SettingsField::DaemonUrl,
-                            ))
                             .child(
                                 div()
                                     .flex()
@@ -14826,7 +14974,7 @@ impl ArborWindow {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(theme.text_muted))
-                                            .child("Auth Token"),
+                                            .child("Auth token"),
                                     )
                                     .child(
                                         div()
@@ -14877,13 +15025,7 @@ impl ArborWindow {
                     )
                     .child(
                         section_card(div())
-                            .child(
-                                section_heading(
-                                    "Notifications",
-                                    "Desktop notices",
-                                    "Control whether Arbor surfaces daemon and background activity outside the app.",
-                                ),
-                            )
+                            .child(section_heading("Notifications"))
                             .child(
                                 div()
                                     .flex()
@@ -14900,51 +15042,18 @@ impl ArborWindow {
                                                     .text_xs()
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(rgb(theme.text_muted))
-                                                    .child("Notifications"),
+                                                    .child("Desktop notifications"),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
                                                     .text_color(rgb(theme.text_muted))
                                                     .child(
-                                                        "Show desktop notices for background actions and daemon status changes.",
+                                                        "Show notices for daemon status and background activity.",
                                                     ),
                                             ),
                                     )
-                                    .child(
-                                        div()
-                                            .id("settings-notifications-toggle")
-                                            .cursor_pointer()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(rgb(theme.border))
-                                            .bg(rgb(if modal.notifications {
-                                                theme.accent
-                                            } else {
-                                                theme.sidebar_bg
-                                            }))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(if modal.notifications {
-                                                theme.app_bg
-                                            } else {
-                                                theme.text_muted
-                                            }))
-                                            .hover(|s| s.opacity(0.85))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.update_settings_modal_input(
-                                                    SettingsModalInputEvent::ToggleNotifications,
-                                                    cx,
-                                                );
-                                            }))
-                                            .child(if modal.notifications {
-                                                "Enabled"
-                                            } else {
-                                                "Disabled"
-                                            }),
-                                    ),
+                                    .child(notifications_toggle),
                             ),
                     )
                     .when_some(modal.error.clone(), |this, error| {
@@ -14973,9 +15082,9 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_settings_modal(cx);
-                                    })),
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.close_settings_modal(cx);
+                                })),
                             )
                             .child(
                                 action_button(
@@ -14985,9 +15094,9 @@ impl ArborWindow {
                                     ActionButtonStyle::Primary,
                                     true,
                                 )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.submit_settings_modal(cx);
-                                    })),
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.submit_settings_modal(cx);
+                                })),
                             ),
                     ),
             )
