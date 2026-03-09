@@ -120,6 +120,7 @@ const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
 const GIT_ACTION_ICON_PR: &str = "\u{f126}";
 const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
 const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
+const WORKTREE_HOVER_POPOVER_SHOW_DELAY: Duration = Duration::from_millis(80);
 const WORKTREE_HOVER_POPOVER_HIDE_DELAY: Duration = Duration::from_millis(300);
 const WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX: f32 = 300.;
 const WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX: f32 = 12.;
@@ -1435,6 +1436,7 @@ struct ArborWindow {
     repository_context_menu: Option<RepositoryContextMenu>,
     worktree_context_menu: Option<WorktreeContextMenu>,
     worktree_hover_popover: Option<WorktreeHoverPopover>,
+    _hover_show_task: Option<gpui::Task<()>>,
     _hover_dismiss_task: Option<gpui::Task<()>>,
     last_mouse_position: gpui::Point<Pixels>,
     outpost_context_menu: Option<OutpostContextMenu>,
@@ -1659,6 +1661,7 @@ impl ArborWindow {
                     repository_context_menu: None,
                     worktree_context_menu: None,
                     worktree_hover_popover: None,
+                    _hover_show_task: None,
                     _hover_dismiss_task: None,
                     last_mouse_position: point(px(0.), px(0.)),
                     outpost_context_menu: None,
@@ -1938,6 +1941,7 @@ impl ArborWindow {
             repository_context_menu: None,
             worktree_context_menu: None,
             worktree_hover_popover: None,
+            _hover_show_task: None,
             _hover_dismiss_task: None,
             last_mouse_position: point(px(0.), px(0.)),
             outpost_context_menu: None,
@@ -4168,6 +4172,7 @@ impl ArborWindow {
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.repository_context_menu = None;
         self.worktree_context_menu = None;
+        self._hover_show_task = None;
         self.worktree_hover_popover = None;
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
@@ -4205,10 +4210,10 @@ impl ArborWindow {
     fn show_worktree_hover_popover(
         &mut self,
         index: usize,
-        window: &mut Window,
+        mouse_y: Pixels,
         cx: &mut Context<Self>,
     ) {
-        self.last_mouse_position = window.mouse_position();
+        self._hover_show_task = None;
         self._hover_dismiss_task = None;
         let checks_expanded = self
             .worktree_hover_popover
@@ -4217,10 +4222,14 @@ impl ArborWindow {
             .is_some_and(|popover| popover.checks_expanded);
         self.worktree_hover_popover = Some(WorktreeHoverPopover {
             worktree_index: index,
-            mouse_y: self.last_mouse_position.y,
+            mouse_y,
             checks_expanded,
         });
         cx.notify();
+    }
+
+    fn cancel_worktree_hover_popover_show(&mut self) {
+        self._hover_show_task = None;
     }
 
     fn cancel_worktree_hover_popover_dismiss(&mut self) {
@@ -4249,34 +4258,12 @@ impl ArborWindow {
         )
     }
 
-    fn handle_worktree_hover_overlay_click(
-        &mut self,
-        position: gpui::Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(popover) = self.worktree_hover_popover.as_ref() else {
-            return;
-        };
-
-        let trigger_bounds =
-            worktree_hover_trigger_zone_bounds(self.left_pane_width, popover.mouse_y);
-        if trigger_bounds.contains(&position) {
-            self.select_worktree(popover.worktree_index, window, cx);
-            cx.stop_propagation();
-            return;
-        }
-
-        self.worktree_hover_popover = None;
-        cx.stop_propagation();
-        cx.notify();
-    }
-
     fn schedule_worktree_hover_popover_dismiss(
         &mut self,
         worktree_index: usize,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_worktree_hover_popover_show();
         self._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
             cx.background_spawn(async {
                 smol::Timer::after(WORKTREE_HOVER_POPOVER_HIDE_DELAY).await;
@@ -4296,9 +4283,42 @@ impl ArborWindow {
         }));
     }
 
+    fn schedule_worktree_hover_popover_show(
+        &mut self,
+        worktree_index: usize,
+        mouse_y: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_worktree_hover_popover_dismiss();
+
+        if self
+            .worktree_hover_popover
+            .as_ref()
+            .is_some_and(|popover| popover.worktree_index == worktree_index)
+        {
+            return;
+        }
+
+        self._hover_show_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_spawn(async {
+                smol::Timer::after(WORKTREE_HOVER_POPOVER_SHOW_DELAY).await;
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if worktree_hover_trigger_zone_bounds(this.left_pane_width, mouse_y)
+                    .contains(&this.last_mouse_position)
+                {
+                    this.show_worktree_hover_popover(worktree_index, mouse_y, cx);
+                }
+            });
+        }));
+    }
+
     fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         self.repository_context_menu = None;
         self.worktree_context_menu = None;
+        self._hover_show_task = None;
+        self.worktree_hover_popover = None;
         self.close_top_bar_worktree_quick_actions();
         self.active_outpost_index = Some(index);
         self.active_worktree_index = None;
@@ -9476,6 +9496,9 @@ impl ArborWindow {
                                                     .cursor_pointer()
                                                     .flex()
                                                     .items_center()
+                                                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
+                                                        this.update_worktree_hover_mouse_position(event.position);
+                                                    }))
                                                     .on_click(
                                                         cx.listener(move |this, _, window, cx| {
                                                             this.select_worktree(index, window, cx)
@@ -9492,10 +9515,14 @@ impl ArborWindow {
                                                         }))
                                                     })
                                                     .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                                                        this.update_worktree_hover_mouse_position(window.mouse_position());
                                                         if *hovered {
-                                                            this.show_worktree_hover_popover(index, window, cx);
+                                                            let mouse_position = window.mouse_position();
+                                                            this.schedule_worktree_hover_popover_show(index, mouse_position.y, cx);
                                                         } else if this.worktree_hover_popover.as_ref().is_some_and(|p| p.worktree_index == index) {
                                                             this.schedule_worktree_hover_popover_dismiss(index, cx);
+                                                        } else {
+                                                            this.cancel_worktree_hover_popover_show();
                                                         }
                                                     }))
                                                     // Bordered cell
@@ -9519,7 +9546,6 @@ impl ArborWindow {
                                                         .gap(px(4.))
                                                         .hover(|this| {
                                                             this.bg(rgb(theme.panel_active_bg))
-                                                                .border_color(rgb(theme.accent))
                                                         })
                                                         .when(is_active, |this| {
                                                             this.bg(rgb(theme.panel_active_bg))
@@ -12451,35 +12477,32 @@ impl ArborWindow {
             }
         }
 
-        // Outer overlay: click outside to dismiss
-        div()
-            .absolute()
-            .inset_0()
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
-                this.update_worktree_hover_mouse_position(event.position);
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.handle_worktree_hover_overlay_click(event.position, window, cx);
-                }),
-            )
-            .child(
-                div()
-                    .id("worktree-hover-popover-zone")
-                    .absolute()
-                    .left(popover_zone_bounds.origin.x)
-                    .top(popover_zone_bounds.origin.y)
-                    .p(px(WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.cancel_worktree_hover_popover_dismiss();
-                        } else {
-                            this.schedule_worktree_hover_popover_dismiss(popover_wt_index, cx);
-                        }
-                    }))
-                    .child(card),
-            )
+        div().absolute().inset_0().child(
+            div()
+                .id("worktree-hover-popover-zone")
+                .absolute()
+                .left(popover_zone_bounds.origin.x)
+                .top(popover_zone_bounds.origin.y)
+                .p(px(WORKTREE_HOVER_POPOVER_ZONE_PADDING_PX))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
+                    this.update_worktree_hover_mouse_position(event.position);
+                }))
+                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                    this.update_worktree_hover_mouse_position(window.mouse_position());
+                    if *hovered {
+                        this.cancel_worktree_hover_popover_dismiss();
+                    } else {
+                        this.schedule_worktree_hover_popover_dismiss(popover_wt_index, cx);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(card),
+        )
     }
 
     fn render_outpost_context_menu(&mut self, cx: &mut Context<Self>) -> Div {

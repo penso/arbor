@@ -1,4 +1,6 @@
 :root {
+  color-scheme: dark;
+
   --bg: #0f1115;
   --bg-surface: #16181d;
   --bg-surface2: #1c1f26;
@@ -20,6 +22,9 @@
 
   --border: #27272a;
   --border-strong: #3f3f46;
+  --scrollbar-track: #0f1115;
+  --scrollbar-thumb: #3f3f46;
+  --scrollbar-thumb-hover: #52525b;
 
   --radius: 6px;
   --radius-sm: 4px;
