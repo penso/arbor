@@ -1309,6 +1309,13 @@ struct OutpostContextMenu {
     position: gpui::Point<Pixels>,
 }
 
+struct WorktreeHoverPopover {
+    worktree_index: usize,
+    /// Vertical position of the mouse when hover started (window coords).
+    mouse_y: Pixels,
+    checks_expanded: bool,
+}
+
 struct CreatedWorktree {
     worktree_name: String,
     branch_name: String,
@@ -1411,6 +1418,8 @@ struct ArborWindow {
     collapsed_repositories: HashSet<usize>,
     repository_context_menu: Option<RepositoryContextMenu>,
     worktree_context_menu: Option<WorktreeContextMenu>,
+    worktree_hover_popover: Option<WorktreeHoverPopover>,
+    _hover_dismiss_task: Option<gpui::Task<()>>,
     outpost_context_menu: Option<OutpostContextMenu>,
     discovered_daemons: Vec<mdns_browser::DiscoveredDaemon>,
     mdns_browser: Option<Box<dyn mdns_browser::MdnsDiscovery>>,
@@ -1632,6 +1641,8 @@ impl ArborWindow {
                     collapsed_repositories: HashSet::new(),
                     repository_context_menu: None,
                     worktree_context_menu: None,
+                    worktree_hover_popover: None,
+                    _hover_dismiss_task: None,
                     outpost_context_menu: None,
                     discovered_daemons: Vec::new(),
                     mdns_browser: None,
@@ -1691,7 +1702,23 @@ impl ArborWindow {
         let (initial_daemon_records, attach_daemon_runtime) =
             if let Some(daemon) = terminal_daemon.as_ref() {
                 match daemon.list_sessions() {
-                    Ok(records) => (records, true),
+                    Ok(records) => {
+                        // Check for version mismatch on local daemons and restart if needed.
+                        if daemon_url_is_local(&daemon_base_url) {
+                            if let Some((records, restarted)) =
+                                check_daemon_version_and_restart(daemon, &daemon_base_url)
+                            {
+                                if let Some(new_daemon) = restarted {
+                                    terminal_daemon = Some(new_daemon);
+                                }
+                                (records, true)
+                            } else {
+                                (records, true)
+                            }
+                        } else {
+                            (records, true)
+                        }
+                    },
                     Err(error) => {
                         let error_text = error.to_string();
                         if daemon_error_is_connection_refused(&error_text) {
@@ -1892,6 +1919,8 @@ impl ArborWindow {
             collapsed_repositories: HashSet::new(),
             repository_context_menu: None,
             worktree_context_menu: None,
+            worktree_hover_popover: None,
+            _hover_dismiss_task: None,
             outpost_context_menu: None,
             discovered_daemons: Vec::new(),
             mdns_browser: None,
@@ -4155,6 +4184,7 @@ impl ArborWindow {
     fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.repository_context_menu = None;
         self.worktree_context_menu = None;
+        self.worktree_hover_popover = None;
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
         }
@@ -9326,15 +9356,6 @@ impl ArborWindow {
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
                                                     None => None,
                                                 };
-                                                // Tooltip data
-                                                let tooltip_branch = worktree.branch.clone();
-                                                let tooltip_label = worktree.label.clone();
-                                                let tooltip_agent_state = worktree.agent_state;
-                                                let tooltip_agent_task = worktree.agent_task.clone();
-                                                let tooltip_activity = worktree.last_activity_unix_ms;
-                                                let tooltip_diff = worktree.diff_summary;
-                                                let tooltip_pr = worktree.pr_details.clone();
-                                                let tooltip_theme = theme;
                                                 let row = div()
                                                     .id(("worktree-row", index))
                                                     .font_family(FONT_MONO)
@@ -9356,19 +9377,32 @@ impl ArborWindow {
                                                             cx.notify();
                                                         }))
                                                     })
-                                                    .tooltip(move |_window, cx| {
-                                                        cx.new(|_| WorktreeTooltipView {
-                                                            branch: tooltip_branch.clone(),
-                                                            label: tooltip_label.clone(),
-                                                            agent_state: tooltip_agent_state,
-                                                            agent_task: tooltip_agent_task.clone(),
-                                                            last_activity_unix_ms: tooltip_activity,
-                                                            diff_summary: tooltip_diff,
-                                                            pr_details: tooltip_pr.clone(),
-                                                            theme: tooltip_theme,
-                                                        })
-                                                        .into()
-                                                    })
+                                                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                                                        if *hovered {
+                                                            // Cancel any pending dismiss
+                                                            this._hover_dismiss_task = None;
+                                                            let mouse_y = window.mouse_position().y;
+                                                            this.worktree_hover_popover = Some(WorktreeHoverPopover {
+                                                                worktree_index: index,
+                                                                mouse_y,
+                                                                checks_expanded: false,
+                                                            });
+                                                            cx.notify();
+                                                        } else if this.worktree_hover_popover.as_ref().is_some_and(|p| p.worktree_index == index) {
+                                                            // Delay dismiss so user can move mouse to popover
+                                                            this._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
+                                                                cx.background_spawn(async {
+                                                                    smol::Timer::after(Duration::from_millis(300)).await;
+                                                                }).await;
+                                                                let _ = this.update(cx, |this, cx| {
+                                                                    if this.worktree_hover_popover.as_ref().is_some_and(|p| p.worktree_index == index) {
+                                                                        this.worktree_hover_popover = None;
+                                                                        cx.notify();
+                                                                    }
+                                                                });
+                                                            }));
+                                                        }
+                                                    }))
                                                     // Bordered cell
                                                     .child(
                                                     div()
@@ -12003,6 +12037,352 @@ impl ArborWindow {
             )
     }
 
+    fn render_worktree_hover_popover(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(popover) = self.worktree_hover_popover.as_ref() else {
+            return div();
+        };
+        let Some(worktree) = self.worktrees.get(popover.worktree_index) else {
+            return div();
+        };
+
+        let theme = self.theme();
+        let left_pane_x = px(self.left_pane_width);
+        let mouse_y = popover.mouse_y;
+        let checks_expanded = popover.checks_expanded;
+
+        // Build popover card content
+        let popover_wt_index = popover.worktree_index;
+        let mut card = div()
+            .id("worktree-hover-popover-card")
+            .font_family(FONT_MONO)
+            .w(px(300.))
+            .bg(rgb(theme.panel_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded_md()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    // Cancel pending dismiss — mouse entered the popover
+                    this._hover_dismiss_task = None;
+                } else {
+                    // Mouse left the popover — start delayed dismiss
+                    this._hover_dismiss_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_spawn(async {
+                            smol::Timer::after(Duration::from_millis(300)).await;
+                        })
+                        .await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this
+                                .worktree_hover_popover
+                                .as_ref()
+                                .is_some_and(|p| p.worktree_index == popover_wt_index)
+                            {
+                                this.worktree_hover_popover = None;
+                                cx.notify();
+                            }
+                        });
+                    }));
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            });
+
+        // Header: branch name + directory label + relative time
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.text_primary))
+                        .child(worktree.branch.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_muted))
+                                .child(worktree.label.clone()),
+                        )
+                        .when_some(worktree.last_activity_unix_ms, |el, ms| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(format_relative_time(ms)),
+                            )
+                        }),
+                ),
+        );
+
+        // Diff summary
+        if let Some(summary) = worktree.diff_summary
+            && (summary.additions > 0 || summary.deletions > 0)
+        {
+            let mut diff_row = div().flex().items_center().gap_1();
+            if summary.additions > 0 {
+                diff_row = diff_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x72d69c))
+                        .child(format!("+{}", summary.additions)),
+                );
+            }
+            if summary.deletions > 0 {
+                diff_row = diff_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xeb6f92))
+                        .child(format!("-{}", summary.deletions)),
+                );
+            }
+            card = card.child(diff_row);
+        }
+
+        // Agent section
+        if let Some(state) = worktree.agent_state {
+            let (dot_color, state_label) = match state {
+                AgentState::Working => (0xe5c07b_u32, "Working"),
+                AgentState::Waiting => (0x61afef_u32, "Waiting"),
+            };
+
+            let mut agent_row = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(dot_color)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_primary))
+                        .child(state_label),
+                );
+
+            if let Some(ref task) = worktree.agent_task {
+                agent_row = agent_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(task.clone()),
+                );
+            }
+
+            card = card.child(agent_row);
+        }
+
+        // PR section
+        if let Some(ref pr) = worktree.pr_details {
+            card = card.child(div().h(px(1.)).bg(rgb(theme.border)).my_1());
+
+            let (state_label, state_color) = match pr.state {
+                github_service::PrState::Open => ("Open", 0x72d69c_u32),
+                github_service::PrState::Draft => ("Draft", theme.text_disabled),
+                github_service::PrState::Merged => ("Merged", 0xbb9af7_u32),
+                github_service::PrState::Closed => ("Closed", 0xeb6f92_u32),
+            };
+
+            let pr_url = pr.url.clone();
+            let mut pr_header = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .id("popover-pr-link")
+                        .cursor_pointer()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.accent))
+                        .child(format!("#{}", pr.number))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_external_url(&pr_url, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .px_1()
+                        .rounded_sm()
+                        .text_color(rgb(state_color))
+                        .child(state_label),
+                );
+
+            if pr.additions > 0 || pr.deletions > 0 {
+                if pr.additions > 0 {
+                    pr_header = pr_header.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x72d69c))
+                            .child(format!("+{}", pr.additions)),
+                    );
+                }
+                if pr.deletions > 0 {
+                    pr_header = pr_header.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xeb6f92))
+                            .child(format!("-{}", pr.deletions)),
+                    );
+                }
+            }
+            card = card.child(pr_header);
+
+            // PR title
+            card = card.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(pr.title.clone()),
+            );
+
+            // Checks + review (only for open/draft PRs)
+            if pr.state == github_service::PrState::Open
+                || pr.state == github_service::PrState::Draft
+            {
+                let mut status_row = div().flex().items_center().gap_1();
+
+                if !pr.checks.is_empty() {
+                    let passed = pr
+                        .checks
+                        .iter()
+                        .filter(|(_, s)| *s == github_service::CheckStatus::Success)
+                        .count();
+                    let total = pr.checks.len();
+                    let (check_icon, check_color) = match pr.checks_status {
+                        github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
+                        github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
+                        github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
+                    };
+                    let chevron = if checks_expanded {
+                        "\u{f078}"
+                    } else {
+                        "\u{f054}"
+                    };
+                    status_row = status_row.child(
+                        div()
+                            .id("popover-checks-toggle")
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(check_color))
+                                    .child(check_icon),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(format!("{passed}/{total} checks")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(chevron),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(ref mut p) = this.worktree_hover_popover {
+                                    p.checks_expanded = !p.checks_expanded;
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
+
+                let (review_label, review_color) = match pr.review_decision {
+                    github_service::ReviewDecision::Approved => ("Approved", 0x72d69c_u32),
+                    github_service::ReviewDecision::ChangesRequested => {
+                        ("Changes requested", 0xeb6f92_u32)
+                    },
+                    github_service::ReviewDecision::Pending => {
+                        ("Review pending", theme.text_disabled)
+                    },
+                };
+                status_row = status_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(review_color))
+                        .child(review_label),
+                );
+
+                card = card.child(status_row);
+
+                // Expanded checks list
+                if checks_expanded {
+                    let mut checks_list = div().flex().flex_col().gap(px(2.)).pl_2();
+                    for (name, status) in &pr.checks {
+                        let (icon, color) = match status {
+                            github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
+                            github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
+                            github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
+                        };
+                        checks_list = checks_list.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(div().text_xs().text_color(rgb(color)).child(icon))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_muted))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(name.clone()),
+                                ),
+                        );
+                    }
+                    card = card.child(checks_list);
+                }
+            }
+        }
+
+        // Outer overlay: click outside to dismiss
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.worktree_hover_popover = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(left_pane_x + px(4.))
+                    .top(mouse_y - px(8.))
+                    .child(card),
+            )
+    }
+
     fn render_outpost_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(menu) = self.outpost_context_menu.as_ref() else {
             return div();
@@ -14379,6 +14759,68 @@ fn daemon_error_is_connection_refused(message: &str) -> bool {
         || lower.contains("actively refused")
 }
 
+fn daemon_url_is_local(url: &str) -> bool {
+    let authority = url
+        .strip_prefix("http://")
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host = authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority);
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+/// If the running daemon's version differs from the GUI, shut it down and
+/// restart a fresh one. Returns `Some((records, new_daemon))` when a restart
+/// happened, or `None` when versions match (caller keeps the original daemon).
+fn check_daemon_version_and_restart(
+    daemon: &terminal_daemon_http::SharedTerminalDaemonClient,
+    daemon_base_url: &str,
+) -> Option<(
+    Vec<DaemonSessionRecord>,
+    Option<terminal_daemon_http::SharedTerminalDaemonClient>,
+)> {
+    let health = match daemon.health() {
+        Ok(h) => h,
+        Err(error) => {
+            tracing::warn!(%error, "failed to query daemon health, skipping version check");
+            return None;
+        },
+    };
+
+    if health.version == APP_VERSION {
+        tracing::debug!(version = APP_VERSION, "daemon version matches");
+        return None;
+    }
+
+    tracing::warn!(
+        daemon_version = %health.version,
+        gui_version = APP_VERSION,
+        "daemon version mismatch, restarting"
+    );
+
+    if let Err(error) = daemon.shutdown() {
+        tracing::warn!(%error, "failed to request daemon shutdown");
+    }
+
+    // Give the old process a moment to exit.
+    std::thread::sleep(Duration::from_millis(500));
+
+    match try_auto_start_daemon(daemon_base_url) {
+        Some(new_daemon) => {
+            let records = new_daemon.list_sessions().unwrap_or_default();
+            Some((records, Some(new_daemon)))
+        },
+        None => {
+            tracing::warn!("failed to restart daemon after version mismatch");
+            Some((Vec::new(), None))
+        },
+    }
+}
+
 /// Attempt to locate and spawn `arbor-httpd` as a detached background process,
 /// then poll until it becomes reachable. Returns `Some(daemon)` on success.
 fn try_auto_start_daemon(
@@ -14763,6 +15205,7 @@ impl Render for ArborWindow {
             .child(self.render_github_auth_modal(cx))
             .child(self.render_repository_context_menu(cx))
             .child(self.render_worktree_context_menu(cx))
+            .child(self.render_worktree_hover_popover(cx))
             .child(self.render_outpost_context_menu(cx))
             .child(self.render_delete_modal(cx))
             .child(self.render_manage_hosts_modal(cx))
@@ -15045,261 +15488,6 @@ fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
 
     tracing::info!(path = %settings_path.display(), "installed Claude Code hooks");
     Ok(())
-}
-
-struct WorktreeTooltipView {
-    branch: String,
-    label: String,
-    agent_state: Option<AgentState>,
-    agent_task: Option<String>,
-    last_activity_unix_ms: Option<u64>,
-    diff_summary: Option<changes::DiffLineSummary>,
-    pr_details: Option<github_service::PrDetails>,
-    theme: ThemePalette,
-}
-
-impl Render for WorktreeTooltipView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-
-        let mut root = div()
-            .font_family(FONT_MONO)
-            .min_w(px(240.))
-            .max_w(px(320.))
-            .bg(rgb(theme.panel_bg))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .rounded_md()
-            .p_2()
-            .flex()
-            .flex_col()
-            .gap_1();
-
-        // Header: branch name + directory label + relative time
-        root = root.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(1.))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.text_primary))
-                        .child(self.branch.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.text_muted))
-                                .child(self.label.clone()),
-                        )
-                        .when_some(self.last_activity_unix_ms, |el, ms| {
-                            el.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child(format_relative_time(ms)),
-                            )
-                        }),
-                ),
-        );
-
-        // Diff summary
-        if let Some(summary) = self.diff_summary {
-            if summary.additions > 0 || summary.deletions > 0 {
-                let mut diff_row = div().flex().items_center().gap_1();
-                if summary.additions > 0 {
-                    diff_row = diff_row.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x72d69c))
-                            .child(format!("+{}", summary.additions)),
-                    );
-                }
-                if summary.deletions > 0 {
-                    diff_row = diff_row.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xeb6f92))
-                            .child(format!("-{}", summary.deletions)),
-                    );
-                }
-                root = root.child(diff_row);
-            }
-        }
-
-        // Agent section
-        if let Some(state) = self.agent_state {
-            let (dot_color, state_label) = match state {
-                AgentState::Working => (0xe5c07b_u32, "Working"),
-                AgentState::Waiting => (0x61afef_u32, "Waiting"),
-            };
-
-            let mut agent_row = div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(rgb(dot_color)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.text_primary))
-                        .child(state_label),
-                );
-
-            if let Some(ref task) = self.agent_task {
-                agent_row = agent_row.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.text_muted))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(task.clone()),
-                );
-            }
-
-            root = root.child(agent_row);
-        }
-
-        // PR section
-        if let Some(ref pr) = self.pr_details {
-            // Separator
-            root = root.child(div().h(px(1.)).bg(rgb(theme.border)).my_1());
-
-            // PR header row: #number + state badge + +adds -dels
-            let (state_label, state_color) = match pr.state {
-                github_service::PrState::Open => ("Open", 0x72d69c_u32),
-                github_service::PrState::Draft => ("Draft", theme.text_disabled),
-                github_service::PrState::Merged => ("Merged", 0xbb9af7_u32),
-                github_service::PrState::Closed => ("Closed", 0xeb6f92_u32),
-            };
-
-            let mut pr_header = div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme.accent))
-                        .child(format!("#{}", pr.number)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .px_1()
-                        .rounded_sm()
-                        .text_color(rgb(state_color))
-                        .child(state_label),
-                );
-
-            if pr.additions > 0 || pr.deletions > 0 {
-                if pr.additions > 0 {
-                    pr_header = pr_header.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x72d69c))
-                            .child(format!("+{}", pr.additions)),
-                    );
-                }
-                if pr.deletions > 0 {
-                    pr_header = pr_header.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xeb6f92))
-                            .child(format!("-{}", pr.deletions)),
-                    );
-                }
-            }
-            root = root.child(pr_header);
-
-            // PR title
-            root = root.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme.text_muted))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(pr.title.clone()),
-            );
-
-            // Checks + review (only for open/draft PRs)
-            if pr.state == github_service::PrState::Open
-                || pr.state == github_service::PrState::Draft
-            {
-                let mut status_row = div().flex().items_center().gap_1();
-
-                // Checks summary
-                if !pr.checks.is_empty() {
-                    let passed = pr
-                        .checks
-                        .iter()
-                        .filter(|c| c.status == github_service::CheckStatus::Success)
-                        .count();
-                    let total = pr.checks.len();
-                    let (check_icon, check_color) = match pr.checks_status {
-                        github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
-                        github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
-                        github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
-                    };
-                    status_row = status_row.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(check_color))
-                                    .child(check_icon),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child(format!("{passed}/{total} checks")),
-                            ),
-                    );
-                }
-
-                // Review decision
-                let (review_label, review_color) = match pr.review_decision {
-                    github_service::ReviewDecision::Approved => ("Approved", 0x72d69c_u32),
-                    github_service::ReviewDecision::ChangesRequested => {
-                        ("Changes requested", 0xeb6f92_u32)
-                    },
-                    github_service::ReviewDecision::Pending => {
-                        ("Review pending", theme.text_disabled)
-                    },
-                };
-                status_row = status_row.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(review_color))
-                        .child(review_label),
-                );
-
-                root = root.child(status_row);
-            }
-        }
-
-        root
-    }
 }
 
 fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary]) -> bool {
