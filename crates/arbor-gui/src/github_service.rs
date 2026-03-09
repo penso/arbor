@@ -1,7 +1,186 @@
-use std::{
-    process::{Command, Stdio},
-    sync::Arc,
+use {
+    serde::Deserialize,
+    std::{
+        process::{Command, Stdio},
+        sync::Arc,
+    },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStatus {
+    Success,
+    Failure,
+    Pending,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckItem {
+    pub name: String,
+    pub status: CheckStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrDetails {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: PrState,
+    pub additions: usize,
+    pub deletions: usize,
+    pub review_decision: ReviewDecision,
+    pub checks_status: CheckStatus,
+    pub checks: Vec<CheckItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPrResponse {
+    number: u64,
+    title: String,
+    url: String,
+    state: String,
+    is_draft: bool,
+    additions: usize,
+    deletions: usize,
+    review_decision: Option<String>,
+    #[serde(default)]
+    status_check_rollup: Vec<GhCheckContext>,
+}
+
+#[derive(Deserialize)]
+struct GhCheckContext {
+    name: Option<String>,
+    context: Option<String>,
+    conclusion: Option<String>,
+    status: Option<String>,
+    state: Option<String>,
+}
+
+impl GhCheckContext {
+    fn display_name(&self) -> String {
+        self.name
+            .as_deref()
+            .or(self.context.as_deref())
+            .unwrap_or("unknown")
+            .to_owned()
+    }
+
+    fn to_check_status(&self) -> CheckStatus {
+        if let Some(conclusion) = &self.conclusion {
+            return match conclusion.as_str() {
+                "SUCCESS" | "success" | "NEUTRAL" | "neutral" | "SKIPPED" | "skipped" => {
+                    CheckStatus::Success
+                },
+                _ => CheckStatus::Failure,
+            };
+        }
+        if let Some(state) = &self.state {
+            return match state.as_str() {
+                "SUCCESS" | "success" => CheckStatus::Success,
+                "FAILURE" | "failure" | "ERROR" | "error" => CheckStatus::Failure,
+                _ => CheckStatus::Pending,
+            };
+        }
+        if let Some(status) = &self.status {
+            return match status.as_str() {
+                "COMPLETED" | "completed" => CheckStatus::Success,
+                _ => CheckStatus::Pending,
+            };
+        }
+        CheckStatus::Pending
+    }
+}
+
+fn parse_pr_details(response: GhPrResponse) -> PrDetails {
+    let state = if response.is_draft {
+        PrState::Draft
+    } else {
+        match response.state.as_str() {
+            "MERGED" | "merged" => PrState::Merged,
+            "CLOSED" | "closed" => PrState::Closed,
+            _ => PrState::Open,
+        }
+    };
+
+    let review_decision = match response.review_decision.as_deref() {
+        Some("APPROVED") => ReviewDecision::Approved,
+        Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
+        _ => ReviewDecision::Pending,
+    };
+
+    let checks: Vec<CheckItem> = response
+        .status_check_rollup
+        .iter()
+        .map(|c| CheckItem {
+            name: c.display_name(),
+            status: c.to_check_status(),
+        })
+        .collect();
+
+    let checks_status = if checks.is_empty() {
+        CheckStatus::Pending
+    } else if checks.iter().any(|c| c.status == CheckStatus::Failure) {
+        CheckStatus::Failure
+    } else if checks.iter().all(|c| c.status == CheckStatus::Success) {
+        CheckStatus::Success
+    } else {
+        CheckStatus::Pending
+    };
+
+    PrDetails {
+        number: response.number,
+        title: response.title,
+        url: response.url,
+        state,
+        additions: response.additions,
+        deletions: response.deletions,
+        review_decision,
+        checks_status,
+        checks,
+    }
+}
+
+/// Fetch rich PR details using `gh pr view`. Returns `None` if `gh` is not
+/// installed, the command fails, or no PR exists for the given branch.
+pub fn pull_request_details(repo_slug: &str, branch: &str) -> Option<PrDetails> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            "--repo",
+            repo_slug,
+            "--json",
+            "number,title,url,state,isDraft,additions,deletions,reviewDecision,statusCheckRollup",
+            branch,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let response: GhPrResponse = serde_json::from_slice(&output.stdout).ok()?;
+    Some(parse_pr_details(response))
+}
 
 pub trait GitHubService: Send + Sync {
     fn create_pull_request(

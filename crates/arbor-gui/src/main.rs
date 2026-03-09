@@ -194,6 +194,7 @@ struct WorktreeSummary {
     is_primary_checkout: bool,
     pr_number: Option<u64>,
     pr_url: Option<String>,
+    pr_details: Option<github_service::PrDetails>,
     diff_summary: Option<changes::DiffLineSummary>,
     agent_state: Option<AgentState>,
     agent_task: Option<String>,
@@ -2565,6 +2566,16 @@ impl ArborWindow {
                     .map(|pr_url| (worktree.path.clone(), pr_url.clone()))
             })
             .collect();
+        let previous_pr_details: HashMap<PathBuf, github_service::PrDetails> = self
+            .worktrees
+            .iter()
+            .filter_map(|worktree| {
+                worktree
+                    .pr_details
+                    .as_ref()
+                    .map(|details| (worktree.path.clone(), details.clone()))
+            })
+            .collect();
         let previous_agent_states: HashMap<PathBuf, AgentState> = self
             .worktrees
             .iter()
@@ -2616,6 +2627,7 @@ impl ArborWindow {
             worktree.diff_summary = previous_summaries.get(&worktree.path).copied();
             worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
             worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
+            worktree.pr_details = previous_pr_details.get(&worktree.path).cloned();
             worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
             worktree.agent_task = previous_agent_tasks.get(&worktree.path).cloned();
             // Take the max of fresh git-based timestamp and previous value
@@ -2953,7 +2965,10 @@ impl ArborWindow {
         if tracked_branches.is_empty() {
             let mut changed = false;
             for worktree in &mut self.worktrees {
-                if worktree.pr_number.take().is_some() || worktree.pr_url.take().is_some() {
+                if worktree.pr_number.take().is_some()
+                    || worktree.pr_url.take().is_some()
+                    || worktree.pr_details.take().is_some()
+                {
                     changed = true;
                 }
             }
@@ -2965,25 +2980,35 @@ impl ArborWindow {
 
         self.worktree_prs_loading = true;
         cx.spawn(async move |this, cx| {
-            let pr_details = cx
+            let results = cx
                 .background_spawn(async move {
                     tracked_branches
                         .into_iter()
                         .map(|(path, branch, repo_slug)| {
-                            let pr_number = repo_slug.as_ref().and_then(|_| {
-                                github_pr_number_for_worktree(
-                                    github_service.as_ref(),
-                                    &path,
-                                    &branch,
-                                    github_token.as_deref(),
-                                )
+                            // Try gh CLI first for rich details
+                            let details = repo_slug.as_ref().and_then(|slug| {
+                                github_service::pull_request_details(slug, &branch)
                             });
-                            let pr_url = pr_number.and_then(|pr_number| {
-                                repo_slug
-                                    .as_ref()
-                                    .map(|repo_slug| github_pr_url(repo_slug, pr_number))
-                            });
-                            (path, pr_number, pr_url)
+
+                            let (pr_number, pr_url) = if let Some(ref d) = details {
+                                (Some(d.number), Some(d.url.clone()))
+                            } else {
+                                // Fall back to octocrab for just the number
+                                let num = repo_slug.as_ref().and_then(|_| {
+                                    github_pr_number_for_worktree(
+                                        github_service.as_ref(),
+                                        &path,
+                                        &branch,
+                                        github_token.as_deref(),
+                                    )
+                                });
+                                let url = num.and_then(|n| {
+                                    repo_slug.as_ref().map(|slug| github_pr_url(slug, n))
+                                });
+                                (num, url)
+                            };
+
+                            (path, pr_number, pr_url, details)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -2991,20 +3016,34 @@ impl ArborWindow {
 
             let _ = this.update(cx, |this, cx| {
                 this.worktree_prs_loading = false;
-                let pr_detail_by_path: HashMap<PathBuf, (Option<u64>, Option<String>)> = pr_details
+
+                type PrInfo = (
+                    Option<u64>,
+                    Option<String>,
+                    Option<github_service::PrDetails>,
+                );
+                let pr_by_path: HashMap<PathBuf, PrInfo> = results
                     .into_iter()
-                    .map(|(path, pr_number, pr_url)| (path, (pr_number, pr_url)))
+                    .map(|(path, num, url, details)| (path, (num, url, details)))
                     .collect();
+
                 let mut changed = false;
 
                 for worktree in &mut this.worktrees {
-                    let (next_pr_number, next_pr_url) = pr_detail_by_path
+                    let (next_num, next_url, next_details) = pr_by_path
                         .get(&worktree.path)
                         .cloned()
-                        .unwrap_or((None, None));
-                    if worktree.pr_number != next_pr_number || worktree.pr_url != next_pr_url {
-                        worktree.pr_number = next_pr_number;
-                        worktree.pr_url = next_pr_url;
+                        .unwrap_or((None, None, None));
+                    if worktree.pr_number != next_num || worktree.pr_url != next_url {
+                        worktree.pr_number = next_num;
+                        worktree.pr_url = next_url;
+                        changed = true;
+                    }
+                    // Always update pr_details (no PartialEq on PrDetails)
+                    let had_details = worktree.pr_details.is_some();
+                    let has_details = next_details.is_some();
+                    worktree.pr_details = next_details;
+                    if had_details != has_details {
                         changed = true;
                     }
                 }
@@ -9287,6 +9326,15 @@ impl ArborWindow {
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
                                                     None => None,
                                                 };
+                                                // Tooltip data
+                                                let tooltip_branch = worktree.branch.clone();
+                                                let tooltip_label = worktree.label.clone();
+                                                let tooltip_agent_state = worktree.agent_state;
+                                                let tooltip_agent_task = worktree.agent_task.clone();
+                                                let tooltip_activity = worktree.last_activity_unix_ms;
+                                                let tooltip_diff = worktree.diff_summary;
+                                                let tooltip_pr = worktree.pr_details.clone();
+                                                let tooltip_theme = theme;
                                                 let row = div()
                                                     .id(("worktree-row", index))
                                                     .font_family(FONT_MONO)
@@ -9307,6 +9355,19 @@ impl ArborWindow {
                                                             });
                                                             cx.notify();
                                                         }))
+                                                    })
+                                                    .tooltip(move |_window, cx| {
+                                                        cx.new(|_| WorktreeTooltipView {
+                                                            branch: tooltip_branch.clone(),
+                                                            label: tooltip_label.clone(),
+                                                            agent_state: tooltip_agent_state,
+                                                            agent_task: tooltip_agent_task.clone(),
+                                                            last_activity_unix_ms: tooltip_activity,
+                                                            diff_summary: tooltip_diff,
+                                                            pr_details: tooltip_pr.clone(),
+                                                            theme: tooltip_theme,
+                                                        })
+                                                        .into()
                                                     })
                                                     // Bordered cell
                                                     .child(
@@ -13195,15 +13256,10 @@ impl ArborWindow {
                             .text_color(rgb(theme.text_primary))
                             .child("Start Daemon"),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child(
-                                "The terminal daemon (arbor-httpd) is not running. \
+                    .child(div().text_xs().text_color(rgb(theme.text_muted)).child(
+                        "The terminal daemon (arbor-httpd) is not running. \
                                  Start it to enable remote control and terminal persistence.",
-                            ),
-                    )
+                    ))
                     .child(
                         div()
                             .flex()
@@ -13271,12 +13327,101 @@ impl ArborWindow {
                             .text_color(rgb(theme.text_primary))
                             .child("Connect to Host"),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.text_muted))
-                            .child("Use http://HOST:PORT or ssh://[user@]HOST[:ssh_port]/"),
-                    )
+                    .when(!self.discovered_daemons.is_empty(), |modal_div| {
+                        let daemons = self.discovered_daemons.clone();
+                        modal_div.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_family(FONT_MONO)
+                                                .text_size(px(12.))
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("\u{f012}"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(theme.text_muted))
+                                                .child("Discovered on LAN"),
+                                        ),
+                                )
+                                .children(daemons.into_iter().enumerate().map(|(idx, daemon)| {
+                                    let display_name = daemon.display_name().to_owned();
+                                    let addr = daemon
+                                        .addresses
+                                        .first()
+                                        .cloned()
+                                        .unwrap_or_else(|| daemon.host.clone());
+                                    let subtitle = format!("{}:{}", addr, daemon.port,);
+                                    div()
+                                        .id(("connect-modal-daemon", idx))
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .bg(rgb(theme.panel_bg))
+                                        .hover(|s| s.bg(rgb(theme.panel_active_bg)))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.connect_to_host_modal = None;
+                                            this.connect_to_discovered_daemon(idx, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(px(14.))
+                                                .text_color(rgb(theme.accent))
+                                                .child("\u{f233}"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(rgb(theme.text_primary))
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .child(display_name),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .child(subtitle),
+                                                ),
+                                        )
+                                })),
+                        )
+                    })
+                    .child(div().text_xs().text_color(rgb(theme.text_muted)).child(
+                        if self.discovered_daemons.is_empty() {
+                            "Use http://HOST:PORT or ssh://[user@]HOST[:ssh_port]/"
+                        } else {
+                            "Or enter an address manually:"
+                        },
+                    ))
                     .when_some(error, |this, err| {
                         this.child(div().text_xs().text_color(rgb(0xf38ba8_u32)).child(err))
                     })
@@ -14386,6 +14531,7 @@ impl WorktreeSummary {
             is_primary_checkout,
             pr_number: None,
             pr_url: None,
+            pr_details: None,
             diff_summary: None,
             agent_state: None,
             agent_task: None,
@@ -14899,6 +15045,261 @@ fn install_claude_code_hooks(daemon_base_url: &str) -> Result<(), String> {
 
     tracing::info!(path = %settings_path.display(), "installed Claude Code hooks");
     Ok(())
+}
+
+struct WorktreeTooltipView {
+    branch: String,
+    label: String,
+    agent_state: Option<AgentState>,
+    agent_task: Option<String>,
+    last_activity_unix_ms: Option<u64>,
+    diff_summary: Option<changes::DiffLineSummary>,
+    pr_details: Option<github_service::PrDetails>,
+    theme: ThemePalette,
+}
+
+impl Render for WorktreeTooltipView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+
+        let mut root = div()
+            .font_family(FONT_MONO)
+            .min_w(px(240.))
+            .max_w(px(320.))
+            .bg(rgb(theme.panel_bg))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded_md()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1();
+
+        // Header: branch name + directory label + relative time
+        root = root.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.text_primary))
+                        .child(self.branch.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.text_muted))
+                                .child(self.label.clone()),
+                        )
+                        .when_some(self.last_activity_unix_ms, |el, ms| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(format_relative_time(ms)),
+                            )
+                        }),
+                ),
+        );
+
+        // Diff summary
+        if let Some(summary) = self.diff_summary {
+            if summary.additions > 0 || summary.deletions > 0 {
+                let mut diff_row = div().flex().items_center().gap_1();
+                if summary.additions > 0 {
+                    diff_row = diff_row.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x72d69c))
+                            .child(format!("+{}", summary.additions)),
+                    );
+                }
+                if summary.deletions > 0 {
+                    diff_row = diff_row.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xeb6f92))
+                            .child(format!("-{}", summary.deletions)),
+                    );
+                }
+                root = root.child(diff_row);
+            }
+        }
+
+        // Agent section
+        if let Some(state) = self.agent_state {
+            let (dot_color, state_label) = match state {
+                AgentState::Working => (0xe5c07b_u32, "Working"),
+                AgentState::Waiting => (0x61afef_u32, "Waiting"),
+            };
+
+            let mut agent_row = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(dot_color)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_primary))
+                        .child(state_label),
+                );
+
+            if let Some(ref task) = self.agent_task {
+                agent_row = agent_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.text_muted))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(task.clone()),
+                );
+            }
+
+            root = root.child(agent_row);
+        }
+
+        // PR section
+        if let Some(ref pr) = self.pr_details {
+            // Separator
+            root = root.child(div().h(px(1.)).bg(rgb(theme.border)).my_1());
+
+            // PR header row: #number + state badge + +adds -dels
+            let (state_label, state_color) = match pr.state {
+                github_service::PrState::Open => ("Open", 0x72d69c_u32),
+                github_service::PrState::Draft => ("Draft", theme.text_disabled),
+                github_service::PrState::Merged => ("Merged", 0xbb9af7_u32),
+                github_service::PrState::Closed => ("Closed", 0xeb6f92_u32),
+            };
+
+            let mut pr_header = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.accent))
+                        .child(format!("#{}", pr.number)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .px_1()
+                        .rounded_sm()
+                        .text_color(rgb(state_color))
+                        .child(state_label),
+                );
+
+            if pr.additions > 0 || pr.deletions > 0 {
+                if pr.additions > 0 {
+                    pr_header = pr_header.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x72d69c))
+                            .child(format!("+{}", pr.additions)),
+                    );
+                }
+                if pr.deletions > 0 {
+                    pr_header = pr_header.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xeb6f92))
+                            .child(format!("-{}", pr.deletions)),
+                    );
+                }
+            }
+            root = root.child(pr_header);
+
+            // PR title
+            root = root.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(pr.title.clone()),
+            );
+
+            // Checks + review (only for open/draft PRs)
+            if pr.state == github_service::PrState::Open
+                || pr.state == github_service::PrState::Draft
+            {
+                let mut status_row = div().flex().items_center().gap_1();
+
+                // Checks summary
+                if !pr.checks.is_empty() {
+                    let passed = pr
+                        .checks
+                        .iter()
+                        .filter(|c| c.status == github_service::CheckStatus::Success)
+                        .count();
+                    let total = pr.checks.len();
+                    let (check_icon, check_color) = match pr.checks_status {
+                        github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
+                        github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
+                        github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
+                    };
+                    status_row = status_row.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(check_color))
+                                    .child(check_icon),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(format!("{passed}/{total} checks")),
+                            ),
+                    );
+                }
+
+                // Review decision
+                let (review_label, review_color) = match pr.review_decision {
+                    github_service::ReviewDecision::Approved => ("Approved", 0x72d69c_u32),
+                    github_service::ReviewDecision::ChangesRequested => {
+                        ("Changes requested", 0xeb6f92_u32)
+                    },
+                    github_service::ReviewDecision::Pending => {
+                        ("Review pending", theme.text_disabled)
+                    },
+                };
+                status_row = status_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(review_color))
+                        .child(review_label),
+                );
+
+                root = root.child(status_row);
+            }
+        }
+
+        root
+    }
 }
 
 fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary]) -> bool {
