@@ -175,6 +175,7 @@ actions!(arbor, [
     SpawnTerminal,
     CloseActiveTerminal,
     OpenManagePresets,
+    OpenManageRepoPresets,
     RefreshWorktrees,
     RefreshChanges,
     OpenAddRepository,
@@ -927,6 +928,18 @@ impl AgentPresetKind {
     }
 
     fn default_command(self) -> &'static str {
+        match self {
+            Self::Codex => {
+                "codex -c model_reasoning_effort=\"high\" --dangerously-bypass-approvals-and-sandbox -c model_reasoning_summary=\"detailed\" -c model_supports_reasoning_summaries=true"
+            },
+            Self::Claude => "claude --dangerously-skip-permissions",
+            Self::Pi => "pi",
+            Self::OpenCode => "opencode",
+            Self::Copilot => "copilot --allow-all",
+        }
+    }
+
+    fn executable_name(self) -> &'static str {
         self.key()
     }
 
@@ -955,7 +968,7 @@ impl AgentPresetKind {
 
     /// Check if the default command for this preset is available in PATH.
     fn is_installed(self) -> bool {
-        is_command_in_path(self.default_command())
+        is_command_in_path(self.executable_name())
     }
 }
 
@@ -1051,11 +1064,19 @@ struct ManageRepoPresetsModal {
     icon: String,
     name: String,
     command: String,
+    active_tab: RepoPresetModalTab,
     active_field: RepoPresetModalField,
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoPresetModalTab {
+    Edit,
+    LocalPreset,
+}
+
 enum RepoPresetsModalInputEvent {
+    SetActiveTab(RepoPresetModalTab),
     SetActiveField(RepoPresetModalField),
     MoveActiveField(bool),
     Backspace,
@@ -4074,8 +4095,8 @@ impl ArborWindow {
                                     theme,
                                     "welcome-clone-button",
                                     if cloning { "Cloning..." } else { "Clone Repository" },
-                                    false,
-                                    cloning,
+                                    ActionButtonStyle::Primary,
+                                    !cloning,
                                 )
                                 .when(!cloning, |this| {
                                     this.on_click(cx.listener(|this, _, _, cx| {
@@ -4122,8 +4143,8 @@ impl ArborWindow {
                             theme,
                             "welcome-add-local",
                             "Open Local Repository",
-                            false,
-                            false,
+                            ActionButtonStyle::Secondary,
+                            true,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_add_repository_picker(cx);
@@ -6038,6 +6059,7 @@ impl ArborWindow {
             icon,
             name,
             command,
+            active_tab: RepoPresetModalTab::Edit,
             active_field: RepoPresetModalField::Icon,
             error: None,
         });
@@ -6059,10 +6081,23 @@ impl ArborWindow {
         };
 
         match input {
+            RepoPresetsModalInputEvent::SetActiveTab(tab) => {
+                modal.active_tab = tab;
+            },
             RepoPresetsModalInputEvent::SetActiveField(field) => {
+                if modal.active_tab != RepoPresetModalTab::Edit {
+                    self.manage_repo_presets_modal = Some(modal);
+                    cx.notify();
+                    return;
+                }
                 modal.active_field = field;
             },
             RepoPresetsModalInputEvent::MoveActiveField(reverse) => {
+                if modal.active_tab != RepoPresetModalTab::Edit {
+                    self.manage_repo_presets_modal = Some(modal);
+                    cx.notify();
+                    return;
+                }
                 modal.active_field = if reverse {
                     modal.active_field.prev()
                 } else {
@@ -6070,6 +6105,11 @@ impl ArborWindow {
                 };
             },
             RepoPresetsModalInputEvent::Backspace => {
+                if modal.active_tab != RepoPresetModalTab::Edit {
+                    self.manage_repo_presets_modal = Some(modal);
+                    cx.notify();
+                    return;
+                }
                 let field = match modal.active_field {
                     RepoPresetModalField::Icon => &mut modal.icon,
                     RepoPresetModalField::Name => &mut modal.name,
@@ -6078,6 +6118,11 @@ impl ArborWindow {
                 let _ = field.pop();
             },
             RepoPresetsModalInputEvent::Append(text) => {
+                if modal.active_tab != RepoPresetModalTab::Edit {
+                    self.manage_repo_presets_modal = Some(modal);
+                    cx.notify();
+                    return;
+                }
                 let field = match modal.active_field {
                     RepoPresetModalField::Icon => &mut modal.icon,
                     RepoPresetModalField::Name => &mut modal.name,
@@ -6775,6 +6820,12 @@ impl ArborWindow {
                 return;
             }
 
+            let active_tab = self
+                .manage_repo_presets_modal
+                .as_ref()
+                .map(|modal| modal.active_tab)
+                .unwrap_or(RepoPresetModalTab::Edit);
+
             match event.keystroke.key.as_str() {
                 "escape" => {
                     self.close_manage_repo_presets_modal(cx);
@@ -6782,25 +6833,31 @@ impl ArborWindow {
                     return;
                 },
                 "tab" => {
-                    self.update_manage_repo_presets_modal_input(
-                        RepoPresetsModalInputEvent::MoveActiveField(
-                            event.keystroke.modifiers.shift,
-                        ),
-                        cx,
-                    );
+                    if active_tab == RepoPresetModalTab::Edit {
+                        self.update_manage_repo_presets_modal_input(
+                            RepoPresetsModalInputEvent::MoveActiveField(
+                                event.keystroke.modifiers.shift,
+                            ),
+                            cx,
+                        );
+                    }
                     cx.stop_propagation();
                     return;
                 },
                 "enter" | "return" => {
-                    self.submit_manage_repo_presets_modal(cx);
+                    if active_tab == RepoPresetModalTab::Edit {
+                        self.submit_manage_repo_presets_modal(cx);
+                    }
                     cx.stop_propagation();
                     return;
                 },
                 "backspace" => {
-                    self.update_manage_repo_presets_modal_input(
-                        RepoPresetsModalInputEvent::Backspace,
-                        cx,
-                    );
+                    if active_tab == RepoPresetModalTab::Edit {
+                        self.update_manage_repo_presets_modal_input(
+                            RepoPresetsModalInputEvent::Backspace,
+                            cx,
+                        );
+                    }
                     cx.stop_propagation();
                     return;
                 },
@@ -6812,15 +6869,17 @@ impl ArborWindow {
             }
 
             if let Some(key_char) = event.keystroke.key_char.as_ref() {
-                self.update_manage_repo_presets_modal_input(
-                    RepoPresetsModalInputEvent::ClearError,
-                    cx,
-                );
-                self.update_manage_repo_presets_modal_input(
-                    RepoPresetsModalInputEvent::Append(key_char.to_owned()),
-                    cx,
-                );
-                cx.stop_propagation();
+                if active_tab == RepoPresetModalTab::Edit {
+                    self.update_manage_repo_presets_modal_input(
+                        RepoPresetsModalInputEvent::ClearError,
+                        cx,
+                    );
+                    self.update_manage_repo_presets_modal_input(
+                        RepoPresetsModalInputEvent::Append(key_char.to_owned()),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }
             }
             return;
         }
@@ -6973,6 +7032,15 @@ impl ArborWindow {
         cx: &mut Context<Self>,
     ) {
         self.open_manage_presets_modal(cx);
+    }
+
+    fn action_open_manage_repo_presets(
+        &mut self,
+        _: &OpenManageRepoPresets,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_manage_repo_presets_modal(None, cx);
     }
 
     fn action_refresh_worktrees(
@@ -10839,31 +10907,7 @@ impl ArborWindow {
                                             this.open_manage_repo_presets_modal(Some(index), cx);
                                         }),
                                     )
-                            }))
-                            .child(
-                                div()
-                                    .id("terminal-repo-preset-add")
-                                    .cursor_pointer()
-                                    .h(px(22.))
-                                    .w(px(22.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(theme.text_muted))
-                                    .hover(|s| {
-                                        s.bg(rgb(theme.panel_active_bg))
-                                            .text_color(rgb(theme.text_primary))
-                                    })
-                                    .child("+")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                                            this.open_manage_repo_presets_modal(None, cx);
-                                        }),
-                                    ),
-                            ),
+                            })),
                     ),
             )
             .child(
@@ -10901,8 +10945,8 @@ impl ArborWindow {
                                             theme,
                                             "spawn-terminal-empty-state",
                                             "Open Terminal Tab",
-                                            false,
-                                            false,
+                                            ActionButtonStyle::Secondary,
+                                            true,
                                         )
                                         .on_click(
                                             cx.listener(|this, _, window, cx| {
@@ -11172,15 +11216,52 @@ impl ArborWindow {
                         div()
                             .font_family(FONT_MONO)
                             .text_xs()
-                            .text_color(rgb(if search_text.is_empty() {
-                                theme.text_disabled
+                            .min_w_0()
+                            .flex_1()
+                            .child(if search_active {
+                                if search_text.is_empty() {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .child(input_caret(theme))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(theme.text_disabled))
+                                                .child("Filter files…"),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_color(rgb(theme.text_primary))
+                                                .child(search_text),
+                                        )
+                                        .child(input_caret(theme))
+                                        .into_any_element()
+                                }
+                            } else if search_text.is_empty() {
+                                div()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child("Filter files…")
+                                    .into_any_element()
                             } else {
-                                theme.text_primary
-                            }))
-                            .child(if search_text.is_empty() {
-                                "Filter files…".to_owned()
-                            } else {
-                                search_text
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(search_text)
+                                    .into_any_element()
                             }),
                     ),
             )
@@ -11731,7 +11812,13 @@ impl ArborWindow {
                                     .child("Add"),
                             )
                             .child(
-                                action_button(theme, "close-create-modal", "Close", false, true)
+                                action_button(
+                                    theme,
+                                    "close-create-modal",
+                                    "Close",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close_create_modal(cx);
                                     })),
@@ -12171,7 +12258,7 @@ impl ArborWindow {
                                     theme,
                                     "cancel-create-modal",
                                     "Cancel",
-                                    false,
+                                    ActionButtonStyle::Secondary,
                                     true,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -12183,21 +12270,23 @@ impl ArborWindow {
                                     theme,
                                     "submit-create-modal",
                                     submit_label,
+                                    ActionButtonStyle::Primary,
                                     !create_disabled,
-                                    create_disabled,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(modal) = this.create_modal.as_ref() {
-                                        match modal.tab {
-                                            CreateModalTab::LocalWorktree => {
-                                                this.submit_create_worktree_modal(cx);
-                                            },
-                                            CreateModalTab::RemoteOutpost => {
-                                                this.submit_create_outpost_modal(cx);
-                                            },
+                                .when(!create_disabled, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(modal) = this.create_modal.as_ref() {
+                                            match modal.tab {
+                                                CreateModalTab::LocalWorktree => {
+                                                    this.submit_create_worktree_modal(cx);
+                                                },
+                                                CreateModalTab::RemoteOutpost => {
+                                                    this.submit_create_outpost_modal(cx);
+                                                },
+                                            }
                                         }
-                                    }
-                                })),
+                                    }))
+                                }),
                             ),
                     ),
             )
@@ -12282,7 +12371,7 @@ impl ArborWindow {
                                     theme,
                                     "close-github-auth-modal",
                                     "Close",
-                                    false,
+                                    ActionButtonStyle::Secondary,
                                     true,
                                 )
                                 .on_click(cx.listener(
@@ -12379,8 +12468,12 @@ impl ArborWindow {
                                     theme,
                                     "github-auth-copy-code",
                                     copy_label,
-                                    copy_feedback_active,
-                                    false,
+                                    if copy_feedback_active {
+                                        ActionButtonStyle::Primary
+                                    } else {
+                                        ActionButtonStyle::Secondary
+                                    },
+                                    true,
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
@@ -12393,8 +12486,8 @@ impl ArborWindow {
                                     theme,
                                     "github-auth-open",
                                     "Open GitHub",
+                                    ActionButtonStyle::Primary,
                                     true,
-                                    false,
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
@@ -13114,7 +13207,13 @@ impl ArborWindow {
                                     .child(title),
                             )
                             .child(
-                                action_button(theme, "close-delete-modal", "Close", false, true)
+                                action_button(
+                                    theme,
+                                    "close-delete-modal",
+                                    "Close",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close_delete_modal(cx);
                                     })),
@@ -13206,7 +13305,13 @@ impl ArborWindow {
                             .justify_end()
                             .gap_2()
                             .child(
-                                action_button(theme, "delete-cancel", "Cancel", false, true)
+                                action_button(
+                                    theme,
+                                    "delete-cancel",
+                                    "Cancel",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close_delete_modal(cx);
                                     })),
@@ -13312,7 +13417,7 @@ impl ArborWindow {
                                         theme,
                                         "back-manage-hosts",
                                         "Back",
-                                        false,
+                                        ActionButtonStyle::Secondary,
                                         true,
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -13401,7 +13506,7 @@ impl ArborWindow {
                                         theme,
                                         "cancel-add-host",
                                         "Cancel",
-                                        false,
+                                        ActionButtonStyle::Secondary,
                                         true,
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -13417,12 +13522,14 @@ impl ArborWindow {
                                         theme,
                                         "submit-add-host",
                                         "Add Host",
+                                        ActionButtonStyle::Primary,
                                         !add_disabled,
-                                        add_disabled,
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.submit_add_host(cx);
-                                    })),
+                                    .when(!add_disabled, |this| {
+                                        this.on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_add_host(cx);
+                                        }))
+                                    }),
                                 ),
                         ),
                 );
@@ -13487,7 +13594,7 @@ impl ArborWindow {
                                     theme,
                                     "close-manage-hosts",
                                     "Close",
-                                    false,
+                                    ActionButtonStyle::Secondary,
                                     true,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -13557,7 +13664,7 @@ impl ArborWindow {
                                                 i as u64,
                                             ),
                                             "Remove",
-                                            false,
+                                            ActionButtonStyle::Secondary,
                                             true,
                                         )
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -13579,8 +13686,8 @@ impl ArborWindow {
                                     theme,
                                     "open-add-host-form",
                                     "+ Add Host",
+                                    ActionButtonStyle::Primary,
                                     true,
-                                    false,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(modal) = this.manage_hosts_modal.as_mut() {
@@ -13691,10 +13798,18 @@ impl ArborWindow {
                                     .child("Edit Agent Preset"),
                             )
                             .child(
-                                action_button(theme, "close-manage-presets", "Close", false, true)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                action_button(
+                                    theme,
+                                    "close-manage-presets",
+                                    "Close",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.close_manage_presets_modal(cx);
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -13721,26 +13836,6 @@ impl ArborWindow {
                             );
                         })),
                     )
-                    .child(
-                        div()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .bg(rgb(theme.panel_bg))
-                            .p_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Typing tips"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_primary))
-                                    .child("Tab: switch presets, Enter: save, Esc: close"),
-                            ),
-                    )
                     .child(div().when_some(modal.error.clone(), |this, error| {
                         this.rounded_sm()
                             .border_1()
@@ -13763,8 +13858,8 @@ impl ArborWindow {
                                     theme,
                                     "preset-restore-default",
                                     "Restore Default",
-                                    false,
-                                    false,
+                                    ActionButtonStyle::Secondary,
+                                    true,
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
@@ -13776,24 +13871,32 @@ impl ArborWindow {
                                 )),
                             )
                             .child(
-                                action_button(theme, "preset-cancel", "Cancel", false, true)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                action_button(
+                                    theme,
+                                    "preset-cancel",
+                                    "Cancel",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.close_manage_presets_modal(cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
                                 action_button(
                                     theme,
                                     "preset-save",
                                     "Save",
+                                    ActionButtonStyle::Primary,
                                     !save_disabled,
-                                    save_disabled,
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
+                                .when(!save_disabled, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
                                         this.submit_manage_presets_modal(cx);
-                                    },
-                                )),
+                                    }))
+                                }),
                             ),
                     ),
             )
@@ -13860,12 +13963,19 @@ impl ArborWindow {
                                     .child("About Arbor"),
                             )
                             .child(
-                                action_button(theme, "close-about", "Close", false, true).on_click(
-                                    cx.listener(|this, _, _, cx| {
+                                action_button(
+                                    theme,
+                                    "close-about",
+                                    "Close",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.show_about = false;
                                         cx.notify();
-                                    }),
-                                ),
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -14109,22 +14219,32 @@ impl ArborWindow {
                                     .text_color(rgb(theme.text_primary))
                                     .child(if token_value.is_empty() {
                                         div()
-                                            .text_color(rgb(theme.text_disabled))
-                                            .child("paste token here")
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .child(input_caret(theme))
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(theme.text_disabled))
+                                                    .child("paste token here"),
+                                            )
                                             .into_any_element()
                                     } else {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .child("\u{2022}".repeat(token_value.len()))
+                                            .min_w_0()
                                             .child(
                                                 div()
-                                                    .w(px(1.))
-                                                    .h(px(14.))
-                                                    .bg(rgb(theme.accent))
-                                                    .mt(px(1.))
-                                                    .ml(px(1.)),
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .text_color(rgb(theme.text_primary))
+                                                    .child("\u{2022}".repeat(token_value.len())),
                                             )
+                                            .child(input_caret(theme))
                                             .into_any_element()
                                     }),
                             ),
@@ -14135,14 +14255,26 @@ impl ArborWindow {
                             .justify_end()
                             .gap_2()
                             .child(
-                                action_button(theme, "cancel-auth", "Cancel", false, false)
+                                action_button(
+                                    theme,
+                                    "cancel-auth",
+                                    "Cancel",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.daemon_auth_modal = None;
                                         cx.notify();
                                     })),
                             )
                             .child(
-                                action_button(theme, "submit-auth", "Connect", false, true)
+                                action_button(
+                                    theme,
+                                    "submit-auth",
+                                    "Connect",
+                                    ActionButtonStyle::Primary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.submit_daemon_auth(cx);
                                     })),
@@ -14203,18 +14335,34 @@ impl ArborWindow {
                             .justify_end()
                             .gap_2()
                             .child(
-                                action_button(theme, "cancel-start-daemon", "Cancel", false, false)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                action_button(
+                                    theme,
+                                    "cancel-start-daemon",
+                                    "Cancel",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.start_daemon_modal = false;
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                action_button(theme, "confirm-start-daemon", "Start", false, true)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                action_button(
+                                    theme,
+                                    "confirm-start-daemon",
+                                    "Start",
+                                    ActionButtonStyle::Primary,
+                                    true,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.start_daemon_modal = false;
                                         this.try_start_and_connect_daemon(cx);
-                                    })),
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -14531,22 +14679,32 @@ impl ArborWindow {
                                     .text_color(rgb(theme.text_primary))
                                     .child(if address_empty {
                                         div()
-                                            .text_color(rgb(theme.text_disabled))
-                                            .child("ssh://dev@192.168.1.42/")
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .child(input_caret(theme))
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(theme.text_disabled))
+                                                    .child("ssh://dev@192.168.1.42/"),
+                                            )
                                             .into_any_element()
                                     } else {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .child(address)
+                                            .min_w_0()
                                             .child(
                                                 div()
-                                                    .w(px(1.))
-                                                    .h(px(14.))
-                                                    .bg(rgb(theme.accent))
-                                                    .mt(px(1.))
-                                                    .ml(px(1.)),
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .text_color(rgb(theme.text_primary))
+                                                    .child(address),
                                             )
+                                            .child(input_caret(theme))
                                             .into_any_element()
                                     }),
                             ),
@@ -14558,7 +14716,13 @@ impl ArborWindow {
                             .justify_end()
                             .gap_2()
                             .child(
-                                action_button(theme, "cancel-connect", "Cancel", false, false)
+                                action_button(
+                                    theme,
+                                    "cancel-connect",
+                                    "Cancel",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.connect_to_host_modal = None;
                                         cx.notify();
@@ -14569,12 +14733,14 @@ impl ArborWindow {
                                     theme,
                                     "submit-connect",
                                     "Connect",
-                                    false,
-                                    address_empty,
+                                    ActionButtonStyle::Primary,
+                                    !address_empty,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.submit_connect_to_host(cx);
-                                })),
+                                .when(!address_empty, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_connect_to_host(cx);
+                                    }))
+                                }),
                             ),
                     ),
             )
@@ -14624,24 +14790,47 @@ impl ArborWindow {
                                     cx,
                                 );
                             }))
-                            .child(if value.is_empty() {
+                            .child(if active {
+                                if value.is_empty() {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .min_w_0()
+                                        .gap(px(4.))
+                                        .child(input_caret(theme))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_color(rgb(theme.text_disabled))
+                                                .child("(not set)"),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_color(rgb(theme.text_primary))
+                                                .child(value.to_owned()),
+                                        )
+                                        .child(input_caret(theme))
+                                        .into_any_element()
+                                }
+                            } else if value.is_empty() {
                                 div()
                                     .text_color(rgb(theme.text_disabled))
                                     .child("(not set)")
-                                    .into_any_element()
-                            } else if active {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .child(value.to_owned())
-                                    .child(
-                                        div()
-                                            .w(px(1.))
-                                            .h(px(14.))
-                                            .bg(rgb(theme.accent))
-                                            .mt(px(1.))
-                                            .ml(px(1.)),
-                                    )
                                     .into_any_element()
                             } else {
                                 div().child(value.to_owned()).into_any_element()
@@ -14701,7 +14890,13 @@ impl ArborWindow {
                                     .child("Settings"),
                             )
                             .child(
-                                action_button(theme, "close-settings", "Close", false, true)
+                                action_button(
+                                    theme,
+                                    "close-settings",
+                                    "Close",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close_settings_modal(cx);
                                     })),
@@ -14822,13 +15017,25 @@ impl ArborWindow {
                             .justify_end()
                             .gap_2()
                             .child(
-                                action_button(theme, "settings-cancel", "Cancel", false, true)
+                                action_button(
+                                    theme,
+                                    "settings-cancel",
+                                    "Cancel",
+                                    ActionButtonStyle::Secondary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.close_settings_modal(cx);
                                     })),
                             )
                             .child(
-                                action_button(theme, "settings-save", "Save", true, false)
+                                action_button(
+                                    theme,
+                                    "settings-save",
+                                    "Save",
+                                    ActionButtonStyle::Primary,
+                                    true,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.submit_settings_modal(cx);
                                     })),
@@ -14844,12 +15051,64 @@ impl ArborWindow {
 
         let theme = self.theme();
         let is_editing = modal.editing_index.is_some();
+        let is_edit_tab = modal.active_tab == RepoPresetModalTab::Edit;
         let title = if is_editing {
             "Edit Custom Preset"
         } else {
             "Add Custom Preset"
         };
         let save_disabled = modal.name.trim().is_empty() || modal.command.trim().is_empty();
+        let local_preset_path = self.active_arbor_toml_dir().join("arbor.toml");
+        let local_preset_example = format!(
+            "[[presets]]\nname = \"{}\"\nicon = \"{}\"\ncommand = \"{}\"",
+            if modal.name.trim().is_empty() {
+                "dev"
+            } else {
+                modal.name.trim()
+            },
+            if modal.icon.trim().is_empty() {
+                "\u{f013}"
+            } else {
+                modal.icon.trim()
+            },
+            if modal.command.trim().is_empty() {
+                "just run"
+            } else {
+                modal.command.trim()
+            }
+        );
+        let tab_button = |tab: RepoPresetModalTab, label: &'static str| {
+            let is_active = modal.active_tab == tab;
+            div()
+                .cursor_pointer()
+                .px_3()
+                .py_1()
+                .flex()
+                .items_center()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(if is_active {
+                    theme.text_primary
+                } else {
+                    theme.text_muted
+                }))
+                .when(is_active, |this| {
+                    this.border_b_2().border_color(rgb(theme.accent))
+                })
+                .hover(|s| {
+                    s.bg(rgb(theme.panel_active_bg))
+                        .text_color(rgb(theme.text_primary))
+                })
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.update_manage_repo_presets_modal_input(
+                            RepoPresetsModalInputEvent::SetActiveTab(tab),
+                            cx,
+                        );
+                    }),
+                )
+        };
 
         div()
             .absolute()
@@ -14907,7 +15166,7 @@ impl ArborWindow {
                                     theme,
                                     "close-manage-repo-presets",
                                     "Close",
-                                    false,
+                                    ActionButtonStyle::Secondary,
                                     true,
                                 )
                                 .on_click(cx.listener(
@@ -14918,79 +15177,111 @@ impl ArborWindow {
                             ),
                     )
                     .child(
-                        modal_input_field(
-                            theme,
-                            "repo-preset-icon-input",
-                            "Icon (emoji)",
-                            &modal.icon,
-                            "\u{f013}",
-                            modal.active_field == RepoPresetModalField::Icon,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.update_manage_repo_presets_modal_input(
-                                RepoPresetsModalInputEvent::SetActiveField(
-                                    RepoPresetModalField::Icon,
-                                ),
-                                cx,
-                            );
-                        })),
-                    )
-                    .child(
-                        modal_input_field(
-                            theme,
-                            "repo-preset-name-input",
-                            "Name",
-                            &modal.name,
-                            "my preset",
-                            modal.active_field == RepoPresetModalField::Name,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.update_manage_repo_presets_modal_input(
-                                RepoPresetsModalInputEvent::SetActiveField(
-                                    RepoPresetModalField::Name,
-                                ),
-                                cx,
-                            );
-                        })),
-                    )
-                    .child(
-                        modal_input_field(
-                            theme,
-                            "repo-preset-command-input",
-                            "Command",
-                            &modal.command,
-                            "just run",
-                            modal.active_field == RepoPresetModalField::Command,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.update_manage_repo_presets_modal_input(
-                                RepoPresetsModalInputEvent::SetActiveField(
-                                    RepoPresetModalField::Command,
-                                ),
-                                cx,
-                            );
-                        })),
-                    )
-                    .child(
                         div()
-                            .rounded_sm()
-                            .border_1()
+                            .flex()
+                            .gap_0()
+                            .border_b_1()
                             .border_color(rgb(theme.border))
-                            .bg(rgb(theme.panel_bg))
-                            .p_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_muted))
-                                    .child("Typing tips"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_primary))
-                                    .child("Tab: next field, Enter: save, Esc: close"),
-                            ),
+                            .child(tab_button(RepoPresetModalTab::Edit, "Edit"))
+                            .child(tab_button(RepoPresetModalTab::LocalPreset, "Local Preset")),
                     )
+                    .when(is_edit_tab, |this| {
+                        this.child(
+                            modal_input_field(
+                                theme,
+                                "repo-preset-icon-input",
+                                "Icon (emoji)",
+                                &modal.icon,
+                                "\u{f013}",
+                                modal.active_field == RepoPresetModalField::Icon,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_manage_repo_presets_modal_input(
+                                    RepoPresetsModalInputEvent::SetActiveField(
+                                        RepoPresetModalField::Icon,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "repo-preset-name-input",
+                                "Name",
+                                &modal.name,
+                                "my preset",
+                                modal.active_field == RepoPresetModalField::Name,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_manage_repo_presets_modal_input(
+                                    RepoPresetsModalInputEvent::SetActiveField(
+                                        RepoPresetModalField::Name,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            modal_input_field(
+                                theme,
+                                "repo-preset-command-input",
+                                "Command",
+                                &modal.command,
+                                "just run",
+                                modal.active_field == RepoPresetModalField::Command,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_manage_repo_presets_modal_input(
+                                    RepoPresetsModalInputEvent::SetActiveField(
+                                        RepoPresetModalField::Command,
+                                    ),
+                                    cx,
+                                );
+                            })),
+                        )
+                    })
+                    .when(!is_edit_tab, |this| {
+                        this.child(
+                            div()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .bg(rgb(theme.panel_bg))
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child("Add repo-local presets directly in `arbor.toml`."),
+                                )
+                                .child(div().text_xs().text_color(rgb(theme.text_muted)).child(
+                                    format!(
+                                        "Arbor reads local presets from {}",
+                                        local_preset_path.display()
+                                    ),
+                                ))
+                                .child(
+                                    div()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .bg(rgb(theme.terminal_bg))
+                                        .p_2()
+                                        .font_family(FONT_MONO)
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_primary))
+                                        .children(
+                                            local_preset_example
+                                                .lines()
+                                                .map(|line| div().child(line.to_owned())),
+                                        ),
+                                ),
+                        )
+                    })
                     .child(div().when_some(modal.error.clone(), |this, error| {
                         this.rounded_sm()
                             .border_1()
@@ -15008,14 +15299,28 @@ impl ArborWindow {
                             .items_center()
                             .justify_end()
                             .gap_2()
-                            .when(is_editing, |this| {
+                            .when(is_edit_tab && is_editing, |this| {
                                 this.child(
+                                    action_button(
+                                        theme,
+                                        "repo-preset-new",
+                                        "New Preset",
+                                        ActionButtonStyle::Secondary,
+                                        true,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.open_manage_repo_presets_modal(None, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
                                     action_button(
                                         theme,
                                         "repo-preset-delete",
                                         "Delete",
+                                        ActionButtonStyle::Secondary,
                                         true,
-                                        false,
                                     )
                                     .on_click(cx.listener(
                                         |this, _, _, cx| {
@@ -15025,25 +15330,38 @@ impl ArborWindow {
                                 )
                             })
                             .child(
-                                action_button(theme, "repo-preset-cancel", "Cancel", false, true)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_manage_repo_presets_modal(cx);
-                                    })),
-                            )
-                            .child(
                                 action_button(
                                     theme,
-                                    "repo-preset-save",
-                                    "Save",
-                                    !save_disabled,
-                                    save_disabled,
+                                    "repo-preset-cancel",
+                                    "Close",
+                                    ActionButtonStyle::Secondary,
+                                    true,
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        this.submit_manage_repo_presets_modal(cx);
+                                        this.close_manage_repo_presets_modal(cx);
                                     },
                                 )),
-                            ),
+                            )
+                            .when(is_edit_tab, |this| {
+                                this.child(
+                                    action_button(
+                                        theme,
+                                        "repo-preset-save",
+                                        "Save",
+                                        ActionButtonStyle::Primary,
+                                        !save_disabled,
+                                    )
+                                    .when(
+                                        !save_disabled,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                this.submit_manage_repo_presets_modal(cx);
+                                            }))
+                                        },
+                                    ),
+                                )
+                            }),
                     ),
             )
     }
@@ -16207,6 +16525,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_spawn_terminal))
             .on_action(cx.listener(Self::action_close_active_terminal))
             .on_action(cx.listener(Self::action_open_manage_presets))
+            .on_action(cx.listener(Self::action_open_manage_repo_presets))
             .on_action(cx.listener(Self::action_refresh_worktrees))
             .on_action(cx.listener(Self::action_refresh_changes))
             .on_action(cx.listener(Self::action_open_add_repository))
@@ -16349,8 +16668,8 @@ impl Render for ArborWindow {
                                                 theme,
                                                 "quit-cancel",
                                                 "Cancel",
-                                                false,
-                                                false,
+                                                ActionButtonStyle::Secondary,
+                                                true,
                                             )
                                             .min_w(px(64.))
                                             .flex()
@@ -18217,23 +18536,23 @@ fn action_button(
     theme: ThemePalette,
     id: impl Into<ElementId>,
     label: impl Into<String>,
-    active: bool,
-    muted: bool,
+    style: ActionButtonStyle,
+    enabled: bool,
 ) -> Stateful<Div> {
-    let background = if active {
+    let background = if enabled && style == ActionButtonStyle::Primary {
         theme.panel_active_bg
     } else {
         theme.panel_bg
     };
-    let text_color = if muted {
-        theme.text_disabled
-    } else {
+    let text_color = if enabled {
         theme.text_primary
+    } else {
+        theme.text_disabled
     };
 
     div()
         .id(id)
-        .cursor_pointer()
+        .when(enabled, |this| this.cursor_pointer())
         .rounded_sm()
         .border_1()
         .border_color(rgb(theme.border))
@@ -18243,6 +18562,12 @@ fn action_button(
         .text_xs()
         .text_color(rgb(text_color))
         .child(label.into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionButtonStyle {
+    Primary,
+    Secondary,
 }
 
 fn preset_icon_image(kind: AgentPresetKind) -> Arc<Image> {
@@ -18504,15 +18829,55 @@ fn modal_input_field(
             div()
                 .text_sm()
                 .font_family(FONT_MONO)
-                .text_color(rgb(if value.is_empty() {
-                    theme.text_disabled
+                .min_w_0()
+                .child(if active {
+                    if value.is_empty() {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(input_caret(theme))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(placeholder.clone()),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex()
+                            .items_center()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .whitespace_normal()
+                                    .text_color(rgb(theme.text_primary))
+                                    .child(value.to_owned()),
+                            )
+                            .child(input_caret(theme))
+                            .into_any_element()
+                    }
+                } else if value.is_empty() {
+                    div()
+                        .text_color(rgb(theme.text_disabled))
+                        .child(placeholder)
+                        .into_any_element()
                 } else {
-                    theme.text_primary
-                }))
-                .child(if value.is_empty() {
-                    placeholder
-                } else {
-                    value.to_owned()
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(rgb(theme.text_primary))
+                        .child(value.to_owned())
+                        .into_any_element()
                 }),
         )
 }
@@ -18541,7 +18906,48 @@ fn single_line_input_field(
         .px_2()
         .flex()
         .items_center()
-        .child(
+        .child(if active {
+            if value.is_empty() {
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(input_caret(theme))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .font_family(FONT_MONO)
+                            .text_color(rgb(theme.text_disabled))
+                            .child(placeholder.clone()),
+                    )
+            } else {
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .font_family(FONT_MONO)
+                            .text_color(rgb(theme.text_primary))
+                            .child(value.to_owned()),
+                    )
+                    .child(input_caret(theme))
+            }
+        } else {
             div()
                 .min_w_0()
                 .flex_1()
@@ -18559,8 +18965,17 @@ fn single_line_input_field(
                     placeholder
                 } else {
                     value.to_owned()
-                }),
-        )
+                })
+        })
+}
+
+fn input_caret(theme: ThemePalette) -> Div {
+    div()
+        .w(px(1.))
+        .h(px(14.))
+        .bg(rgb(theme.accent))
+        .mt(px(1.))
+        .ml(px(1.))
 }
 
 fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
@@ -20844,6 +21259,7 @@ fn build_app_menus(discovered_daemons: &[mdns_browser::DiscoveredDaemon]) -> Vec
                 MenuItem::action("Close Terminal Tab", CloseActiveTerminal),
                 MenuItem::separator(),
                 MenuItem::action("Edit Presets...", OpenManagePresets),
+                MenuItem::action("Custom Presets...", OpenManageRepoPresets),
                 MenuItem::separator(),
                 MenuItem::action("Use Embedded Backend", UseEmbeddedBackend),
             ],

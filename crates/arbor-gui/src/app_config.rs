@@ -18,11 +18,11 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 #
 # [[agent_presets]]
 # key = "codex"     # codex | claude | pi | opencode | copilot
-# command = "codex"
+# command = "codex -c model_reasoning_effort=\"high\" --dangerously-bypass-approvals-and-sandbox -c model_reasoning_summary=\"detailed\" -c model_supports_reasoning_summaries=true"
 #
 # [[agent_presets]]
 # key = "claude"
-# command = "claude"
+# command = "claude --dangerously-skip-permissions"
 #
 # [[agent_presets]]
 # key = "pi"
@@ -31,6 +31,10 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # [[agent_presets]]
 # key = "opencode"
 # command = "opencode"
+#
+# [[agent_presets]]
+# key = "copilot"
+# command = "copilot --allow-all"
 
 # [daemon]
 # auth_token = "your-secret-token"  # required for remote access
