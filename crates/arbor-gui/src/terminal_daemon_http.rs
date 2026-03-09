@@ -77,6 +77,29 @@ pub struct HealthInfo {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct RemoteRepositoryDto {
+    pub root: String,
+    pub label: String,
+    pub github_repo_slug: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct RemoteWorktreeDto {
+    pub repo_root: String,
+    pub path: String,
+    pub branch: String,
+    pub is_primary_checkout: bool,
+    pub last_activity_unix_ms: Option<u64>,
+    pub diff_additions: Option<usize>,
+    pub diff_deletions: Option<usize>,
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct SetBindModeRequest {
     allow_remote: bool,
@@ -260,6 +283,16 @@ impl HttpTerminalDaemon {
 
     pub fn health(&self) -> Result<HealthInfo, HttpTerminalDaemonError> {
         let response = self.send_empty("GET", &format!("{API_PATH_PREFIX}/health"))?;
+        self.decode_json_response(response, &[200])
+    }
+
+    pub fn list_repositories(&self) -> Result<Vec<RemoteRepositoryDto>, HttpTerminalDaemonError> {
+        let response = self.send_empty("GET", &format!("{API_PATH_PREFIX}/repositories"))?;
+        self.decode_json_response(response, &[200])
+    }
+
+    pub fn list_worktrees(&self) -> Result<Vec<RemoteWorktreeDto>, HttpTerminalDaemonError> {
+        let response = self.send_empty("GET", &format!("{API_PATH_PREFIX}/worktrees"))?;
         self.decode_json_response(response, &[200])
     }
 
@@ -609,6 +642,7 @@ impl HttpEndpoint {
                         host = %self.host,
                         "connected to daemon"
                     );
+                    let _ = stream.set_nodelay(true);
                     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|error| {
                         HttpTerminalDaemonError::new(format!("failed to set read timeout: {error}"))
                     })?;

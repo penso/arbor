@@ -34,10 +34,10 @@ use {
         DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle,
         FontFallbacks, FontFeatures, FontWeight, Image, ImageFormat, KeyBinding, KeyDownEvent,
         Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, SharedString, Stateful,
-        SystemMenuType, TextRun, TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window,
-        WindowBounds, WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div,
-        ease_in_out, fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
+        PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
+        TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
+        WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, ease_in_out,
+        fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
     },
     ropey::Rope,
     std::{
@@ -555,10 +555,21 @@ struct DaemonTerminalRuntime {
     clear_global_daemon_on_connection_refused: bool,
 }
 
-#[derive(Default)]
 struct DaemonTerminalWsState {
     event_generation: std::sync::atomic::AtomicU64,
     closed: std::sync::atomic::AtomicBool,
+    /// Channel to send keystroke bytes to the WS thread for low-latency binary transmission.
+    ws_writer: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
+}
+
+impl Default for DaemonTerminalWsState {
+    fn default() -> Self {
+        Self {
+            event_generation: std::sync::atomic::AtomicU64::new(0),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            ws_writer: Mutex::new(None),
+        }
+    }
 }
 
 impl DaemonTerminalWsState {
@@ -579,6 +590,23 @@ impl DaemonTerminalWsState {
 
     fn is_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Try to send keystroke bytes through the WebSocket channel.
+    /// Returns true if sent, false if WS writer is not available.
+    fn try_write(&self, bytes: Vec<u8>) -> bool {
+        if let Ok(guard) = self.ws_writer.lock()
+            && let Some(ref sender) = *guard
+        {
+            return sender.send(bytes).is_ok();
+        }
+        false
+    }
+
+    fn set_writer(&self, sender: Option<std::sync::mpsc::Sender<Vec<u8>>>) {
+        if let Ok(mut guard) = self.ws_writer.lock() {
+            *guard = sender;
+        }
     }
 }
 
@@ -799,13 +827,20 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
 
     fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), String> {
         if input == [0x03] {
+            // Ctrl-C: send as signal for reliable delivery
             self.daemon
                 .signal(SignalRequest {
                     session_id: session.daemon_session_id.clone(),
                     signal: TerminalSignal::Interrupt,
                 })
                 .map_err(|error| error.to_string())
+        } else if self.ws_state.try_write(input.to_vec()) {
+            // Fast path: send via WebSocket binary frame
+            tracing::trace!("write_input: sent via WS binary frame");
+            Ok(())
         } else {
+            // Fallback: HTTP POST (WS not connected yet)
+            tracing::trace!("write_input: WS unavailable, falling back to HTTP POST");
             self.daemon
                 .write(WriteRequest {
                     session_id: session.daemon_session_id.clone(),
@@ -1649,6 +1684,8 @@ struct ArborWindow {
     show_theme_picker: bool,
     settings_modal: Option<SettingsModal>,
     daemon_auth_modal: Option<DaemonAuthModal>,
+    /// When set, a successful auth submission should retry fetching for this remote daemon index.
+    pending_remote_daemon_auth: Option<usize>,
     start_daemon_modal: bool,
     connect_to_host_modal: Option<ConnectToHostModal>,
     connection_history: Vec<connection_history::ConnectionHistoryEntry>,
@@ -1704,40 +1741,48 @@ struct ArborWindow {
     welcome_clone_url_active: bool,
     welcome_cloning: bool,
     welcome_clone_error: Option<String>,
-    /// When set, the window connects to this remote daemon after initialization.
-    pending_daemon_connection: Option<PendingDaemonConnection>,
+    /// Remote daemons that have been expanded in the sidebar.
+    remote_daemon_states: HashMap<usize, RemoteDaemonState>,
+    /// Currently selected remote worktree (if any). The window stays connected
+    /// to the local daemon; only terminal sessions use the remote client.
+    active_remote_worktree: Option<ActiveRemoteWorktree>,
 }
 
 #[derive(Debug, Clone)]
-struct PendingDaemonConnection {
-    url: String,
-    label: Option<String>,
+struct RemoteDaemonState {
+    client: Arc<terminal_daemon_http::HttpTerminalDaemon>,
+    hostname: String,
+    repositories: Vec<terminal_daemon_http::RemoteRepositoryDto>,
+    worktrees: Vec<terminal_daemon_http::RemoteWorktreeDto>,
+    loading: bool,
+    expanded: bool,
+    error: Option<String>,
+}
+
+/// Tracks which remote worktree is currently selected in the sidebar,
+/// without switching the window's primary daemon connection.
+#[derive(Debug, Clone)]
+struct ActiveRemoteWorktree {
+    daemon_index: usize,
+    worktree_path: PathBuf,
 }
 
 impl ArborWindow {
     fn load_with_daemon_store<S>(
         startup_ui_state: ui_state_store::UiState,
         log_buffer: log_layer::LogBuffer,
-        pending_daemon: Option<PendingDaemonConnection>,
         cx: &mut Context<Self>,
     ) -> Self
     where
         S: daemon::DaemonSessionStore + Default + 'static,
     {
-        Self::load(
-            Box::new(S::default()),
-            startup_ui_state,
-            log_buffer,
-            pending_daemon,
-            cx,
-        )
+        Self::load(Box::new(S::default()), startup_ui_state, log_buffer, cx)
     }
 
     fn load(
         daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
         startup_ui_state: ui_state_store::UiState,
         log_buffer: log_layer::LogBuffer,
-        pending_daemon: Option<PendingDaemonConnection>,
         cx: &mut Context<Self>,
     ) -> Self {
         let app_config_store = app_config::default_app_config_store();
@@ -1895,6 +1940,7 @@ impl ArborWindow {
                     show_theme_picker: false,
                     settings_modal: None,
                     daemon_auth_modal: None,
+                    pending_remote_daemon_auth: None,
                     start_daemon_modal: false,
                     connect_to_host_modal: None,
                     connection_history: connection_history::load_history(),
@@ -1950,7 +1996,8 @@ impl ArborWindow {
                     welcome_clone_url_active: false,
                     welcome_cloning: false,
                     welcome_clone_error: None,
-                    pending_daemon_connection: None,
+                    remote_daemon_states: HashMap::new(),
+                    active_remote_worktree: None,
                 };
 
                 return app;
@@ -1975,15 +2022,10 @@ impl ArborWindow {
             tracing::warn!(%error, "failed to load daemon session metadata");
             notice_parts.push(format!("failed to load daemon session metadata: {error}"));
         }
-        // When opening a window for a remote daemon, skip the local daemon connection entirely.
-        let skip_local_daemon = pending_daemon.is_some();
         let daemon_base_url =
             daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
-        let mut terminal_daemon = if skip_local_daemon {
-            tracing::info!("skipping local daemon connection (remote daemon pending)");
-            None
-        } else {
-            tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
+        tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
+        let mut terminal_daemon =
             match terminal_daemon_http::default_terminal_daemon_client(&daemon_base_url) {
                 Ok(client) => Some(client),
                 Err(error) => {
@@ -1991,78 +2033,69 @@ impl ArborWindow {
                     notice_parts.push(format!("invalid daemon_url `{daemon_base_url}`: {error}"));
                     None
                 },
-            }
-        };
-        let (initial_daemon_records, attach_daemon_runtime) = if skip_local_daemon {
-            (Vec::new(), false)
-        } else if let Some(daemon) = terminal_daemon.as_ref() {
-            match daemon.list_sessions() {
-                Ok(records) => {
-                    // Check for version mismatch on local daemons and restart if needed.
-                    if daemon_url_is_local(&daemon_base_url) {
-                        if let Some((records, restarted)) =
-                            check_daemon_version_and_restart(daemon, &daemon_base_url)
-                        {
-                            if let Some(new_daemon) = restarted {
-                                terminal_daemon = Some(new_daemon);
+            };
+        let (initial_daemon_records, attach_daemon_runtime) =
+            if let Some(daemon) = terminal_daemon.as_ref() {
+                match daemon.list_sessions() {
+                    Ok(records) => {
+                        // Check for version mismatch on local daemons and restart if needed.
+                        if daemon_url_is_local(&daemon_base_url) {
+                            if let Some((records, restarted)) =
+                                check_daemon_version_and_restart(daemon, &daemon_base_url)
+                            {
+                                if let Some(new_daemon) = restarted {
+                                    terminal_daemon = Some(new_daemon);
+                                }
+                                (records, true)
+                            } else {
+                                (records, true)
                             }
-                            (records, true)
                         } else {
                             (records, true)
                         }
-                    } else {
-                        (records, true)
-                    }
-                },
-                Err(error) => {
-                    let error_text = error.to_string();
-                    if daemon_error_is_connection_refused(&error_text) {
-                        tracing::debug!("daemon not running, attempting auto-start");
-                        if let Some(started) = try_auto_start_daemon(&daemon_base_url) {
-                            let records = started.list_sessions().unwrap_or_default();
-                            terminal_daemon = Some(started);
-                            (records, true)
+                    },
+                    Err(error) => {
+                        let error_text = error.to_string();
+                        if daemon_error_is_connection_refused(&error_text) {
+                            tracing::debug!("daemon not running, attempting auto-start");
+                            if let Some(started) = try_auto_start_daemon(&daemon_base_url) {
+                                let records = started.list_sessions().unwrap_or_default();
+                                terminal_daemon = Some(started);
+                                (records, true)
+                            } else {
+                                tracing::debug!("auto-start failed, falling back to cold restore");
+                                terminal_daemon = None;
+                                let cold_records = daemon_session_store.load().unwrap_or_default();
+                                (cold_records, false)
+                            }
                         } else {
-                            tracing::debug!("auto-start failed, falling back to cold restore");
-                            terminal_daemon = None;
-                            let cold_records = daemon_session_store.load().unwrap_or_default();
-                            (cold_records, false)
+                            notice_parts.push(format!(
+                                "failed to list terminal sessions from daemon at {}: {error}",
+                                daemon.base_url()
+                            ));
+                            (Vec::new(), false)
                         }
-                    } else {
-                        notice_parts.push(format!(
-                            "failed to list terminal sessions from daemon at {}: {error}",
-                            daemon.base_url()
-                        ));
-                        (Vec::new(), false)
-                    }
-                },
-            }
-        } else {
-            (Vec::new(), false)
-        };
+                    },
+                }
+            } else {
+                (Vec::new(), false)
+            };
 
         let repository_store_file_exists = repository_store.has_store_file();
         let mut loaded_entries_were_empty = false;
-        // Skip loading local repositories for remote daemon windows — the remote
-        // daemon provides its own repos/worktrees via the API.
-        let mut repositories = if skip_local_daemon {
-            Vec::new()
-        } else {
-            match repository_store.load_entries() {
-                Ok(entries) => {
-                    loaded_entries_were_empty = entries.is_empty();
-                    repository_store::resolve_repositories_from_entries(entries)
-                },
-                Err(error) => {
-                    notice_parts.push(format!("failed to load saved repositories: {error}"));
-                    Vec::new()
-                },
-            }
+        let mut repositories = match repository_store.load_entries() {
+            Ok(entries) => {
+                loaded_entries_were_empty = entries.is_empty();
+                repository_store::resolve_repositories_from_entries(entries)
+            },
+            Err(error) => {
+                notice_parts.push(format!("failed to load saved repositories: {error}"));
+                Vec::new()
+            },
         };
         let mut persist_repositories = false;
 
-        if !skip_local_daemon
-            && let Some(ref root) = repo_root
+        if let Some(ref root) = repo_root
             && !repositories
                 .iter()
                 .any(|repository| repository.contains_checkout_root(root))
@@ -2218,6 +2251,7 @@ impl ArborWindow {
             show_theme_picker: false,
             settings_modal: None,
             daemon_auth_modal: None,
+            pending_remote_daemon_auth: None,
             start_daemon_modal: false,
             connect_to_host_modal: None,
             connection_history: connection_history::load_history(),
@@ -2273,7 +2307,8 @@ impl ArborWindow {
             welcome_clone_url_active: false,
             welcome_cloning: false,
             welcome_clone_error: None,
-            pending_daemon_connection: pending_daemon,
+            remote_daemon_states: HashMap::new(),
+            active_remote_worktree: None,
         };
 
         app.refresh_worktrees(cx);
@@ -2290,11 +2325,6 @@ impl ArborWindow {
         app.start_mdns_browser(cx);
         app.ensure_claude_code_hooks(cx);
         app.ensure_pi_agent_extension(cx);
-
-        if let Some(pending) = app.pending_daemon_connection.take() {
-            tracing::info!(url = %pending.url, label = ?pending.label, "connecting to pending remote daemon");
-            app.connect_to_daemon_url(&pending.url, pending.label, cx);
-        }
 
         app
     }
@@ -2477,7 +2507,13 @@ impl ArborWindow {
                                     this.discovered_daemons.retain(|d| d.instance_name != name);
                                     if this.discovered_daemons.len() != before {
                                         changed = true;
-                                        // Clear selection if removed
+                                        // Rebuild remote_daemon_states with new indices
+                                        let new_states: HashMap<usize, RemoteDaemonState> = this
+                                            .remote_daemon_states
+                                            .drain()
+                                            .filter(|(idx, _)| *idx < this.discovered_daemons.len())
+                                            .collect();
+                                        this.remote_daemon_states = new_states;
                                         if let Some(idx) = this.active_discovered_daemon
                                             && idx >= this.discovered_daemons.len()
                                         {
@@ -3458,6 +3494,9 @@ impl ArborWindow {
     }
 
     fn selected_worktree_path(&self) -> Option<&Path> {
+        if let Some(ref arw) = self.active_remote_worktree {
+            return Some(arw.worktree_path.as_path());
+        }
         if let Some(outpost_index) = self.active_outpost_index {
             return self
                 .outposts
@@ -4662,6 +4701,7 @@ impl ArborWindow {
         self.worktree_context_menu = None;
         self._hover_show_task = None;
         self.worktree_hover_popover = None;
+        self.active_remote_worktree = None;
         if let Some(worktree) = self.worktrees.get(index) {
             tracing::info!(worktree = %worktree.path.display(), branch = %worktree.branch, "switching worktree");
         }
@@ -4807,69 +4847,246 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn connect_to_discovered_daemon(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn open_remote_create_modal(
+        &mut self,
+        daemon_url: String,
+        hostname: String,
+        repo_root: String,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(
+            url = %daemon_url,
+            host = %hostname,
+            repo = %repo_root,
+            "opening create modal on remote daemon"
+        );
+        connection_history::record_connection(&daemon_url, Some(&hostname));
+        self.connection_history = connection_history::load_history();
+        let connected = self.connect_to_daemon_endpoint(&daemon_url, Some(hostname), None, cx);
+        if connected {
+            // Find the repo in the now-refreshed list by root path
+            if let Some(repo_index) = self
+                .repositories
+                .iter()
+                .position(|r| r.root.to_string_lossy().ends_with(&repo_root))
+            {
+                self.select_repository(repo_index, cx);
+                self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
+            } else if let Some(repo_index) = self.repositories.first().map(|_| 0) {
+                self.select_repository(repo_index, cx);
+                self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
+            }
+        }
+    }
+
+    fn select_remote_worktree(
+        &mut self,
+        daemon_index: usize,
+        worktree_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.remote_daemon_states.get(&daemon_index) else {
+            return;
+        };
+        let client = Arc::clone(&state.client);
+        let hostname = state.hostname.clone();
+
+        tracing::info!(
+            host = %hostname,
+            path = %worktree_path,
+            "selecting remote worktree (keeping local daemon)"
+        );
+
+        // Deselect local worktree, activate remote
+        let cwd = PathBuf::from(&worktree_path);
+        self.active_worktree_index = None;
+        self.active_outpost_index = None;
+        self.active_remote_worktree = Some(ActiveRemoteWorktree {
+            daemon_index,
+            worktree_path: cwd.clone(),
+        });
+        let has_terminal = self
+            .terminals
+            .iter()
+            .any(|session| session.worktree_path == cwd);
+        if has_terminal {
+            // Already have a terminal for this remote worktree, just activate it
+            if let Some(session_id) = self.active_terminal_id_for_worktree(&cwd) {
+                self.active_terminal_by_worktree.insert(cwd, session_id);
+            }
+        } else {
+            // Spawn a new terminal session on the remote daemon
+            let session_id = self.next_terminal_id;
+            self.next_terminal_id += 1;
+            self.active_terminal_by_worktree
+                .insert(cwd.clone(), session_id);
+
+            let shell = match env::var("SHELL") {
+                Ok(value) if !value.trim().is_empty() => value,
+                _ => "/bin/zsh".to_owned(),
+            };
+
+            let mut session = TerminalSession {
+                id: session_id,
+                daemon_session_id: session_id.to_string(),
+                worktree_path: cwd.clone(),
+                title: format!("term-{session_id}"),
+                last_command: None,
+                pending_command: String::new(),
+                command: String::new(),
+                state: TerminalState::Running,
+                exit_code: None,
+                updated_at_unix_ms: current_unix_timestamp_millis(),
+                cols: 120,
+                rows: 35,
+                generation: 0,
+                output: String::new(),
+                styled_output: Vec::new(),
+                cursor: None,
+                modes: TerminalModes::default(),
+                last_runtime_sync_at: None,
+                runtime: None,
+            };
+
+            match client.create_or_attach(CreateOrAttachRequest {
+                session_id: String::new(),
+                workspace_id: cwd.display().to_string(),
+                cwd: cwd.clone(),
+                shell,
+                cols: 120,
+                rows: 35,
+                title: Some(session.title.clone()),
+                command: None,
+            }) {
+                Ok(response) => {
+                    let daemon_session = response.session;
+                    session.daemon_session_id = daemon_session.session_id.clone();
+                    session.title = daemon_session
+                        .title
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(session.title);
+                    session.last_command = daemon_session.last_command.clone();
+                    session.command = daemon_session.shell.clone();
+                    session.output = daemon_session.output_tail.clone().unwrap_or_default();
+                    session.state = terminal_state_from_daemon_record(&daemon_session);
+                    session.exit_code = daemon_session.exit_code;
+                    session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
+                    session.cols = daemon_session.cols.max(2);
+                    session.rows = daemon_session.rows.max(1);
+                    session.runtime = Some(local_daemon_runtime(
+                        client,
+                        daemon_session.session_id.clone(),
+                    ));
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "failed to create remote terminal session");
+                    self.notice = Some(format!("failed to create terminal on {hostname}: {error}"));
+                },
+            }
+
+            self.terminals.push(session);
+        }
+
+        self.terminal_scroll_handle.scroll_to_bottom();
+        window.focus(&self.terminal_focus);
+        cx.notify();
+    }
+
+    fn toggle_discovered_daemon(&mut self, index: usize, cx: &mut Context<Self>) {
+        // If already expanded, collapse it
+        if let Some(state) = self.remote_daemon_states.get(&index) {
+            if state.expanded {
+                if let Some(s) = self.remote_daemon_states.get_mut(&index) {
+                    s.expanded = false;
+                }
+                cx.notify();
+                return;
+            }
+            // If collapsed but already fetched, just re-expand
+            if !state.repositories.is_empty() || !state.worktrees.is_empty() {
+                if let Some(s) = self.remote_daemon_states.get_mut(&index) {
+                    s.expanded = true;
+                }
+                cx.notify();
+                return;
+            }
+        }
+
         let Some(daemon) = self.discovered_daemons.get(index) else {
             return;
         };
         let url = daemon.base_url();
-        let label = daemon.display_name().to_owned();
-        tracing::info!(
-            url = %url,
-            name = %label,
-            host = %daemon.host,
-            has_auth = daemon.has_auth,
-            "opening new window for discovered LAN daemon"
-        );
-        connection_history::record_connection(&url, Some(&label));
-        self.connection_history = connection_history::load_history();
+        let hostname = daemon.display_name().to_owned();
 
-        let pending = PendingDaemonConnection {
-            url,
-            label: Some(label.clone()),
+        // Create HTTP client for the remote daemon
+        let client = match terminal_daemon_http::HttpTerminalDaemon::new(&url) {
+            Ok(c) => Arc::new(c),
+            Err(err) => {
+                tracing::error!(%err, %url, "failed to create HTTP client for LAN daemon");
+                return;
+            },
         };
-        let title: SharedString = format!("Arbor — {label}").into();
-        cx.spawn(async move |_this, cx| {
-            tracing::info!("spawn: about to open new window for LAN daemon");
-            let result = cx.update(|cx| {
-                tracing::info!("inside cx.update: opening window");
-                let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
-                cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        window_min_size: Some(size(px(1180.), px(760.))),
-                        app_id: Some("so.pen.arbor".to_owned()),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some(title),
-                            appears_transparent: true,
-                            traffic_light_position: Some(point(px(9.), px(9.))),
-                        }),
-                        window_decorations: Some(WindowDecorations::Client),
-                        ..Default::default()
+
+        // Apply stored auth token if we have one
+        if let Some(token) = self.daemon_auth_tokens.get(&url) {
+            client.set_auth_token(Some(token.clone()));
+        }
+
+        tracing::info!(%url, name = %hostname, "fetching repos/worktrees from LAN daemon");
+
+        self.remote_daemon_states.insert(index, RemoteDaemonState {
+            client: Arc::clone(&client),
+            hostname: hostname.clone(),
+            repositories: Vec::new(),
+            worktrees: Vec::new(),
+            loading: true,
+            expanded: true,
+            error: None,
+        });
+        cx.notify();
+
+        // Fetch repos and worktrees in background
+        let client_clone = Arc::clone(&client);
+        let url_clone = url.clone();
+        cx.spawn(async move |this, cx| {
+            let (repos, worktrees, error, needs_auth) = {
+                let repos = client_clone.list_repositories();
+                let worktrees = client_clone.list_worktrees();
+                match (repos, worktrees) {
+                    (Ok(r), Ok(w)) => (r, w, None, false),
+                    (Err(e), _) | (_, Err(e)) => {
+                        let needs_auth = e.is_unauthorized();
+                        tracing::warn!(%e, needs_auth, "failed to fetch from LAN daemon");
+                        (Vec::new(), Vec::new(), Some(format!("{e}")), needs_auth)
                     },
-                    |_window: &mut Window, cx: &mut App| {
-                        cx.new(|cx| {
-                            ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
-                                ui_state_store::UiState::default(),
-                                log_layer::LogBuffer::new(),
-                                Some(pending),
-                                cx,
-                            )
-                        })
-                    },
-                )
+                }
+            };
+
+            let _ = cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    if let Some(state) = this.remote_daemon_states.get_mut(&index) {
+                        state.repositories = repos;
+                        state.worktrees = worktrees;
+                        state.loading = false;
+                        state.error = error;
+                    }
+                    if needs_auth {
+                        this.daemon_auth_modal = Some(DaemonAuthModal {
+                            daemon_url: url_clone,
+                            token: String::new(),
+                            token_cursor: 0,
+                            error: None,
+                        });
+                        // Track which daemon index needs auth so we can retry
+                        this.pending_remote_daemon_auth = Some(index);
+                    }
+                    cx.notify();
+                })
             });
-            match result {
-                Ok(Ok(_)) => tracing::info!("new LAN daemon window opened successfully"),
-                Ok(Err(error)) => tracing::error!(%error, "failed to open window for LAN daemon"),
-                Err(error) => tracing::error!(%error, "cx.update failed for LAN daemon window"),
-            }
         })
         .detach();
-    }
-
-    fn connect_to_daemon_url(&mut self, url: &str, label: Option<String>, cx: &mut Context<Self>) {
-        self.stop_active_ssh_daemon_tunnel();
-        let _ = self.connect_to_daemon_endpoint(url, label, None, cx);
     }
 
     fn connect_to_ssh_daemon(
@@ -5056,6 +5273,22 @@ impl ArborWindow {
             return;
         }
         let url = modal.daemon_url.clone();
+
+        // Handle remote daemon auth (inline expand)
+        if let Some(daemon_index) = self.pending_remote_daemon_auth.take() {
+            self.daemon_auth_tokens.insert(url.clone(), token.clone());
+            connection_history::save_tokens(&self.daemon_auth_tokens);
+            // Set token on existing client and retry, or re-toggle to fetch
+            if let Some(state) = self.remote_daemon_states.get(&daemon_index) {
+                state.client.set_auth_token(Some(token));
+            }
+            // Clear the state so toggle_discovered_daemon will re-fetch
+            self.remote_daemon_states.remove(&daemon_index);
+            self.toggle_discovered_daemon(daemon_index, cx);
+            return;
+        }
+
+        // Handle local daemon auth
         if let Some(client) = self.terminal_daemon.as_ref() {
             client.set_auth_token(Some(token.clone()));
         }
@@ -7391,7 +7624,7 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.connect_to_discovered_daemon(action.index, cx);
+        self.toggle_discovered_daemon(action.index, cx);
     }
 
     fn action_connect_to_host(
@@ -10478,12 +10711,371 @@ impl ArborWindow {
                                     )
                                 })
                         },
-                    )),
+                    ))
+                    // ── Remote repos from expanded LAN daemons ───────────
+                    .children({
+                        // Build remote repo group elements imperatively so we can use cx.listener()
+                        let mut remote_elements: Vec<AnyElement> = Vec::new();
+                        let mut remote_wt_id = 0_usize;
+                        for (&daemon_index, state) in &self.remote_daemon_states {
+                            if !state.expanded {
+                                continue;
+                            }
+                            let daemon_url = state.client.base_url();
+                            // Show loading placeholder in the repo list
+                            if state.loading {
+                                remote_elements.push(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .h(px(32.))
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .font_family(FONT_MONO)
+                                                        .text_size(px(12.))
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .child("\u{f233}"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(theme.text_disabled))
+                                                        .child(format!("{}@{} — loading…", "", state.hostname)),
+                                                ),
+                                        )
+                                        .into_any_element(),
+                                );
+                                continue;
+                            }
+                            if let Some(ref err) = state.error {
+                                remote_elements.push(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0xe06c75_u32))
+                                                .child(format!("{}@{}: {err}", "", state.hostname)),
+                                        )
+                                        .into_any_element(),
+                                );
+                                continue;
+                            }
+                            for repo in &state.repositories {
+                                let repo_label = format!("{}@{}", repo.label, state.hostname);
+                                let repo_wts: Vec<_> = state
+                                    .worktrees
+                                    .iter()
+                                    .filter(|w| w.repo_root == repo.root)
+                                    .collect();
+                                let wt_count = repo_wts.len();
+
+                                // Build worktree row elements
+                                let mut wt_rows: Vec<AnyElement> = Vec::new();
+                                for wt in &repo_wts {
+                                    let branch = wt.branch.clone();
+                                    let dir_label = wt.path.rsplit('/').next()
+                                        .unwrap_or(&wt.path).to_owned();
+                                    let additions = wt.diff_additions.unwrap_or(0);
+                                    let deletions = wt.diff_deletions.unwrap_or(0);
+                                    let has_diff = additions > 0 || deletions > 0;
+                                    let pr_number = wt.pr_number;
+                                    let last_activity = wt.last_activity_unix_ms;
+                                    let click_path = wt.path.clone();
+                                    let row_id = remote_wt_id;
+                                    remote_wt_id += 1;
+                                    let is_active = self.active_remote_worktree.as_ref().is_some_and(
+                                        |arw| arw.daemon_index == daemon_index && arw.worktree_path == Path::new(&wt.path),
+                                    );
+
+                                    wt_rows.push(
+                                        div()
+                                            .id(("remote-wt-row", row_id))
+                                            .font_family(FONT_MONO)
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .on_click(cx.listener(
+                                                move |this, _, window, cx| {
+                                                    this.select_remote_worktree(
+                                                        daemon_index,
+                                                        click_path.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
+                                            .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .rounded_sm()
+                                                .border_1()
+                                                .border_color(rgb(if is_active { theme.accent } else { theme.border }))
+                                                .bg(rgb(theme.panel_bg))
+                                                .px_2()
+                                                .py_1()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(4.))
+                                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                                .when(is_active, |this| {
+                                                    this.bg(rgb(theme.panel_active_bg))
+                                                        .border_color(rgb(theme.accent))
+                                                })
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(18.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(16.))
+                                                    .text_color(rgb(theme.text_muted))
+                                                    .child("\u{e725}"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(1.))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(2.))
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .overflow_hidden()
+                                                            .whitespace_nowrap()
+                                                            .text_ellipsis()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(rgb(theme.text_primary))
+                                                            .child(branch),
+                                                    )
+                                                    .child({
+                                                        let mut right = div()
+                                                            .flex_none()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_1();
+                                                        if has_diff {
+                                                            if additions > 0 {
+                                                                right = right.child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(0x72d69c))
+                                                                        .child(format!("+{additions}")),
+                                                                );
+                                                            }
+                                                            if deletions > 0 {
+                                                                right = right.child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(0xeb6f92))
+                                                                        .child(format!("-{deletions}")),
+                                                                );
+                                                            }
+                                                        }
+                                                        if let Some(activity_ms) = last_activity {
+                                                            right = right.child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(theme.text_disabled))
+                                                                    .child(format_relative_time(activity_ms)),
+                                                            );
+                                                        }
+                                                        right
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .overflow_hidden()
+                                                            .whitespace_nowrap()
+                                                            .text_ellipsis()
+                                                            .text_xs()
+                                                            .text_color(rgb(theme.text_disabled))
+                                                            .child(dir_label),
+                                                    )
+                                                    .when_some(pr_number, |el, pr_num| {
+                                                        el.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .text_xs()
+                                                                .text_color(rgb(theme.accent))
+                                                                .child(format!("#{pr_num}")),
+                                                        )
+                                                    }),
+                                            )
+                                            ) // text column
+                                            ) // bordered cell
+                                            .when(!is_active, |el| el.opacity(0.8))
+                                            .into_any_element(),
+                                    );
+                                }
+
+                                // Repo header + worktree rows
+                                let avatar_url = repo.avatar_url.clone();
+                                let icon: AnyElement = if let Some(url) = avatar_url {
+                                    div()
+                                        .flex_none()
+                                        .size(px(20.))
+                                        .rounded_sm()
+                                        .overflow_hidden()
+                                        .child(
+                                            img(url)
+                                                .size_full()
+                                                .rounded_sm()
+                                                .with_fallback(move || {
+                                                    div()
+                                                        .size_full()
+                                                        .font_family(FONT_MONO)
+                                                        .text_size(px(12.))
+                                                        .text_color(rgb(theme.text_muted))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .child("\u{f233}")
+                                                        .into_any_element()
+                                                }),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex_none()
+                                        .font_family(FONT_MONO)
+                                        .text_size(px(12.))
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("\u{f233}")
+                                        .into_any_element()
+                                };
+
+                                // "+" button to create worktree on remote
+                                let plus_url = daemon_url.clone();
+                                let plus_hostname = state.hostname.clone();
+                                let plus_repo_root = repo.root.clone();
+                                let plus_id = remote_wt_id;
+                                remote_wt_id += 1;
+
+                                remote_elements.push(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .h(px(32.))
+                                                .child(icon)
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .flex_1()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .text_size(px(16.))
+                                                                        .text_color(rgb(theme.text_muted))
+                                                                        .w(px(14.))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .child("\u{25BE}"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .whitespace_nowrap()
+                                                                        .text_ellipsis()
+                                                                        .text_sm()
+                                                                        .font_weight(FontWeight::MEDIUM)
+                                                                        .text_color(rgb(theme.text_primary))
+                                                                        .child(repo_label),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_sm()
+                                                                        .text_color(rgb(theme.text_disabled))
+                                                                        .child(format!("{wt_count}")),
+                                                                ),
+                                                        )
+                                                        // "+" button
+                                                        .child(
+                                                            div()
+                                                                .id(("remote-repo-add-wt", plus_id))
+                                                                .size(px(20.))
+                                                                .rounded_sm()
+                                                                .cursor_pointer()
+                                                                .flex_none()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .text_sm()
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(rgb(theme.text_muted))
+                                                                .child("+")
+                                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                                    this.open_remote_create_modal(
+                                                                        plus_url.clone(),
+                                                                        plus_hostname.clone(),
+                                                                        plus_repo_root.clone(),
+                                                                        cx,
+                                                                    );
+                                                                    cx.stop_propagation();
+                                                                })),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(6.))
+                                                .children(wt_rows),
+                                        )
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                        remote_elements
+                    }),
             )
             // ── LAN Daemons section ──────────────────────────────────────
             .when(!self.discovered_daemons.is_empty(), |pane| {
                 let daemons = self.discovered_daemons.clone();
-                let active_idx = self.active_discovered_daemon;
                 pane.child(div().h(px(1.)).bg(rgb(theme.border)))
                     .child(
                         div()
@@ -10515,91 +11107,109 @@ impl ArborWindow {
                             )
                             .children(daemons.into_iter().enumerate().map(
                                 |(daemon_index, daemon)| {
-                                    let is_active = active_idx == Some(daemon_index);
-                                    let display_name =
-                                        daemon.display_name().to_owned();
-                                    let subtitle = format!(
-                                        "{}:{}",
-                                        daemon.display_name(),
-                                        daemon.port,
-                                    );
-                                    div()
-                                        .id(("lan-daemon-row", daemon_index))
-                                        .cursor_pointer()
+                                    let remote_state = self.remote_daemon_states.get(&daemon_index);
+                                    let is_expanded = remote_state.is_some_and(|s| s.expanded);
+                                    let is_loading = remote_state.is_some_and(|s| s.loading);
+                                    let display_name = daemon.display_name().to_owned();
+                                    let chevron = if is_expanded { "\u{f078}" } else { "\u{f054}" };
+                                    let mut col = div()
                                         .flex()
-                                        .items_center()
-                                        .on_click(cx.listener(
-                                            move |this, _, _, cx| {
-                                                this.connect_to_discovered_daemon(
-                                                    daemon_index,
-                                                    cx,
-                                                );
-                                            },
-                                        ))
+                                        .flex_col()
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .rounded_sm()
-                                                .border_1()
-                                                .border_color(rgb(if is_active {
-                                                    theme.accent
-                                                } else {
-                                                    theme.border
-                                                }))
-                                                .bg(rgb(if is_active {
-                                                    theme.panel_active_bg
-                                                } else {
-                                                    theme.panel_bg
-                                                }))
-                                                .px_2()
-                                                .py_1()
+                                                .id(("lan-daemon-row", daemon_index))
+                                                .cursor_pointer()
                                                 .flex()
-                                                .flex_row()
                                                 .items_center()
-                                                .gap(px(4.))
-                                                // Status dot
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .w(px(18.))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .font_family(FONT_MONO)
-                                                        .text_size(px(18.))
-                                                        .text_color(rgb(theme.accent))
-                                                        .child("\u{f233}"), // server icon
-                                                )
-                                                // Two-line text
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.toggle_discovered_daemon(
+                                                            daemon_index,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
                                                 .child(
                                                     div()
                                                         .flex_1()
                                                         .min_w_0()
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(rgb(if is_expanded {
+                                                            theme.accent
+                                                        } else {
+                                                            theme.border
+                                                        }))
+                                                        .bg(rgb(if is_expanded {
+                                                            theme.panel_active_bg
+                                                        } else {
+                                                            theme.panel_bg
+                                                        }))
+                                                        .px_2()
+                                                        .py_1()
                                                         .flex()
-                                                        .flex_col()
-                                                        .gap(px(1.))
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap(px(4.))
                                                         .child(
                                                             div()
-                                                                .text_xs()
-                                                                .font_weight(
-                                                                    FontWeight::SEMIBOLD,
-                                                                )
-                                                                .text_color(rgb(
-                                                                    theme.text_primary,
-                                                                ))
-                                                                .child(display_name),
+                                                                .flex_none()
+                                                                .w(px(12.))
+                                                                .font_family(FONT_MONO)
+                                                                .text_size(px(10.))
+                                                                .text_color(rgb(theme.text_muted))
+                                                                .child(chevron),
                                                         )
                                                         .child(
                                                             div()
+                                                                .flex_none()
+                                                                .w(px(18.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .font_family(FONT_MONO)
+                                                                .text_size(px(18.))
+                                                                .text_color(rgb(theme.accent))
+                                                                .child("\u{f233}"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
                                                                 .text_xs()
-                                                                .text_color(rgb(
-                                                                    theme.text_disabled,
-                                                                ))
-                                                                .child(subtitle),
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(rgb(theme.text_primary))
+                                                                .child(display_name),
                                                         ),
                                                 ),
-                                        )
+                                        );
+
+                                    // Loading/error status below the toggle
+                                    if let Some(state) = remote_state
+                                        && state.expanded
+                                    {
+                                        if is_loading {
+                                            col = col.child(
+                                                div()
+                                                    .pl(px(30.))
+                                                    .py_1()
+                                                    .text_xs()
+                                                    .text_color(rgb(theme.text_disabled))
+                                                    .child("Loading…"),
+                                            );
+                                        } else if let Some(ref err) = state.error {
+                                            col = col.child(
+                                                div()
+                                                    .pl(px(30.))
+                                                    .py_1()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xe06c75_u32))
+                                                    .child(err.clone()),
+                                            );
+                                        }
+                                    }
+
+                                    col
                                 },
                             )),
                     )
@@ -14796,7 +15406,7 @@ impl ArborWindow {
                                         .gap(px(6.))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.connect_to_host_modal = None;
-                                            this.connect_to_discovered_daemon(idx, cx);
+                                            this.toggle_discovered_daemon(idx, cx);
                                         }))
                                         .child(
                                             div()
@@ -15825,6 +16435,17 @@ fn daemon_websocket_request(
     Ok(request)
 }
 
+/// Set `TCP_NODELAY` and a short read timeout on the WebSocket's underlying TCP stream
+/// so the read loop can periodically check the write channel without blocking forever.
+fn configure_ws_socket_for_low_latency(
+    socket: &tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+) {
+    if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+        let _ = tcp.set_nodelay(true);
+        let _ = tcp.set_read_timeout(Some(Duration::from_millis(5)));
+    }
+}
+
 fn spawn_daemon_terminal_ws_watcher(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
@@ -15871,15 +16492,34 @@ fn spawn_daemon_terminal_ws_watcher(
 
             match tungstenite::connect(request) {
                 Ok((mut socket, _)) => {
+                    configure_ws_socket_for_low_latency(&socket);
                     ws_state.note_event();
                     reconnect_delay = DAEMON_TERMINAL_WS_RECONNECT_BASE_DELAY;
 
+                    // Set up write channel for low-latency keystroke delivery
+                    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                    ws_state.set_writer(Some(tx));
+                    tracing::debug!(session_id = %session_id, "WS write channel established for keystroke delivery");
+
                     loop {
                         if ws_state.is_closed() {
+                            ws_state.set_writer(None);
                             let _ = socket.close(None);
                             return;
                         }
 
+                        // Drain outgoing keystrokes and send as binary frames
+                        while let Ok(bytes) = rx.try_recv() {
+                            if socket
+                                .send(tungstenite::Message::Binary(bytes.into()))
+                                .is_err()
+                            {
+                                ws_state.set_writer(None);
+                                break;
+                            }
+                        }
+
+                        // Read incoming messages (may timeout quickly due to read timeout)
                         match socket.read() {
                             Ok(tungstenite::Message::Binary(_))
                             | Ok(tungstenite::Message::Text(_)) => {
@@ -15889,7 +16529,14 @@ fn spawn_daemon_terminal_ws_watcher(
                             | Ok(tungstenite::Message::Pong(_))
                             | Ok(tungstenite::Message::Frame(_)) => {},
                             Ok(tungstenite::Message::Close(_)) => {
+                                ws_state.set_writer(None);
                                 break;
+                            },
+                            Err(tungstenite::Error::Io(ref e))
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                // Read timeout — expected, loop back to check writes
                             },
                             Err(error) => {
                                 tracing::debug!(
@@ -15897,6 +16544,7 @@ fn spawn_daemon_terminal_ws_watcher(
                                     %error,
                                     "daemon terminal websocket disconnected"
                                 );
+                                ws_state.set_writer(None);
                                 break;
                             },
                         }
@@ -21542,7 +22190,6 @@ fn open_arbor_window(cx: &mut App) {
                 ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                     ui_state_store::UiState::default(),
                     log_layer::LogBuffer::new(),
-                    None,
                     cx,
                 )
             })
@@ -21946,7 +22593,6 @@ fn main() {
                     ArborWindow::load_with_daemon_store::<daemon::JsonDaemonSessionStore>(
                         startup_ui_state,
                         log_buffer,
-                        None,
                         cx,
                     )
                 })
