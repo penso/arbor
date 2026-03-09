@@ -87,7 +87,13 @@ function renderRepoGroup(repo: Repository, worktrees: Worktree[]): HTMLElement {
   // Worktree cards (when not collapsed)
   if (!isCollapsed) {
     const wtList = el("div", "wt-list");
-    for (const wt of worktrees) {
+    const sorted = [...worktrees].sort((a, b) => {
+      if (a.is_primary_checkout !== b.is_primary_checkout) {
+        return a.is_primary_checkout ? -1 : 1;
+      }
+      return 0;
+    });
+    for (const wt of sorted) {
       wtList.append(renderWorktreeCard(wt, repo));
     }
     group.append(wtList);
@@ -176,12 +182,9 @@ function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
     line1.append(el("span", "wt-age", formatAge(wt.last_activity_unix_ms)));
   }
 
-  // Line 2: path + primary badge
+  // Line 2: path
   const line2 = el("div", "wt-line2");
   line2.append(el("span", "wt-path", shortPath(wt.path)));
-  if (wt.is_primary_checkout) {
-    line2.append(el("span", "wt-badge", "primary"));
-  }
 
   info.append(line1, line2);
   card.append(branchIcon, info);

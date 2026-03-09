@@ -255,19 +255,6 @@
   min-width: 0;
 }
 
-.wt-badge {
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-faint);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 0 4px;
-  flex-shrink: 0;
-}
-
 /* ── Stack (managed processes) ── */
 
 .stack-section {
