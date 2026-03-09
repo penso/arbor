@@ -108,8 +108,8 @@ jobs:
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-apple-darwin
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target aarch64-apple-darwin
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target x86_64-apple-darwin
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server --target aarch64-apple-darwin
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server --target x86_64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server,vendored-openssl --target aarch64-apple-darwin
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server,vendored-openssl --target x86_64-apple-darwin
       - name: Build web UI assets
         working-directory: crates/arbor-web-ui/app
         run: npm ci --no-audit --no-fund && npm run build
@@ -318,7 +318,7 @@ jobs:
           fi
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target "$TARGET"
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target "$TARGET"
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server --target "$TARGET"
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server,vendored-openssl --target "$TARGET"
       - name: Build web UI assets
         working-directory: crates/arbor-web-ui/app
         run: npm ci --no-audit --no-fund && npm run build
@@ -357,7 +357,7 @@ jobs:
         run: |
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-gui --features vendored-openssl --target x86_64-pc-windows-msvc
           cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-httpd --features vendored-openssl --target x86_64-pc-windows-msvc
-          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server --target x86_64-pc-windows-msvc
+          cargo +${{ env.NIGHTLY_TOOLCHAIN }} build --locked --release -p arbor-mcp --features stdio-server,vendored-openssl --target x86_64-pc-windows-msvc
       - name: Build web UI assets
         working-directory: crates/arbor-web-ui/app
         run: npm ci --no-audit --no-fund && npm run build

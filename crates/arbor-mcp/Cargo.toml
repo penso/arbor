@@ -16,6 +16,7 @@ required-features = ["stdio-server"]
 [features]
 default = ["stdio-server"]
 stdio-server = []
+vendored-openssl = ["arbor-core/vendored-openssl"]
 
 [dependencies]
 anyhow = { workspace = true }
