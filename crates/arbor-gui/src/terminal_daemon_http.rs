@@ -72,6 +72,11 @@ struct ApiError {
     error: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct HealthInfo {
+    pub version: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CreateTerminalRequest {
     session_id: Option<String>,
@@ -234,6 +239,16 @@ impl HttpTerminalDaemon {
         self.decode_json_response(response, &[200])
     }
 
+    pub fn health(&self) -> Result<HealthInfo, HttpTerminalDaemonError> {
+        let response = self.send_empty("GET", &format!("{API_PATH_PREFIX}/health"))?;
+        self.decode_json_response(response, &[200])
+    }
+
+    pub fn shutdown(&self) -> Result<(), HttpTerminalDaemonError> {
+        let response = self.send_empty("POST", &format!("{API_PATH_PREFIX}/shutdown"))?;
+        self.expect_status(response, &[200])
+    }
+
     fn send_empty(
         &self,
         method: &str,
@@ -372,6 +387,8 @@ pub trait TerminalDaemonClient: Send + Sync {
         request: SnapshotRequest,
     ) -> Result<Option<TerminalSnapshot>, HttpTerminalDaemonError>;
     fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, HttpTerminalDaemonError>;
+    fn health(&self) -> Result<HealthInfo, HttpTerminalDaemonError>;
+    fn shutdown(&self) -> Result<(), HttpTerminalDaemonError>;
 }
 
 impl TerminalDaemonClient for HttpTerminalDaemon {
@@ -419,6 +436,14 @@ impl TerminalDaemonClient for HttpTerminalDaemon {
 
     fn list_sessions(&self) -> Result<Vec<DaemonSessionRecord>, HttpTerminalDaemonError> {
         HttpTerminalDaemon::list_sessions(self)
+    }
+
+    fn health(&self) -> Result<HealthInfo, HttpTerminalDaemonError> {
+        HttpTerminalDaemon::health(self)
+    }
+
+    fn shutdown(&self) -> Result<(), HttpTerminalDaemonError> {
+        HttpTerminalDaemon::shutdown(self)
     }
 }
 

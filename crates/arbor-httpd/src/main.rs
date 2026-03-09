@@ -27,8 +27,9 @@ use {
             Path as AxumPath, Query, State,
             ws::{Message, WebSocket, WebSocketUpgrade},
         },
+        handler::HandlerWithoutStateExt,
         http::StatusCode,
-        response::{Html, IntoResponse, Response},
+        response::{IntoResponse, Response},
         routing::{delete, get, post},
     },
     futures_util::StreamExt,
@@ -42,7 +43,12 @@ use {
         time::{SystemTime, UNIX_EPOCH},
     },
     tokio::sync::Mutex,
-    tower_http::services::{ServeDir, ServeFile},
+    tower_http::services::ServeDir,
+};
+
+const HTTPD_VERSION: &str = match option_env!("ARBOR_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
 };
 
 const AGENT_SESSION_EXPIRY_SECS: u64 = 300;
@@ -77,6 +83,7 @@ struct AppState {
     agent_broadcast: tokio::sync::broadcast::Sender<AgentWsEvent>,
     pr_cache: Arc<Mutex<HashMap<String, PrCacheEntry>>>,
     repo_cache: Arc<Mutex<HashMap<String, RepoCacheEntry>>>,
+    shutdown_signal: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +125,7 @@ type ApiResponse = Result<Response, (StatusCode, Json<ApiError>)>;
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
+    version: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -270,6 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_broadcast,
         pr_cache: Arc::new(Mutex::new(HashMap::new())),
         repo_cache: Arc::new(Mutex::new(HashMap::new())),
+        shutdown_signal: Arc::new(tokio::sync::Notify::new()),
     };
 
     // Spawn background task to monitor process lifecycle
@@ -297,10 +306,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let app = router(
-        state,
-        web_ui_result.is_ok() && arbor_web_ui::dist_is_built(),
-    );
+    let shutdown_signal = state.shutdown_signal.clone();
+    let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -321,7 +328,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { shutdown_signal.notified().await })
+        .await?;
 
     Ok(())
 }
@@ -332,7 +341,7 @@ fn resolve_bind_addr() -> Result<SocketAddr, Box<dyn std::error::Error>> {
     Ok(parsed)
 }
 
-fn router(state: AppState, web_ui_available: bool) -> Router {
+fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/repositories", get(list_repositories))
@@ -357,22 +366,42 @@ fn router(state: AppState, web_ui_available: bool) -> Router {
         .route("/processes/{name}/start", post(start_process))
         .route("/processes/{name}/stop", post(stop_process))
         .route("/processes/{name}/restart", post(restart_process))
-        .route("/processes/ws", get(process_status_ws));
+        .route("/processes/ws", get(process_status_ws))
+        .route("/shutdown", post(shutdown_daemon));
 
     let with_state = Router::new().nest("/api/v1", api).with_state(state);
 
-    if !web_ui_available {
-        return with_state.fallback(web_ui_unavailable);
-    }
-
+    // Always set up ServeDir — check for assets dynamically per-request so
+    // that a long-running daemon picks up assets installed after startup
+    // (e.g. an app update while the detached httpd process is still running).
     let dist_dir = arbor_web_ui::dist_dir();
-    let index_path = arbor_web_ui::dist_index_path();
-    with_state
-        .fallback_service(ServeDir::new(dist_dir).not_found_service(ServeFile::new(index_path)))
+    with_state.fallback_service(
+        ServeDir::new(dist_dir).not_found_service(web_ui_spa_or_unavailable.into_service()),
+    )
 }
 
 async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
+    Json(HealthResponse {
+        status: "ok",
+        version: HTTPD_VERSION,
+    })
+}
+
+async fn shutdown_daemon(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    if !addr.ip().is_loopback() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "shutdown is only allowed from localhost".to_owned(),
+            }),
+        ));
+    }
+    eprintln!("shutdown requested from {addr}, shutting down");
+    state.shutdown_signal.notify_one();
+    Ok(StatusCode::OK)
 }
 
 async fn list_repositories(State(state): State<AppState>) -> ApiResult<Vec<RepositoryDto>> {
@@ -965,13 +994,31 @@ async fn send_ws_json(socket: &mut WebSocket, value: &impl Serialize) -> Result<
         .map_err(|_| ())
 }
 
-async fn web_ui_unavailable() -> (StatusCode, Html<&'static str>) {
-    (
-        StatusCode::NOT_FOUND,
-        Html(
-            "<h1>Arbor Web UI assets are not built</h1><p>Run npm install && npm run build in crates/arbor-web-ui/app.</p>",
-        ),
-    )
+/// Dynamic SPA fallback: serves `index.html` if it exists (for client-side
+/// routing), otherwise returns a helpful "not built" message. Checked
+/// per-request so a long-running process picks up assets installed later.
+async fn web_ui_spa_or_unavailable() -> Response {
+    let index_path = arbor_web_ui::dist_index_path();
+    if index_path.is_file()
+        && let Ok(body) = tokio::fs::read(&index_path).await
+        && let Ok(response) = Response::builder()
+            .header("content-type", "text/html; charset=utf-8")
+            .body(axum::body::Body::from(body))
+    {
+        return response;
+    }
+    web_ui_unavailable_response()
+}
+
+fn web_ui_unavailable_response() -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(axum::body::Body::from(
+            "<h1>Arbor Web UI assets are not built</h1>\
+             <p>Run npm install && npm run build in crates/arbor-web-ui/app.</p>",
+        ))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 fn ensure_web_ui_assets() -> Result<(), String> {

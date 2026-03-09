@@ -29,12 +29,6 @@ pub enum CheckStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct CheckItem {
-    pub name: String,
-    pub status: CheckStatus,
-}
-
-#[derive(Debug, Clone)]
 pub struct PrDetails {
     pub number: u64,
     pub title: String,
@@ -44,7 +38,7 @@ pub struct PrDetails {
     pub deletions: usize,
     pub review_decision: ReviewDecision,
     pub checks_status: CheckStatus,
-    pub checks: Vec<CheckItem>,
+    pub checks: Vec<(String, CheckStatus)>,
 }
 
 #[derive(Deserialize)]
@@ -76,7 +70,7 @@ impl GhCheckContext {
         self.name
             .as_deref()
             .or(self.context.as_deref())
-            .unwrap_or("unknown")
+            .unwrap_or("check")
             .to_owned()
     }
 
@@ -123,20 +117,17 @@ fn parse_pr_details(response: GhPrResponse) -> PrDetails {
         _ => ReviewDecision::Pending,
     };
 
-    let checks: Vec<CheckItem> = response
+    let checks: Vec<(String, CheckStatus)> = response
         .status_check_rollup
         .iter()
-        .map(|c| CheckItem {
-            name: c.display_name(),
-            status: c.to_check_status(),
-        })
+        .map(|c| (c.display_name(), c.to_check_status()))
         .collect();
 
     let checks_status = if checks.is_empty() {
         CheckStatus::Pending
-    } else if checks.iter().any(|c| c.status == CheckStatus::Failure) {
+    } else if checks.iter().any(|(_, s)| *s == CheckStatus::Failure) {
         CheckStatus::Failure
-    } else if checks.iter().all(|c| c.status == CheckStatus::Success) {
+    } else if checks.iter().all(|(_, s)| *s == CheckStatus::Success) {
         CheckStatus::Success
     } else {
         CheckStatus::Pending
