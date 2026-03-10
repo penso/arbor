@@ -11,7 +11,8 @@ use {
 
 const CONFIG_RELATIVE_PATH: &str = ".config/arbor/config.toml";
 const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
-# terminal_backend = "embedded" # embedded | alacritty | ghostty
+# terminal_backend = "embedded" # embedded (in-app) | alacritty (external) | ghostty (external)
+# embedded_shell = "/usr/bin/fish"  # shell for embedded terminal (defaults to $SHELL, then /bin/zsh)
 # theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark | dracula | solarized-light | everforest-dark | catppuccin | catppuccin-latte | ethereal | flexoki-light | hackerman | kanagawa | matte-black | miasma | nord | osaka-jade | ristretto | rose-pine | tokyo-night | vantablack | white | retrobox-classic | tokyonight-day | tokyonight-classic | zellner
 # daemon_url = "http://127.0.0.1:8787" # arbor-httpd base URL
 # notifications = true
@@ -57,6 +58,7 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 #[serde(default)]
 pub struct ArborConfig {
     pub terminal_backend: Option<String>,
+    pub embedded_shell: Option<String>,
     pub theme: Option<String>,
     pub daemon_url: Option<String>,
     pub notifications: Option<bool>,

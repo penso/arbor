@@ -1654,6 +1654,7 @@ struct ArborWindow {
     next_terminal_id: u64,
     next_diff_session_id: u64,
     active_backend_kind: TerminalBackendKind,
+    configured_embedded_shell: Option<String>,
     theme_kind: ThemeKind,
     left_pane_width: f32,
     right_pane_width: f32,
@@ -1846,6 +1847,7 @@ impl ArborWindow {
                         ThemeKind::One
                     },
                 };
+                let configured_embedded_shell = loaded_config.config.embedded_shell.clone();
                 let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
                 let remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded_config
                     .config
@@ -1904,6 +1906,7 @@ impl ArborWindow {
                     next_terminal_id: 1,
                     next_diff_session_id: 1,
                     active_backend_kind,
+                    configured_embedded_shell,
                     theme_kind,
                     left_pane_width: startup_ui_state
                         .left_pane_width
@@ -2174,6 +2177,7 @@ impl ArborWindow {
                 ThemeKind::One
             },
         };
+        let configured_embedded_shell = loaded_config.config.embedded_shell.clone();
         let notifications_enabled = loaded_config.config.notifications.unwrap_or(true);
 
         let mut app = Self {
@@ -2217,6 +2221,7 @@ impl ArborWindow {
             next_terminal_id: 1,
             next_diff_session_id: 1,
             active_backend_kind,
+            configured_embedded_shell,
             theme_kind,
             left_pane_width: startup_ui_state
                 .left_pane_width
@@ -2570,6 +2575,11 @@ impl ArborWindow {
             Err(error) => notices.push(error),
         }
 
+        if self.configured_embedded_shell != loaded.config.embedded_shell {
+            self.configured_embedded_shell = loaded.config.embedded_shell.clone();
+            changed = true;
+        }
+
         let next_daemon_base_url = daemon_base_url_from_config(loaded.config.daemon_url.as_deref());
         if self.daemon_base_url != next_daemon_base_url {
             // Remove hooks pointing at the old daemon before switching
@@ -2690,10 +2700,7 @@ impl ArborWindow {
     }
 
     fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
-        let shell = match env::var("SHELL") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => "/bin/zsh".to_owned(),
-        };
+        let shell = self.embedded_shell();
         let updated_at_unix_ms = current_unix_timestamp_millis();
 
         let records: Vec<DaemonSessionRecord> = self
@@ -3998,6 +4005,16 @@ impl ArborWindow {
         self.theme_kind.palette()
     }
 
+    fn embedded_shell(&self) -> String {
+        if let Some(shell) = &self.configured_embedded_shell {
+            return shell.clone();
+        }
+        match env::var("SHELL") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => "/bin/zsh".to_owned(),
+        }
+    }
+
     fn selected_repository(&self) -> Option<&RepositorySummary> {
         self.active_repository_index
             .and_then(|index| self.repositories.get(index))
@@ -5012,10 +5029,7 @@ impl ArborWindow {
             self.active_terminal_by_worktree
                 .insert(cwd.clone(), session_id);
 
-            let shell = match env::var("SHELL") {
-                Ok(value) if !value.trim().is_empty() => value,
-                _ => "/bin/zsh".to_owned(),
-            };
+            let shell = self.embedded_shell();
 
             let mut session = TerminalSession {
                 id: session_id,
@@ -8053,10 +8067,7 @@ impl ArborWindow {
         if backend_kind == TerminalBackendKind::Embedded
             && let Some(daemon) = self.terminal_daemon.as_ref()
         {
-            let shell = match env::var("SHELL") {
-                Ok(value) if !value.trim().is_empty() => value,
-                _ => "/bin/zsh".to_owned(),
-            };
+            let shell = self.embedded_shell();
             match daemon.create_or_attach(CreateOrAttachRequest {
                 session_id: String::new(),
                 workspace_id: cwd.display().to_string(),
