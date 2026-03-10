@@ -19893,7 +19893,8 @@ fn agent_preset_button_content(kind: AgentPresetKind, text_color: u32) -> Div {
     log_preset_icon_render_once(kind);
     let icon = preset_icon_image(kind);
     let icon_size = preset_icon_render_size_px(kind);
-    let icon_slot_size = icon_size.max(14.);
+    // Use consistent slot size for all icons to ensure vertical alignment
+    let icon_slot_size = 20_f32;
     let fallback_color = match kind {
         AgentPresetKind::Claude => 0xD97757,
         AgentPresetKind::Codex
