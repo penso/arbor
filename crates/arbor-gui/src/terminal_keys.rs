@@ -40,19 +40,42 @@ impl TerminalModifiers {
 }
 
 pub fn platform_command_for_keystroke(keystroke: &Keystroke) -> Option<TerminalPlatformCommand> {
-    if !keystroke.modifiers.platform {
-        return None;
+    // macOS: Cmd+C/V
+    #[cfg(target_os = "macos")]
+    {
+        if !keystroke.modifiers.platform {
+            return None;
+        }
+
+        if keystroke.modifiers.control || keystroke.modifiers.alt || keystroke.modifiers.function {
+            return None;
+        }
+
+        if keystroke.key.eq_ignore_ascii_case("c") {
+            return Some(TerminalPlatformCommand::Copy);
+        }
+        if keystroke.key.eq_ignore_ascii_case("v") {
+            return Some(TerminalPlatformCommand::Paste);
+        }
     }
 
-    if keystroke.modifiers.control || keystroke.modifiers.alt || keystroke.modifiers.function {
-        return None;
-    }
+    // Linux/other: Ctrl+Shift+C/V
+    #[cfg(not(target_os = "macos"))]
+    {
+        if !keystroke.modifiers.control || !keystroke.modifiers.shift {
+            return None;
+        }
 
-    if keystroke.key.eq_ignore_ascii_case("c") {
-        return Some(TerminalPlatformCommand::Copy);
-    }
-    if keystroke.key.eq_ignore_ascii_case("v") {
-        return Some(TerminalPlatformCommand::Paste);
+        if keystroke.modifiers.alt || keystroke.modifiers.function || keystroke.modifiers.platform {
+            return None;
+        }
+
+        if keystroke.key.eq_ignore_ascii_case("c") {
+            return Some(TerminalPlatformCommand::Copy);
+        }
+        if keystroke.key.eq_ignore_ascii_case("v") {
+            return Some(TerminalPlatformCommand::Paste);
+        }
     }
 
     None
@@ -67,6 +90,15 @@ pub fn terminal_bytes_from_keystroke(
 
 fn to_esc_str(keystroke: &Keystroke, modes: TerminalModes) -> Option<Cow<'static, str>> {
     if keystroke.modifiers.platform {
+        return None;
+    }
+
+    // On Linux, Ctrl+Shift+C/V are copy/paste - don't send to terminal
+    #[cfg(not(target_os = "macos"))]
+    if keystroke.modifiers.control
+        && keystroke.modifiers.shift
+        && (keystroke.key.eq_ignore_ascii_case("c") || keystroke.key.eq_ignore_ascii_case("v"))
+    {
         return None;
     }
 
@@ -265,9 +297,26 @@ mod tests {
     }
 
     #[test]
-    fn maps_platform_copy_and_paste() {
+    #[cfg(target_os = "macos")]
+    fn maps_platform_copy_and_paste_macos() {
         let copy = parse_keystroke("cmd-c");
         let paste = parse_keystroke("cmd-v");
+
+        assert_eq!(
+            platform_command_for_keystroke(&copy),
+            Some(TerminalPlatformCommand::Copy)
+        );
+        assert_eq!(
+            platform_command_for_keystroke(&paste),
+            Some(TerminalPlatformCommand::Paste)
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn maps_platform_copy_and_paste_linux() {
+        let copy = parse_keystroke("ctrl-shift-c");
+        let paste = parse_keystroke("ctrl-shift-v");
 
         assert_eq!(
             platform_command_for_keystroke(&copy),
@@ -283,6 +332,16 @@ mod tests {
     fn does_not_treat_control_c_as_platform_copy() {
         let control_c = parse_keystroke("ctrl-c");
         assert_eq!(platform_command_for_keystroke(&control_c), None);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn ctrl_shift_c_does_not_send_to_terminal_on_linux() {
+        let ctrl_shift_c = parse_keystroke("ctrl-shift-c");
+        assert_eq!(
+            terminal_bytes_from_keystroke(&ctrl_shift_c, TerminalModes::default()),
+            None
+        );
     }
 
     #[test]
