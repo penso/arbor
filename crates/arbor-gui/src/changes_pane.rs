@@ -490,9 +490,12 @@ impl ArborWindow {
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
+                                                .w_full()
                                                 .text_color(rgb(theme.text_primary))
                                                 .when(is_cursor_line, |this| {
                                                     this.flex()
+                                                        .flex_wrap()
+                                                        .w_full()
                                                         .items_center()
                                                         .child(before)
                                                         .child(input_caret(theme).flex_none())
@@ -502,7 +505,7 @@ impl ArborWindow {
                                                     if line.is_empty() {
                                                         this.child(" ")
                                                     } else {
-                                                        this.child(line.clone())
+                                                        this.flex().flex_wrap().w_full().child(line.clone())
                                                     }
                                                 }),
                                         )

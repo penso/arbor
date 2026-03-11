@@ -745,18 +745,6 @@ impl ArborWindow {
                                                                         );
                                                                     }
                                                                 }
-
-                                                                if !compact_sidebar && !detected_ports.is_empty() {
-                                                                    right = right.child(
-                                                                        div()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(0x72d69c))
-                                                                            .child(worktree_port_badge_text(
-                                                                                &detected_ports[0],
-                                                                            )),
-                                                                    );
-                                                                }
-
                                                                 right
                                                             }),
                                                     )
@@ -1965,6 +1953,7 @@ impl ArborWindow {
                 div()
                     .flex()
                     .items_center()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         div()
@@ -1984,6 +1973,10 @@ impl ArborWindow {
                             .border_1()
                             .border_color(rgb(theme.border))
                             .px_1()
+                            .max_w(px(WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX - 64.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_xs()
                             .text_color(rgb(0x72d69c))
                             .hover(|this| this.bg(rgb(theme.panel_active_bg)))

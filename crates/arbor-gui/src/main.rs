@@ -6270,6 +6270,10 @@ fn detect_ports_for_worktrees(
     terminal_output_hints: &HashMap<PathBuf, String>,
 ) -> HashMap<PathBuf, Vec<DetectedPort>> {
     let mut ports_by_worktree: HashMap<PathBuf, Vec<DetectedPort>> = HashMap::new();
+    let worktrees_with_pid_targets: HashSet<PathBuf> = scan_targets
+        .iter()
+        .map(|target| target.worktree_path.clone())
+        .collect();
     let mut dynamic_paths = Vec::new();
 
     for worktree_path in worktree_paths {
@@ -6313,6 +6317,7 @@ fn detect_ports_for_worktrees(
     for worktree_path in dynamic_paths {
         let current_ports = ports_by_worktree.entry(worktree_path.clone()).or_default();
         if current_ports.is_empty()
+            && !worktrees_with_pid_targets.contains(&worktree_path)
             && let Some(output) = terminal_output_hints.get(&worktree_path)
         {
             current_ports.extend(
