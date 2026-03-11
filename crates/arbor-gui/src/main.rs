@@ -39,7 +39,7 @@ use {
         PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
         TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
         WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, ease_in_out,
-        fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
+        fill, font, img, point, prelude::*, px, rgb, size, svg, uniform_list,
     },
     ropey::Rope,
     std::{
@@ -59,6 +59,70 @@ use {
     },
     theme::{ThemeKind, ThemePalette},
 };
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TopBarIconKind {
+    RemoteControl,
+    GitHub,
+    WorktreeActions,
+    ReportIssue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TopBarIconTone {
+    Muted,
+    Disabled,
+    Connected,
+    Busy,
+}
+
+fn find_assets_root_dir() -> Option<PathBuf> {
+    if let Ok(exe) = env::current_exe() {
+        let exe_dir = exe.parent()?;
+
+        let macos_bundle = exe_dir.parent().map(|p| p.join("Resources"));
+        if let Some(dir) = macos_bundle
+            && dir.is_dir()
+        {
+            return Some(dir);
+        }
+
+        let share_dir = exe_dir.parent().map(|p| p.join("share").join("arbor"));
+        if let Some(dir) = share_dir
+            && dir.is_dir()
+        {
+            return Some(dir);
+        }
+    }
+
+    let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    if dev_dir.is_dir() {
+        return Some(dev_dir);
+    }
+
+    None
+}
+
+fn find_asset_dir(relative_subdir: &str) -> Option<PathBuf> {
+    let dir = find_assets_root_dir()?.join(relative_subdir);
+    dir.is_dir().then_some(dir)
+}
+
+fn find_top_bar_icons_dir() -> Option<PathBuf> {
+    static TOP_BAR_ICONS_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    TOP_BAR_ICONS_DIR
+        .get_or_init(|| find_asset_dir("icons/top-bar"))
+        .clone()
+}
+
+fn find_ui_icons_dir() -> Option<PathBuf> {
+    static UI_ICONS_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    UI_ICONS_DIR
+        .get_or_init(|| find_asset_dir("icons/ui"))
+        .clone()
+}
 
 const APP_VERSION: &str = match option_env!("ARBOR_VERSION") {
     Some(v) => v,
@@ -12362,7 +12426,16 @@ impl ArborWindow {
                                             active_tab_index.map(|active_index| index.cmp(&active_index));
                                         let (tab_icon, tab_label, terminal_icon) = match tab {
                                             CenterTab::Terminal(session_id) => (
-                                                TAB_ICON_TERMINAL,
+                                                terminal_tab_icon_element(
+                                                    is_active,
+                                                    if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    },
+                                                    16.0,
+                                                )
+                                                .into_any_element(),
                                                 self.terminals
                                                     .iter()
                                                     .find(|session| session.id == session_id)
@@ -12371,7 +12444,16 @@ impl ArborWindow {
                                                 true,
                                             ),
                                             CenterTab::Diff(diff_id) => (
-                                                TAB_ICON_DIFF,
+                                                div()
+                                                    .font_family(FONT_MONO)
+                                                    .text_xs()
+                                                    .text_color(rgb(if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    }))
+                                                    .child(TAB_ICON_DIFF)
+                                                    .into_any_element(),
                                                 self.diff_sessions
                                                     .iter()
                                                     .find(|session| session.id == diff_id)
@@ -12380,7 +12462,16 @@ impl ArborWindow {
                                                 false,
                                             ),
                                             CenterTab::FileView(fv_id) => (
-                                                TAB_ICON_FILE,
+                                                div()
+                                                    .font_family(FONT_MONO)
+                                                    .text_xs()
+                                                    .text_color(rgb(if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    }))
+                                                    .child(TAB_ICON_FILE)
+                                                    .into_any_element(),
                                                 self.file_view_sessions
                                                     .iter()
                                                     .find(|session| session.id == fv_id)
@@ -12389,7 +12480,16 @@ impl ArborWindow {
                                                 false,
                                             ),
                                             CenterTab::Logs => (
-                                                TAB_ICON_LOGS,
+                                                logs_tab_icon_element(
+                                                    is_active,
+                                                    if is_active {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.text_muted
+                                                    },
+                                                    16.0,
+                                                )
+                                                .into_any_element(),
                                                 "Logs".to_owned(),
                                                 true,
                                             ),
@@ -24278,6 +24378,193 @@ fn daemon_cli_usage(program_name: &str) -> String {
     )
 }
 
+fn top_bar_button(
+    theme: ThemePalette,
+    id: impl Into<ElementId>,
+    enabled: bool,
+    base_text_color: u32,
+    hover_text_color: u32,
+    content: impl IntoElement,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(22.))
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.chrome_bg))
+        .text_color(rgb(base_text_color))
+        .when(enabled, |this| {
+            this.cursor_pointer()
+                .hover(|this| {
+                    this.bg(rgb(theme.panel_bg))
+                        .text_color(rgb(hover_text_color))
+                        .border_color(rgb(theme.panel_active_bg))
+                })
+                .active(|this| {
+                    this.bg(rgb(theme.panel_active_bg))
+                        .text_color(rgb(hover_text_color))
+                })
+        })
+        .child(content)
+}
+
+fn top_bar_icon_asset_path(kind: TopBarIconKind, tone: TopBarIconTone) -> Option<PathBuf> {
+    let file_name = match (kind, tone) {
+        (TopBarIconKind::RemoteControl, TopBarIconTone::Connected) => {
+            "remote-control-connected.svg"
+        },
+        (TopBarIconKind::RemoteControl, TopBarIconTone::Disabled) => "remote-control-disabled.svg",
+        (TopBarIconKind::GitHub, TopBarIconTone::Muted) => "github-muted.svg",
+        (TopBarIconKind::GitHub, TopBarIconTone::Connected) => "github-connected.svg",
+        (TopBarIconKind::GitHub, TopBarIconTone::Busy) => "github-busy.svg",
+        (TopBarIconKind::WorktreeActions, TopBarIconTone::Muted) => "worktree-actions-enabled.svg",
+        (TopBarIconKind::WorktreeActions, TopBarIconTone::Disabled) => {
+            "worktree-actions-disabled.svg"
+        },
+        (TopBarIconKind::ReportIssue, TopBarIconTone::Muted) => "report-issue.svg",
+        _ => return None,
+    };
+
+    find_top_bar_icons_dir().map(|dir| dir.join(file_name))
+}
+
+fn top_bar_icon_size_px(kind: TopBarIconKind) -> f32 {
+    match kind {
+        TopBarIconKind::GitHub => 10.5,
+        TopBarIconKind::RemoteControl
+        | TopBarIconKind::WorktreeActions
+        | TopBarIconKind::ReportIssue => 12.0,
+    }
+}
+
+fn top_bar_icon_element(
+    kind: TopBarIconKind,
+    tone: TopBarIconTone,
+    fallback_color: u32,
+    fallback_glyph: &'static str,
+) -> Div {
+    div()
+        .size(px(14.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(match top_bar_icon_asset_path(kind, tone) {
+            Some(path) => img(path)
+                .size(px(top_bar_icon_size_px(kind)))
+                .with_fallback(move || {
+                    div()
+                        .font_family(FONT_MONO)
+                        .text_size(px(12.))
+                        .line_height(px(12.))
+                        .text_color(rgb(fallback_color))
+                        .child(fallback_glyph)
+                        .into_any_element()
+                })
+                .into_any_element(),
+            None => div()
+                .font_family(FONT_MONO)
+                .text_size(px(12.))
+                .line_height(px(12.))
+                .text_color(rgb(fallback_color))
+                .child(fallback_glyph)
+                .into_any_element(),
+        })
+}
+
+fn terminal_quick_action_icon_element(fallback_color: u32, size_px: f32) -> Div {
+    div()
+        .size(px(size_px))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            match find_ui_icons_dir().map(|dir| dir.join("terminal-accent.svg")) {
+                Some(path) => img(path)
+                    .size(px(size_px))
+                    .with_fallback(move || {
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(size_px))
+                            .line_height(px(size_px))
+                            .text_color(rgb(fallback_color))
+                            .child("\u{f120}")
+                            .into_any_element()
+                    })
+                    .into_any_element(),
+                None => div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(size_px))
+                    .line_height(px(size_px))
+                    .text_color(rgb(fallback_color))
+                    .child("\u{f120}")
+                    .into_any_element(),
+            },
+        )
+}
+
+fn themed_ui_svg_icon(
+    path: &'static str,
+    color: u32,
+    size_px: f32,
+    fallback_glyph: &'static str,
+) -> Div {
+    div()
+        .size(px(size_px))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            svg()
+                .path(path)
+                .size(px(size_px))
+                .text_color(rgb(color))
+                .into_any_element(),
+        )
+        .when(find_assets_root_dir().is_none(), |this| {
+            this.child(
+                div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(size_px))
+                    .line_height(px(size_px))
+                    .text_color(rgb(color))
+                    .child(fallback_glyph),
+            )
+        })
+}
+
+fn terminal_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
+    themed_ui_svg_icon(
+        if is_active {
+            "icons/ui/terminal-active.svg"
+        } else {
+            "icons/ui/terminal-muted.svg"
+        },
+        color,
+        size_px,
+        "\u{f120}",
+    )
+}
+
+fn logs_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
+    themed_ui_svg_icon(
+        if is_active {
+            "icons/ui/logs-active.svg"
+        } else {
+            "icons/ui/logs-muted.svg"
+        },
+        color,
+        size_px,
+        "\u{f4ed}",
+    )
+}
 fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), String> {
     let binary = find_arbor_httpd_binary().ok_or_else(|| {
         "could not find `arbor-httpd` in PATH or next to the current executable".to_owned()

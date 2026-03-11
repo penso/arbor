@@ -87,13 +87,19 @@
 }
 
 .terminal-tab-icon {
-  font-size: 11px;
-  color: var(--text-muted);
+  display: inline-block;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
-}
-
-.terminal-tab.active .terminal-tab-icon {
-  color: var(--accent);
+  background-color: currentColor;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='2.25' y='3' width='11.5' height='10' rx='1.5'/%3E%3Cpath d='M5.1 6.2 6.95 8 5.1 9.8'/%3E%3Cpath d='M8.3 9.8h2.4'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='2.25' y='3' width='11.5' height='10' rx='1.5'/%3E%3Cpath d='M5.1 6.2 6.95 8 5.1 9.8'/%3E%3Cpath d='M8.3 9.8h2.4'/%3E%3C/svg%3E");
 }
 
 .terminal-tab-label {

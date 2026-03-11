@@ -117,7 +117,8 @@ function renderTabs(): void {
       stateIndicator.classList.add("failed");
     }
 
-    const icon = el("span", "terminal-tab-icon", "\u{f120}");
+    const icon = el("span", "terminal-tab-icon");
+    icon.setAttribute("aria-hidden", "true");
 
     const label = el(
       "span",
