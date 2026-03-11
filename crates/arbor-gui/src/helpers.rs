@@ -48,6 +48,21 @@ pub(crate) fn is_command_in_path(command: &str) -> bool {
     env::split_paths(&path_var).any(|dir| dir.join(command).is_file())
 }
 
+/// Returns `true` when the platform is expected to support native file-picker
+/// dialogs. On macOS/Windows this is always true. On Linux it checks whether
+/// `xdg-desktop-portal` is installed (required by the ashpd-based file picker
+/// in GPUI for both X11 and Wayland).
+pub(crate) fn has_native_file_picker() -> bool {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        is_command_in_path("xdg-desktop-portal")
+    }
+}
+
 /// Return the set of `AgentPresetKind` variants whose CLI is found in PATH.
 /// Cached for the lifetime of the process (the set of installed tools is
 /// unlikely to change while the app is running).
@@ -1201,6 +1216,12 @@ impl EntityInputHandler for ArborWindow {
         if self.welcome_clone_url_active {
             self.welcome_clone_url.push_str(text);
             self.welcome_clone_error = None;
+            cx.notify();
+            return;
+        }
+        if self.welcome_local_path_active {
+            self.welcome_local_path.push_str(text);
+            self.welcome_local_path_error = None;
             cx.notify();
             return;
         }

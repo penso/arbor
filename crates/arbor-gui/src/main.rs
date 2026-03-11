@@ -195,6 +195,7 @@ struct ArborWindow {
     right_pane_width: f32,
     terminal_focus: FocusHandle,
     welcome_clone_focus: FocusHandle,
+    welcome_local_path_focus: FocusHandle,
     terminal_scroll_handle: ScrollHandle,
     last_terminal_grid_size: Option<(u16, u16)>,
     center_tabs_scroll_handle: ScrollHandle,
@@ -279,6 +280,10 @@ struct ArborWindow {
     welcome_clone_url_active: bool,
     welcome_cloning: bool,
     welcome_clone_error: Option<String>,
+    welcome_local_path: String,
+    welcome_local_path_cursor: usize,
+    welcome_local_path_active: bool,
+    welcome_local_path_error: Option<String>,
     /// Remote daemons that have been expanded in the sidebar.
     remote_daemon_states: HashMap<usize, RemoteDaemonState>,
     /// Currently selected remote worktree (if any). The window stays connected
@@ -436,6 +441,7 @@ impl ArborWindow {
                         .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
                     terminal_focus: cx.focus_handle(),
                     welcome_clone_focus: cx.focus_handle(),
+                    welcome_local_path_focus: cx.focus_handle(),
                     terminal_scroll_handle: ScrollHandle::new(),
                     last_terminal_grid_size: None,
                     center_tabs_scroll_handle: ScrollHandle::new(),
@@ -521,6 +527,10 @@ impl ArborWindow {
                     welcome_clone_url_active: false,
                     welcome_cloning: false,
                     welcome_clone_error: None,
+                    welcome_local_path: String::new(),
+                    welcome_local_path_cursor: 0,
+                    welcome_local_path_active: false,
+                    welcome_local_path_error: None,
                     remote_daemon_states: HashMap::new(),
                     active_remote_worktree: None,
                 };
@@ -755,6 +765,7 @@ impl ArborWindow {
                 .map_or(DEFAULT_RIGHT_PANE_WIDTH, |width| width as f32),
             terminal_focus: cx.focus_handle(),
             welcome_clone_focus: cx.focus_handle(),
+            welcome_local_path_focus: cx.focus_handle(),
             terminal_scroll_handle: ScrollHandle::new(),
             last_terminal_grid_size: None,
             center_tabs_scroll_handle: ScrollHandle::new(),
@@ -838,6 +849,10 @@ impl ArborWindow {
             welcome_clone_url_active: false,
             welcome_cloning: false,
             welcome_clone_error: None,
+            welcome_local_path: String::new(),
+            welcome_local_path_cursor: 0,
+            welcome_local_path_active: false,
+            welcome_local_path_error: None,
             remote_daemon_states: HashMap::new(),
             active_remote_worktree: None,
         };
@@ -2773,6 +2788,37 @@ impl ArborWindow {
         cx.notify();
     }
 
+    fn submit_welcome_local_path(&mut self, cx: &mut Context<Self>) {
+        let raw = self.welcome_local_path.trim().to_owned();
+        if raw.is_empty() {
+            self.welcome_local_path_error = Some("Please enter a repository path".to_owned());
+            cx.notify();
+            return;
+        }
+
+        let expanded = if let Some(suffix) = raw.strip_prefix('~') {
+            if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+                PathBuf::from(home).join(suffix.strip_prefix('/').unwrap_or(suffix))
+            } else {
+                PathBuf::from(&raw)
+            }
+        } else {
+            PathBuf::from(&raw)
+        };
+
+        if !expanded.is_dir() {
+            self.welcome_local_path_error = Some(format!("`{raw}` is not a valid directory"));
+            cx.notify();
+            return;
+        }
+
+        self.welcome_local_path.clear();
+        self.welcome_local_path_cursor = 0;
+        self.welcome_local_path_active = false;
+        self.welcome_local_path_error = None;
+        self.add_repository_from_path(expanded, cx);
+    }
+
     fn open_add_repository_picker(&mut self, cx: &mut Context<Self>) {
         let picker = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -2794,7 +2840,15 @@ impl ArborWindow {
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    this.notice = Some(format!("failed to open repository picker: {error}"));
+                    let message = format!(
+                        "File picker unavailable: {error}. \
+                         Type a path in the field above instead."
+                    );
+                    if this.repositories.is_empty() {
+                        this.welcome_local_path_error = Some(message);
+                    } else {
+                        this.notice = Some(message);
+                    }
                     cx.notify();
                 },
             });
@@ -2893,6 +2947,8 @@ impl ArborWindow {
         let clone_url_active = self.welcome_clone_url_active;
         let cloning = self.welcome_cloning;
         let clone_error = self.welcome_clone_error.clone();
+        let local_path_active = self.welcome_local_path_active;
+        let local_path_error = self.welcome_local_path_error.clone();
 
         div()
             .size_full()
@@ -3020,16 +3076,77 @@ impl ArborWindow {
                             .child("LOCAL REPOSITORY"),
                     )
                     .child(
-                        action_button(
-                            theme,
-                            "welcome-add-local",
-                            "Open Local Repository",
-                            ActionButtonStyle::Secondary,
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_add_repository_picker(cx);
-                        })),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                single_line_input_field(
+                                    theme,
+                                    "welcome-local-path",
+                                    &self.welcome_local_path,
+                                    self.welcome_local_path_cursor,
+                                    "/path/to/repository or ~/projects/repo",
+                                    local_path_active,
+                                )
+                                .track_focus(&self.welcome_local_path_focus)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                        window.focus(&this.welcome_local_path_focus);
+                                        this.welcome_local_path_active = true;
+                                        this.welcome_local_path_cursor =
+                                            char_count(&this.welcome_local_path);
+                                        cx.notify();
+                                    }),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.welcome_local_path_active = true;
+                                    this.welcome_local_path_cursor =
+                                        char_count(&this.welcome_local_path);
+                                    cx.notify();
+                                })),
+                            )
+                            .when_some(local_path_error, |this, error| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.notice_text))
+                                        .child(error),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            "welcome-open-local",
+                                            "Open",
+                                            ActionButtonStyle::Primary,
+                                            true,
+                                        )
+                                        .flex_1()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_welcome_local_path(cx);
+                                        })),
+                                    )
+                                    .when(has_native_file_picker(), |this| {
+                                        this.child(
+                                            action_button(
+                                                theme,
+                                                "welcome-browse-local",
+                                                "Browse\u{2026}",
+                                                ActionButtonStyle::Secondary,
+                                                true,
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.open_add_repository_picker(cx);
+                                            })),
+                                        )
+                                    }),
+                            ),
                     ),
             )
     }
@@ -5690,6 +5807,34 @@ impl ArborWindow {
                     &action,
                 );
                 self.welcome_clone_error = None;
+                cx.notify();
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.welcome_local_path_active {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.welcome_local_path_active = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_welcome_local_path(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                apply_text_edit_action(
+                    &mut self.welcome_local_path,
+                    &mut self.welcome_local_path_cursor,
+                    &action,
+                );
+                self.welcome_local_path_error = None;
                 cx.notify();
                 cx.stop_propagation();
             }
