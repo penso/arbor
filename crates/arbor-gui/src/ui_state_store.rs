@@ -1,7 +1,8 @@
 use {
-    crate::checkout::CheckoutKind,
+    crate::{checkout::CheckoutKind, types::SidebarItemId},
     serde::{Deserialize, Serialize},
     std::{
+        collections::HashMap,
         env, fs,
         path::{Path, PathBuf},
     },
@@ -17,6 +18,10 @@ pub struct UiState {
     pub window: Option<WindowGeometry>,
     pub left_pane_visible: Option<bool>,
     pub preferred_checkout_kind: Option<CheckoutKind>,
+    /// Custom sidebar item display order per repository group.
+    /// Key: group_key, Value: ordered list of SidebarItemIds.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sidebar_order: HashMap<String, Vec<SidebarItemId>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,6 +12,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/penso/arbor?label=release)](https://github.com/penso/arbor/releases)
 [![macOS](https://img.shields.io/badge/macOS-supported-brightgreen)](#install)
 [![Linux](https://img.shields.io/badge/Linux-supported-brightgreen)](#install)
+[![Windows](https://img.shields.io/badge/Windows-supported-brightgreen)](#install)
 
 Arbor is a **fully native app for agentic coding** built with Rust and [GPUI](https://gpui.rs).
 It gives you one place to manage repositories, parallel worktrees, embedded terminals, diffs, AI coding agent activity, and a daemon-backed MCP server.

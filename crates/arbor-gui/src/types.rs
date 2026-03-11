@@ -8,6 +8,7 @@ use {
     },
     arbor_core::SessionId,
     gpui::{Context, Pixels, Window, prelude::*},
+    serde::{Deserialize, Serialize},
     std::{
         collections::HashMap,
         path::PathBuf,
@@ -438,6 +439,70 @@ pub(crate) enum DraggedPaneDivider {
 impl Render for DraggedPaneDivider {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
+    }
+}
+
+/// Identifies a sidebar item — either a local worktree or a remote outpost.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum SidebarItemId {
+    Worktree(PathBuf),
+    Outpost(String),
+}
+
+/// Payload carried during a drag operation on a sidebar item.
+#[derive(Debug, Clone)]
+pub(crate) struct DraggedSidebarItem {
+    pub(crate) item_id: SidebarItemId,
+    pub(crate) group_key: String,
+    pub(crate) label: String,
+    pub(crate) icon: String,
+    pub(crate) icon_color: u32,
+    pub(crate) bg_color: u32,
+    pub(crate) border_color: u32,
+    pub(crate) text_color: u32,
+}
+
+impl Render for DraggedSidebarItem {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use gpui::{FontWeight, div, prelude::*, px, rgb};
+
+        div()
+            .w(px(220.))
+            .font_family(crate::FONT_MONO)
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(self.border_color))
+            .bg(rgb(self.bg_color))
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .opacity(0.9)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(16.))
+                    .text_color(rgb(self.icon_color))
+                    .child(self.icon.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(self.text_color))
+                    .child(self.label.clone()),
+            )
     }
 }
 

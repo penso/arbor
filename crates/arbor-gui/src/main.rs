@@ -252,6 +252,7 @@ struct ArborWindow {
     selected_file_tree_entry: Option<PathBuf>,
     left_pane_visible: bool,
     collapsed_repositories: HashSet<usize>,
+    sidebar_order: HashMap<String, Vec<SidebarItemId>>,
     repository_context_menu: Option<RepositoryContextMenu>,
     worktree_context_menu: Option<WorktreeContextMenu>,
     worktree_hover_popover: Option<WorktreeHoverPopover>,
@@ -384,6 +385,7 @@ impl ArborWindow {
                 let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
                 let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
                 let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
+                let startup_sidebar_order = startup_ui_state.sidebar_order.clone();
 
                 let app = Self {
                     app_config_store,
@@ -492,6 +494,7 @@ impl ArborWindow {
                     selected_file_tree_entry: None,
                     left_pane_visible: true,
                     collapsed_repositories: HashSet::new(),
+                    sidebar_order: startup_sidebar_order,
                     repository_context_menu: None,
                     worktree_context_menu: None,
                     worktree_hover_popover: None,
@@ -793,6 +796,7 @@ impl ArborWindow {
             terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
+            sidebar_order: startup_ui_state.sidebar_order.clone(),
             repository_context_menu: None,
             worktree_context_menu: None,
             worktree_hover_popover: None,
@@ -7861,6 +7865,7 @@ impl ArborWindow {
             }),
             left_pane_visible: Some(self.left_pane_visible),
             preferred_checkout_kind: Some(self.preferred_checkout_kind),
+            sidebar_order: self.sidebar_order.clone(),
         }
     }
 
@@ -7882,6 +7887,78 @@ impl ArborWindow {
                 }
             },
         }
+    }
+
+    fn build_sidebar_order_for_group(
+        &self,
+        group_key: &str,
+        repo_root: &Path,
+    ) -> Vec<SidebarItemId> {
+        let worktree_ids: Vec<SidebarItemId> = self
+            .worktrees
+            .iter()
+            .filter(|w| w.group_key == group_key)
+            .map(|w| SidebarItemId::Worktree(w.path.clone()))
+            .collect();
+        let outpost_ids: Vec<SidebarItemId> = self
+            .outposts
+            .iter()
+            .filter(|o| o.repo_root == repo_root)
+            .map(|o| SidebarItemId::Outpost(o.outpost_id.clone()))
+            .collect();
+
+        let all_current: HashSet<_> = worktree_ids.iter().chain(&outpost_ids).cloned().collect();
+
+        if let Some(saved) = self.sidebar_order.get(group_key) {
+            let mut ordered: Vec<SidebarItemId> = saved
+                .iter()
+                .filter(|id| all_current.contains(id))
+                .cloned()
+                .collect();
+            let ordered_set: HashSet<_> = ordered.iter().cloned().collect();
+            for id in worktree_ids.into_iter().chain(outpost_ids) {
+                if !ordered_set.contains(&id) {
+                    ordered.push(id);
+                }
+            }
+            ordered
+        } else {
+            worktree_ids.into_iter().chain(outpost_ids).collect()
+        }
+    }
+
+    fn handle_sidebar_item_drop(
+        &mut self,
+        source_id: &SidebarItemId,
+        insert_before: usize,
+        group_key: &str,
+        repo_root: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut items = self.build_sidebar_order_for_group(group_key, repo_root);
+
+        let Some(source_pos) = items.iter().position(|id| id == source_id) else {
+            return;
+        };
+
+        // Compute effective insertion index after removal
+        let target_pos = if insert_before > source_pos {
+            insert_before - 1
+        } else {
+            insert_before
+        };
+
+        if source_pos == target_pos {
+            return;
+        }
+
+        let item = items.remove(source_pos);
+        items.insert(target_pos, item);
+
+        self.sidebar_order.insert(group_key.to_owned(), items);
+        self.sync_ui_state_store(window);
+        cx.notify();
     }
 
     fn handle_pane_divider_drag_move(
@@ -9044,14 +9121,14 @@ impl ArborWindow {
                                                         .text_color(rgb(theme.text_primary))
                                                         .child(repository.label.clone()),
                                                 )
-                                                // Worktree count badge
+                                                // Sidebar item count badge
                                                 .child(
                                                     div()
                                                         .text_sm()
                                                         .text_color(rgb(theme.text_disabled))
                                                         .child(format!(
                                                             "{}",
-                                                            repo_worktrees.len()
+                                                            repo_worktrees.len() + repo_outposts.len()
                                                         )),
                                                 ),
                                         )
@@ -9097,13 +9174,51 @@ impl ArborWindow {
                                 )
                                 .when(!is_collapsed, |this| {
                                     let selection_epoch = self.worktree_selection_epoch;
-                                    this.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.))
-                                        .children(
-                                            repo_worktrees.into_iter().map(|(index, worktree)| {
+                                    let group_key = repository.group_key.clone();
+                                    let repo_root = repository.root.clone();
+
+                                    // Build worktree/outpost index maps for lookup
+                                    let worktree_map: HashMap<PathBuf, (usize, WorktreeSummary)> =
+                                        repo_worktrees.into_iter()
+                                            .map(|(i, w)| (w.path.clone(), (i, w)))
+                                            .collect();
+                                    let outpost_map: HashMap<String, (usize, OutpostSummary)> =
+                                        repo_outposts.into_iter()
+                                            .map(|(i, o)| (o.outpost_id.clone(), (i, o)))
+                                            .collect();
+
+                                    // Build the unified ordered sidebar item list
+                                    let sidebar_order = self.build_sidebar_order_for_group(&group_key, &repo_root);
+                                    let item_count = sidebar_order.len();
+
+                                    let mut elements: Vec<AnyElement> = Vec::with_capacity(item_count * 2 + 1);
+                                    for (slot, item_id) in sidebar_order.into_iter().enumerate() {
+                                        // Drop zone before this item
+                                        {
+                                            let dz_group = group_key.clone();
+                                            let dz_root = repo_root.clone();
+                                            let accent = theme.accent;
+                                            elements.push(
+                                                div()
+                                                    .id(SharedString::from(format!("sidebar-drop-zone-{repository_index}-{slot}")))
+                                                    .h(px(6.))
+                                                    .mx(px(4.))
+                                                    .rounded_sm()
+                                                    .drag_over::<DraggedSidebarItem>({
+                                                        move |style, _, _, _| style.bg(rgb(accent)).h(px(3.)).my(px(1.5))
+                                                    })
+                                                    .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, window, cx| {
+                                                        if dragged.group_key == dz_group {
+                                                            this.handle_sidebar_item_drop(&dragged.item_id, slot, &dz_group, &dz_root, window, cx);
+                                                        }
+                                                    }))
+                                                    .into_any_element(),
+                                            );
+                                        }
+
+                                        match &item_id {
+                                            SidebarItemId::Worktree(path) => {
+                                                let Some((index, worktree)) = worktree_map.get(path).cloned() else { continue };
                                                 let is_active =
                                                     self.active_worktree_index == Some(index);
                                                 let diff_summary = worktree.diff_summary;
@@ -9126,6 +9241,13 @@ impl ArborWindow {
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
                                                     None => None,
                                                 };
+                                                let drag_item_id = item_id.clone();
+                                                let drag_group_key = group_key.clone();
+                                                let drop_group_key = group_key.clone();
+                                                let drop_repo_root = repo_root.clone();
+                                                let drag_label = worktree.branch.clone();
+                                                let drag_icon = worktree.checkout_kind.icon().to_owned();
+                                                let drag_icon_color = theme.text_muted;
                                                 let row = div()
                                                     .id(("worktree-row", index))
                                                     .font_family(FONT_MONO)
@@ -9134,6 +9256,19 @@ impl ArborWindow {
                                                     .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                                     .flex()
                                                     .items_center()
+                                                    .on_drag(DraggedSidebarItem { item_id: drag_item_id, group_key: drag_group_key, label: drag_label, icon: drag_icon, icon_color: drag_icon_color, bg_color: theme.panel_active_bg, border_color: theme.accent, text_color: theme.text_primary }, |dragged, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        cx.new(|_| dragged.clone())
+                                                    })
+                                                    .drag_over::<DraggedSidebarItem>({
+                                                        let accent = theme.accent;
+                                                        move |style, _, _, _| style.border_color(rgb(accent)).border_t_2()
+                                                    })
+                                                    .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, window, cx| {
+                                                        if dragged.group_key == drop_group_key {
+                                                            this.handle_sidebar_item_drop(&dragged.item_id, slot, &drop_group_key, &drop_repo_root, window, cx);
+                                                        }
+                                                    }))
                                                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
                                                         this.update_worktree_hover_mouse_position(event.position);
                                                     }))
@@ -9375,7 +9510,7 @@ impl ArborWindow {
                                                     ) // text column
                                                     ); // bordered cell
                                                 if is_active {
-                                                    row.with_animation(
+                                                    elements.push(row.with_animation(
                                                         ("worktree-select", selection_epoch),
                                                         Animation::new(Duration::from_millis(150))
                                                             .with_easing(ease_in_out),
@@ -9383,35 +9518,45 @@ impl ArborWindow {
                                                             el.opacity(0.8 + 0.2 * delta)
                                                         },
                                                     )
-                                                    .into_any_element()
+                                                    .into_any_element());
                                                 } else {
-                                                    row.opacity(0.8).into_any_element()
+                                                    elements.push(row.opacity(0.8).into_any_element());
                                                 }
-                                            }),
-                                        ),
-                                )
-                                })
-                                .when(!repo_outposts.is_empty(), |group| {
-                                    group.child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .children(
-                                                repo_outposts.into_iter().map(|(outpost_index, outpost)| {
+                                            },
+                                            SidebarItemId::Outpost(outpost_id) => {
+                                                let Some((outpost_index, outpost)) = outpost_map.get(outpost_id).cloned() else { continue };
                                                     let is_active = self.active_outpost_index == Some(outpost_index);
                                                     let status_color = match outpost.status {
                                                         arbor_core::outpost::OutpostStatus::Available => theme.accent,
                                                         arbor_core::outpost::OutpostStatus::Unreachable => 0xeb6f92,
                                                         arbor_core::outpost::OutpostStatus::NotCloned | arbor_core::outpost::OutpostStatus::Provisioning => theme.text_muted,
                                                     };
-                                                    div()
+                                                    let drag_item_id = item_id.clone();
+                                                    let drag_group_key = group_key.clone();
+                                                    let drop_group_key = group_key.clone();
+                                                    let drop_repo_root = repo_root.clone();
+                                                    let drag_label = format!("{}@{}", outpost.branch, outpost.hostname);
+                                                    let drag_icon_color = status_color;
+                                                    elements.push(div()
                                                         .id(("outpost-row", outpost_index))
                                                         .font_family(FONT_MONO)
                                                         .cursor_pointer()
                                                         .hover(|this| this.bg(rgb(theme.panel_active_bg)))
                                                         .flex()
                                                         .items_center()
+                                                        .on_drag(DraggedSidebarItem { item_id: drag_item_id, group_key: drag_group_key, label: drag_label, icon: "\u{f0ac}".to_owned(), icon_color: drag_icon_color, bg_color: theme.panel_active_bg, border_color: theme.accent, text_color: theme.text_primary }, |dragged, _, _, cx| {
+                                                            cx.stop_propagation();
+                                                            cx.new(|_| dragged.clone())
+                                                        })
+                                                        .drag_over::<DraggedSidebarItem>({
+                                                            let accent = theme.accent;
+                                                            move |style, _, _, _| style.border_color(rgb(accent)).border_t_2()
+                                                        })
+                                                        .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, window, cx| {
+                                                            if dragged.group_key == drop_group_key {
+                                                                this.handle_sidebar_item_drop(&dragged.item_id, slot, &drop_group_key, &drop_repo_root, window, cx);
+                                                            }
+                                                        }))
                                                         .on_click(cx.listener(move |this, _, window, cx| {
                                                             this.select_outpost(outpost_index, window, cx);
                                                         }))
@@ -9497,9 +9642,41 @@ impl ArborWindow {
                                                         )
                                                         )
                                                         )
-                                                }),
-                                            ),
-                                    )
+                                                        .opacity(0.8)
+                                                        .into_any_element());
+                                            },
+                                        }
+                                    }
+
+                                    // Final drop zone after last item
+                                    {
+                                        let dz_group = group_key;
+                                        let dz_root = repo_root;
+                                        let accent = theme.accent;
+                                        elements.push(
+                                            div()
+                                                .id(SharedString::from(format!("sidebar-drop-zone-{repository_index}-{item_count}")))
+                                                .h(px(6.))
+                                                .mx(px(4.))
+                                                .rounded_sm()
+                                                .drag_over::<DraggedSidebarItem>({
+                                                    move |style, _, _, _| style.bg(rgb(accent)).h(px(3.)).my(px(1.5))
+                                                })
+                                                .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, window, cx| {
+                                                    if dragged.group_key == dz_group {
+                                                        this.handle_sidebar_item_drop(&dragged.item_id, item_count, &dz_group, &dz_root, window, cx);
+                                                    }
+                                                }))
+                                                .into_any_element(),
+                                        );
+                                    }
+
+                                    this.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .children(elements),
+                                )
                                 })
                         },
                     ))
