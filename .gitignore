@@ -7,3 +7,7 @@ crates/arbor-web-ui/app/e2e/screenshots
 crates/arbor-web-ui/app/playwright-report
 crates/arbor-web-ui/app/test-results
 /homebrew-arbor
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
