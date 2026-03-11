@@ -39,7 +39,7 @@ use {
         PathPromptOptions, Pixels, ScrollHandle, ScrollStrategy, Stateful, SystemMenuType, TextRun,
         TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
         WindowControlArea, WindowDecorations, WindowOptions, actions, canvas, div, ease_in_out,
-        fill, font, img, point, prelude::*, px, rgb, size, svg, uniform_list,
+        fill, font, img, point, prelude::*, px, rgb, size, uniform_list,
     },
     ropey::Rope,
     std::{
@@ -191,9 +191,7 @@ const DIFF_ZONEMAP_MARKER_HEIGHT_PX: f32 = 2.;
 const DIFF_ZONEMAP_MIN_THUMB_HEIGHT_PX: f32 = 12.;
 const DIFF_FONT_SIZE_PX: f32 = 12.0;
 const DIFF_HUNK_CONTEXT_LINES: usize = 3;
-const TAB_ICON_TERMINAL: &str = "\u{f489}";
 const TAB_ICON_DIFF: &str = "\u{f440}";
-const TAB_ICON_LOGS: &str = "\u{f4ed}";
 const TAB_ICON_FILE: &str = "\u{f15c}";
 const GIT_ACTION_ICON_COMMIT: &str = "\u{f417}";
 const GIT_ACTION_ICON_PUSH: &str = "\u{f093}";
@@ -10165,6 +10163,7 @@ impl ArborWindow {
         } else {
             theme.text_muted
         };
+        let github_avatar_url = self.github_auth_state.user_avatar_url.clone();
 
         div()
             .h(px(TITLEBAR_HEIGHT))
@@ -10284,155 +10283,174 @@ impl ArborWindow {
                     .child({
                         let daemon_connected = self.terminal_daemon.is_some();
                         let web_ui_url = self.daemon_base_url.clone();
-                        div()
-                            .id("web-ui-link")
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(if daemon_connected {
+                        top_bar_button(
+                            theme,
+                            "web-ui-link",
+                            true,
+                            if daemon_connected {
                                 theme.text_muted
                             } else {
                                 theme.text_disabled
-                            }))
-                            .cursor_pointer()
-                            .hover(|this| {
-                                this.bg(rgb(theme.panel_bg))
-                                    .text_color(rgb(theme.text_primary))
-                            })
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                if this.terminal_daemon.is_some() {
-                                    this.open_external_url(&web_ui_url, cx);
-                                } else {
-                                    this.start_daemon_modal = true;
-                                    cx.notify();
-                                }
-                            }))
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(14.))
-                                    .text_color(rgb(if daemon_connected {
+                            },
+                            theme.text_primary,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(11.))
+                                .child(top_bar_icon_element(
+                                    TopBarIconKind::RemoteControl,
+                                    if daemon_connected {
+                                        TopBarIconTone::Connected
+                                    } else {
+                                        TopBarIconTone::Disabled
+                                    },
+                                    if daemon_connected {
                                         0x68c38d
                                     } else {
                                         theme.text_disabled
-                                    }))
-                                    .child("\u{f0ac}"),
-                            )
-                            .child(div().text_size(px(11.)).child("Remote Control"))
+                                    },
+                                    "\u{f0ac}",
+                                ))
+                                .child("Remote Control"),
+                        )
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if this.terminal_daemon.is_some() {
+                                this.open_external_url(&web_ui_url, cx);
+                            } else {
+                                this.start_daemon_modal = true;
+                                cx.notify();
+                            }
+                        }))
                     })
                     .child(
-                        div()
-                            .id("github-auth")
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(github_auth_text_color))
-                            .when(!github_auth_busy, |this| {
-                                this.cursor_pointer()
-                                    .hover(|this| {
-                                        this.bg(rgb(theme.panel_bg))
-                                            .text_color(rgb(theme.text_primary))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.run_github_auth_button_action(cx);
-                                    }))
-                            })
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(14.))
-                                    .text_color(rgb(github_auth_icon_color))
-                                    .child("\u{f09b}"),
-                            )
-                            .child(div().text_size(px(11.)).child(github_auth_label)),
+                        top_bar_button(
+                            theme,
+                            "github-auth",
+                            !github_auth_busy,
+                            github_auth_text_color,
+                            theme.text_primary,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(11.))
+                                .child(match github_avatar_url {
+                                    Some(url) => div()
+                                        .size(px(12.))
+                                        .rounded_full()
+                                        .overflow_hidden()
+                                        .child(img(url).size_full().rounded_full().with_fallback(
+                                            move || {
+                                                top_bar_icon_element(
+                                                    TopBarIconKind::GitHub,
+                                                    if github_auth_busy {
+                                                        TopBarIconTone::Busy
+                                                    } else if github_saved_token || github_env_token {
+                                                        TopBarIconTone::Connected
+                                                    } else {
+                                                        TopBarIconTone::Muted
+                                                    },
+                                                    github_auth_icon_color,
+                                                    "\u{f09b}",
+                                                )
+                                                .into_any_element()
+                                            },
+                                        ))
+                                        .into_any_element(),
+                                    None => top_bar_icon_element(
+                                        TopBarIconKind::GitHub,
+                                        if github_auth_busy {
+                                            TopBarIconTone::Busy
+                                        } else if github_saved_token || github_env_token {
+                                            TopBarIconTone::Connected
+                                        } else {
+                                            TopBarIconTone::Muted
+                                        },
+                                        github_auth_icon_color,
+                                        "\u{f09b}",
+                                    )
+                                    .into_any_element(),
+                                })
+                                .child(github_auth_label),
+                        )
+                        .when(!github_auth_busy, |this| {
+                            this.on_click(cx.listener(|this, _, _, cx| {
+                                this.run_github_auth_button_action(cx);
+                            }))
+                        }),
                     )
                     .child(
-                        div()
-                            .id("worktree-quick-actions")
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .text_color(rgb(if worktree_quick_actions_enabled {
+                        top_bar_button(
+                            theme,
+                            "worktree-quick-actions",
+                            worktree_quick_actions_enabled,
+                            if worktree_quick_actions_enabled {
                                 theme.text_muted
                             } else {
                                 theme.text_disabled
-                            }))
-                            .when(worktree_quick_actions_enabled, |this| {
-                                this.cursor_pointer()
-                                    .hover(|this| {
-                                        this.bg(rgb(theme.panel_bg))
-                                            .text_color(rgb(theme.text_primary))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_top_bar_worktree_quick_actions_menu(cx);
-                                    }))
-                            })
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(12.))
-                                    .child("\u{f0e7}"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .child("Action"),
-                            )
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(9.))
-                                    .child(if worktree_quick_actions_open {
-                                        "\u{f077}"
+                            },
+                            theme.text_primary,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(top_bar_icon_element(
+                                    TopBarIconKind::WorktreeActions,
+                                    if worktree_quick_actions_enabled {
+                                        TopBarIconTone::Muted
                                     } else {
-                                        "\u{f078}"
-                                    }),
-                            ),
+                                        TopBarIconTone::Disabled
+                                    },
+                                    if worktree_quick_actions_enabled {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_disabled
+                                    },
+                                    "\u{f0e7}",
+                                ))
+                                .child(div().text_size(px(11.)).child("Action"))
+                                .child(
+                                    div()
+                                        .font_family(FONT_MONO)
+                                        .text_size(px(9.))
+                                        .child(if worktree_quick_actions_open {
+                                            "\u{f077}"
+                                        } else {
+                                            "\u{f078}"
+                                        }),
+                                ),
+                        )
+                        .when(worktree_quick_actions_enabled, |this| {
+                            this.on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_top_bar_worktree_quick_actions_menu(cx);
+                            }))
+                        }),
                     )
                     .child(
-                        div()
-                            .id("report-issue")
-                            .cursor_pointer()
-                            .text_color(rgb(theme.text_muted))
-                            .h(px(22.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .hover(|this| this.bg(rgb(theme.panel_active_bg)).text_color(rgb(theme.text_primary)))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close_top_bar_worktree_quick_actions();
-                                cx.open_url("https://github.com/penso/arbor/issues/new");
-                            }))
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(15.))
-                                    .child("\u{f188}"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .child("Report issue"),
-                            ),
+                        top_bar_button(
+                            theme,
+                            "report-issue",
+                            true,
+                            theme.text_muted,
+                            theme.text_primary,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(11.))
+                                .child(top_bar_icon_element(
+                                    TopBarIconKind::ReportIssue,
+                                    TopBarIconTone::Muted,
+                                    theme.text_muted,
+                                    "\u{f188}",
+                                ))
+                                .child("Report issue"),
+                        )
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.close_top_bar_worktree_quick_actions();
+                            cx.open_url("https://github.com/penso/arbor/issues/new");
+                        })),
                     ),
             )
     }
@@ -10582,13 +10600,7 @@ impl ArborWindow {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
-                                    .child(
-                                        div()
-                                            .font_family(FONT_MONO)
-                                            .text_size(px(12.))
-                                            .text_color(rgb(0x68c38d))
-                                            .child("\u{f120}"),
-                                    )
+                                    .child(terminal_quick_action_icon_element(0x68c38d, 12.0))
                                     .child(div().text_size(px(11.)).child("Terminal")),
                             )
                             .child(
@@ -16015,7 +16027,15 @@ impl ArborWindow {
                 } else {
                     theme.sidebar_bg
                 }))
-                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+                    if let Some(modal) = this.command_palette_modal.as_mut()
+                        && modal.selected_index != index
+                    {
+                        modal.selected_index = index;
+                        this.command_palette_scroll_handle.scroll_to_item(index);
+                        cx.notify();
+                    }
+                }))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if let Some(modal) = this.command_palette_modal.as_mut() {
                         modal.selected_index = index;
@@ -24521,22 +24541,26 @@ fn themed_ui_svg_icon(
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            svg()
-                .path(path)
+        .child(match find_assets_root_dir().map(|dir| dir.join(path)) {
+            Some(path) => img(path)
                 .size(px(size_px))
-                .text_color(rgb(color))
+                .with_fallback(move || {
+                    div()
+                        .font_family(FONT_MONO)
+                        .text_size(px(size_px))
+                        .line_height(px(size_px))
+                        .text_color(rgb(color))
+                        .child(fallback_glyph)
+                        .into_any_element()
+                })
                 .into_any_element(),
-        )
-        .when(find_assets_root_dir().is_none(), |this| {
-            this.child(
-                div()
-                    .font_family(FONT_MONO)
-                    .text_size(px(size_px))
-                    .line_height(px(size_px))
-                    .text_color(rgb(color))
-                    .child(fallback_glyph),
-            )
+            None => div()
+                .font_family(FONT_MONO)
+                .text_size(px(size_px))
+                .line_height(px(size_px))
+                .text_color(rgb(color))
+                .child(fallback_glyph)
+                .into_any_element(),
         })
 }
 

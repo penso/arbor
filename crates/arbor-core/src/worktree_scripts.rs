@@ -186,4 +186,46 @@ setup = ["printf '%s|%s|%s' \"$ARBOR_WORKTREE_PATH\" \"$ARBOR_REPO_PATH\" \"$ARB
         );
         assert_eq!(written, expected);
     }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn setup_scripts_are_loaded_from_repository_root_config() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let repo_root = dir.path();
+        let worktree_path = repo_root.join("feature-wt");
+        if let Err(error) = fs::create_dir_all(&worktree_path) {
+            panic!("failed to create worktree dir: {error}");
+        }
+
+        let output_path = repo_root.join("scope-output.txt");
+        let escaped_output = output_path.to_string_lossy().replace('"', "\\\"");
+        let repo_content = format!(
+            r#"[scripts]
+setup = ["printf 'repo-root' > \"{escaped_output}\""]
+"#
+        );
+        if let Err(error) = fs::write(repo_root.join("arbor.toml"), repo_content) {
+            panic!("failed to write repo config: {error}");
+        }
+
+        let worktree_content = format!(
+            r#"[scripts]
+setup = ["printf 'worktree-local' > \"{escaped_output}\""]
+"#
+        );
+        if let Err(error) = fs::write(worktree_path.join("arbor.toml"), worktree_content) {
+            panic!("failed to write worktree config: {error}");
+        }
+
+        let context = WorktreeScriptContext::new(repo_root, &worktree_path, Some("feature/a"));
+        if let Err(error) = run_worktree_scripts(repo_root, WorktreeScriptPhase::Setup, &context) {
+            panic!("script should succeed: {error}");
+        }
+
+        let written = match fs::read_to_string(output_path) {
+            Ok(value) => value,
+            Err(error) => panic!("failed to read output: {error}"),
+        };
+        assert_eq!(written, "repo-root");
+    }
 }

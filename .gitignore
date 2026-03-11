@@ -1,5 +1,6 @@
 /target
 .DS_Store
+docs/book
 crates/arbor-web-ui/app/node_modules
 crates/arbor-web-ui/app/dist
 crates/arbor-web-ui/app/e2e/test-results

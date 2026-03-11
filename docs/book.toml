@@ -1,0 +1,29 @@
+[book]
+authors = ["Arbor Contributors"]
+description = "Arbor product documentation and QA guide"
+language = "en"
+src = "src"
+title = "Arbor Documentation"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+additional-css = ["theme/custom.css"]
+copy-fonts = true
+default-theme = "light"
+git-repository-url = "https://github.com/penso/arbor"
+git-repository-icon = "fa-github"
+preferred-dark-theme = "navy"
+smart-punctuation = true
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-hierarchical-sections = true

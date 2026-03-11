@@ -35,6 +35,12 @@ lint: lockfile-check
 test:
     cargo +{{nightly_toolchain}} test --workspace --all-features
 
+docs-build:
+    mdbook build docs
+
+docs-serve:
+    mdbook serve docs --hostname 127.0.0.1 --port 3003
+
 zizmor:
     zizmor .github/workflows/
 
