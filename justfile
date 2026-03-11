@@ -35,6 +35,18 @@ lint: lockfile-check
 test:
     cargo +{{nightly_toolchain}} test --workspace --all-features
 
+ghostty-vt-bridge:
+    ./scripts/build-ghostty-vt-bridge.sh
+
+test-ghostty-vt: ghostty-vt-bridge
+    RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} test -p arbor-terminal-emulator --features ghostty-vt-experimental
+
+check-ghostty-vt-gui: ghostty-vt-bridge
+    RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} check -p arbor-gui --features ghostty-vt-experimental
+
+check-ghostty-vt-httpd: ghostty-vt-bridge
+    RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} check -p arbor-httpd --features ghostty-vt-experimental
+
 zizmor:
     zizmor .github/workflows/
 

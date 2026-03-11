@@ -5,8 +5,16 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+ghostty-vt-experimental = []
+
 [dependencies]
 alacritty_terminal = { workspace = true }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "allow"
+unused_qualifications = "deny"
+
+[lints.clippy]
+expect_used = "deny"
+unwrap_used = "deny"

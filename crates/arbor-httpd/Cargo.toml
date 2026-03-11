@@ -13,6 +13,7 @@ path = "src/main.rs"
 default = ["mdns"]
 mdns = ["dep:zeroconf"]
 vendored-openssl = ["arbor-core/vendored-openssl"]
+ghostty-vt-experimental = ["arbor-terminal-emulator/ghostty-vt-experimental"]
 
 [dependencies]
 arbor-daemon-client = { path = "../arbor-daemon-client" }
