@@ -12027,17 +12027,41 @@ impl ArborWindow {
                 )
             })
             .when(is_pr_mode, |this| {
+                let threads_loading = self.review_threads_loading;
                 this.child(
                     div()
                         .flex()
                         .items_center()
-                        .text_xs()
-                        .text_color(rgb(theme.text_muted))
-                        .child(if self.pr_changed_files_loading {
-                            "Loading PR files...".to_owned()
-                        } else {
-                            format!("{} files", self.pr_changed_files.len())
-                        }),
+                        .gap_2()
+                        .child(div().text_xs().text_color(rgb(theme.text_muted)).child(
+                            if self.pr_changed_files_loading {
+                                "Loading PR files...".to_owned()
+                            } else {
+                                format!("{} files", self.pr_changed_files.len())
+                            },
+                        ))
+                        .child(
+                            div()
+                                .id("refresh-review-comments")
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(rgb(if threads_loading {
+                                    theme.text_disabled
+                                } else {
+                                    theme.text_muted
+                                }))
+                                .hover(|s| s.text_color(rgb(theme.text_primary)))
+                                .child(if threads_loading {
+                                    "\u{f021} ..."
+                                } else {
+                                    "\u{f021}"
+                                })
+                                .when(!threads_loading, |this| {
+                                    this.on_click(cx.listener(|this, _, _, cx| {
+                                        this.refresh_review_threads_for_worktree(cx);
+                                    }))
+                                }),
+                        ),
                 )
             });
 
