@@ -32,6 +32,11 @@ Always run these checks before committing and fix any issues:
 
 If any check fails, fix the issue, then commit the fix.
 
+## Git Workflow
+
+Conventional commits: `feat|fix|docs|style|refactor|test|chore(scope): description`
+**No `Co-Authored-By` trailers.** Update `README.md` features list with `feat` commits.
+
 ## Rust Rules
 
 - Do not use `unwrap()` or `expect()` in non-test code. In test modules, use `#[allow(clippy::unwrap_used, clippy::expect_used)]` on the module.
