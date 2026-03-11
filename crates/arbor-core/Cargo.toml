@@ -9,6 +9,7 @@ version.workspace = true
 vendored-openssl = ["openssl-sys/vendored"]
 
 [dependencies]
+config = { workspace = true }
 openssl-sys = { version = "0.9", optional = true }
 git2 = { workspace = true }
 gix = { workspace = true }

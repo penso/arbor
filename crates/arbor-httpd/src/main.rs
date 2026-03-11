@@ -19,8 +19,9 @@ use {
             KillRequest, ResizeRequest, SignalRequest, SnapshotRequest, TerminalDaemon,
             TerminalSignal, TerminalSnapshot, WriteRequest,
         },
-        process::ProcessInfo,
-        worktree,
+        process::{ProcessInfo, ProcessStatus},
+        repo_config, worktree,
+        worktree_scripts::{WorktreeScriptContext, WorktreeScriptPhase, run_worktree_scripts},
     },
     arbor_daemon_client::{
         AgentSessionDto, ChangedFileDto, CommitWorktreeRequest, CreateTerminalRequest,
@@ -102,6 +103,59 @@ struct AgentSession {
     cwd: String,
     state: AgentState,
     updated_at_unix_ms: u64,
+}
+
+fn repo_webhook_urls_for_event(repo_root: &Path, event_name: &str) -> Vec<String> {
+    let Some(config) = repo_config::load_repo_config(repo_root) else {
+        return Vec::new();
+    };
+
+    let notifications = config.notifications;
+    if !notifications.events.is_empty()
+        && !notifications.events.iter().any(|event| event == event_name)
+    {
+        return Vec::new();
+    }
+
+    notifications
+        .webhook_urls
+        .into_iter()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+        .collect()
+}
+
+fn spawn_notification_webhooks(
+    repo_root: PathBuf,
+    event_name: &'static str,
+    payload: serde_json::Value,
+) {
+    let urls = repo_webhook_urls_for_event(&repo_root, event_name);
+    if urls.is_empty() {
+        return;
+    }
+
+    let payload_text = match serde_json::to_string(&payload) {
+        Ok(payload_text) => payload_text,
+        Err(error) => {
+            tracing::warn!(%error, event = event_name, "failed to serialize webhook payload");
+            return;
+        },
+    };
+
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            for url in urls {
+                let response = ureq::post(&url)
+                    .header("content-type", "application/json")
+                    .send(&payload_text);
+                if let Err(error) = response {
+                    tracing::warn!(%error, %url, event = event_name, "notification webhook failed");
+                }
+            }
+        })
+        .await;
+    });
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -329,11 +383,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
             loop {
                 interval.tick().await;
-                let restart_schedule = {
+                let (restart_schedule, crashed_processes, process_repo_root) = {
                     let mut pm = state.process_manager.lock().await;
                     let mut daemon = state.daemon.lock().await;
-                    pm.check_and_update(&mut *daemon)
+                    let previous = pm.list_processes();
+                    let restart_schedule = pm.check_and_update(&mut *daemon);
+                    let current = pm.list_processes();
+                    let crashed_processes = current
+                        .into_iter()
+                        .filter(|process| {
+                            process.status == ProcessStatus::Crashed
+                                && previous
+                                    .iter()
+                                    .find(|candidate| candidate.name == process.name)
+                                    .map(|candidate| candidate.status)
+                                    != Some(ProcessStatus::Crashed)
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        restart_schedule,
+                        crashed_processes,
+                        pm.repo_root().to_path_buf(),
+                    )
                 };
+                for process in crashed_processes {
+                    spawn_notification_webhooks(
+                        process_repo_root.clone(),
+                        "agent_error",
+                        serde_json::json!({
+                        "event": "agent_error",
+                        "repo_root": process_repo_root.clone(),
+                        "process_name": process.name,
+                        "command": process.command,
+                        "exit_code": process.exit_code,
+                            "timestamp_unix_ms": SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        }),
+                    );
+                }
                 for (name, delay) in restart_schedule {
                     let state = state.clone();
                     tokio::spawn(async move {
@@ -729,6 +818,19 @@ async fn create_worktree(
     .map_err(|error| internal_error(format!("failed to create worktree: {error}")))?;
 
     let resolved_branch = git_branch_name_for_worktree(&worktree_path).ok();
+    let script_context =
+        WorktreeScriptContext::new(&repo_root, &worktree_path, resolved_branch.as_deref());
+    if let Err(error) =
+        run_worktree_scripts(&repo_root, WorktreeScriptPhase::Setup, &script_context)
+    {
+        rollback_created_worktree_http(&repo_root, &worktree_path, branch.as_deref()).map_err(
+            |rollback_error| {
+                internal_error(format!("{error}. rollback also failed: {rollback_error}"))
+            },
+        )?;
+        return Err(internal_error(error.to_string()));
+    }
+
     Ok(Json(WorktreeMutationResponse {
         repo_root: repo_root.display().to_string(),
         path: worktree_path.display().to_string(),
@@ -749,6 +851,9 @@ async fn delete_worktree(
     }
 
     let branch = git_branch_name_for_worktree(&worktree_path).ok();
+    let script_context = WorktreeScriptContext::new(&repo_root, &worktree_path, branch.as_deref());
+    run_worktree_scripts(&repo_root, WorktreeScriptPhase::Teardown, &script_context)
+        .map_err(|error| internal_error(error.to_string()))?;
     worktree::remove(&repo_root, &worktree_path, request.force.unwrap_or(false))
         .map_err(|error| internal_error(format!("failed to delete worktree: {error}")))?;
 
@@ -771,6 +876,19 @@ async fn delete_worktree(
         deleted_branch,
         message: format!("deleted worktree at {}", worktree_path.display()),
     }))
+}
+
+fn rollback_created_worktree_http(
+    repo_root: &Path,
+    worktree_path: &Path,
+    created_branch: Option<&str>,
+) -> Result<(), String> {
+    worktree::remove(repo_root, worktree_path, true).map_err(|error| error.to_string())?;
+    if let Some(branch_name) = created_branch.filter(|value| !value.trim().is_empty()) {
+        worktree::delete_branch(repo_root, branch_name)
+            .map_err(|error| format!("failed to delete branch `{branch_name}`: {error}"))?;
+    }
+    Ok(())
 }
 
 async fn list_worktree_changes(
@@ -1241,6 +1359,7 @@ async fn agent_notify(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let session_id = request.session_id.clone();
 
     let dto = {
         let mut sessions = state.agent_sessions.lock().await;
@@ -1270,6 +1389,25 @@ async fn agent_notify(
         state = dto.state.as_str(),
         "agent session updated, broadcasting"
     );
+    if agent_state == AgentState::Waiting {
+        let cwd_path = PathBuf::from(&dto.cwd);
+        if let Ok(repo_root) = worktree::repo_root(&cwd_path) {
+            let branch = git_branch_name_for_worktree(&cwd_path).ok();
+            spawn_notification_webhooks(
+                repo_root.clone(),
+                "agent_finished",
+                serde_json::json!({
+                    "event": "agent_finished",
+                    "repo_root": repo_root,
+                    "worktree_path": cwd_path,
+                    "cwd": dto.cwd.clone(),
+                    "branch": branch,
+                    "session_id": session_id,
+                    "timestamp_unix_ms": now_ms,
+                }),
+            );
+        }
+    }
     let _ = state
         .agent_broadcast
         .send(AgentWsEvent::Update { session: dto });

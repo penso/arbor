@@ -4,8 +4,9 @@ use {
             CreateOrAttachRequest, KillRequest, TerminalDaemon, TerminalSessionState, default_shell,
         },
         process::{ProcessInfo, ProcessStatus},
+        repo_config,
     },
-    serde::{Deserialize, Serialize},
+    serde::Serialize,
     std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -17,17 +18,7 @@ use {
 const MAX_BACKOFF_SECS: u64 = 30;
 const BACKOFF_RESET_SECS: u64 = 60;
 
-/// Deserialized from the `[[processes]]` array in `arbor.toml`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ProcessConfig {
-    pub name: String,
-    pub command: String,
-    pub working_dir: Option<String>,
-    pub auto_start: Option<bool>,
-    pub auto_restart: Option<bool>,
-    pub restart_delay_ms: Option<u64>,
-}
+pub type ProcessConfig = repo_config::ProcessConfig;
 
 /// Internal state for each managed process.
 struct ManagedProcess {
@@ -108,6 +99,10 @@ impl ProcessManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ProcessEvent> {
         self.broadcast.subscribe()
+    }
+
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
     }
 
     /// Load process configs from parsed `arbor.toml`.
@@ -354,24 +349,7 @@ impl ProcessManager {
 
 /// Load `[[processes]]` from an `arbor.toml` file.
 pub fn load_process_configs(repo_root: &Path) -> Vec<ProcessConfig> {
-    let path = repo_root.join("arbor.toml");
-    if !path.exists() {
-        return Vec::new();
-    }
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    #[derive(Deserialize)]
-    struct ArborToml {
-        #[serde(default)]
-        processes: Vec<ProcessConfig>,
-    }
-
-    match toml::from_str::<ArborToml>(&content) {
-        Ok(parsed) => parsed.processes,
-        Err(_) => Vec::new(),
-    }
+    repo_config::load_repo_config(repo_root)
+        .map(|config| config.processes)
+        .unwrap_or_default()
 }

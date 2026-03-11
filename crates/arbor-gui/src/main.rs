@@ -24,6 +24,7 @@ use {
             WriteRequest,
         },
         worktree,
+        worktree_scripts::{WorktreeScriptContext, WorktreeScriptPhase, run_worktree_scripts},
     },
     checkout::CheckoutKind,
     gix_diff::blob::v2::{
@@ -260,6 +261,7 @@ actions!(arbor, [
     CloseActiveTerminal,
     OpenManagePresets,
     OpenManageRepoPresets,
+    OpenCommandPalette,
     RefreshWorktrees,
     RefreshChanges,
     OpenAddRepository,
@@ -1510,6 +1512,52 @@ struct ConnectToHostModal {
 }
 
 #[derive(Debug, Clone)]
+struct CommitModal {
+    message: String,
+    message_cursor: usize,
+    generating: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CommandPaletteModal {
+    query: String,
+    query_cursor: usize,
+    selected_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CommandPaletteItem {
+    title: String,
+    subtitle: String,
+    search_text: String,
+    action: CommandPaletteAction,
+}
+
+#[derive(Debug, Clone)]
+enum CommandPaletteAction {
+    OpenCreateWorktree,
+    RefreshWorktrees,
+    OpenSettings,
+    OpenThemePicker,
+    LaunchAgentPreset(AgentPresetKind),
+    LaunchRepoPreset(usize),
+    SelectRepository(usize),
+    SelectWorktree(usize),
+    LaunchTaskTemplate(TaskTemplate),
+}
+
+#[derive(Debug, Clone)]
+struct TaskTemplate {
+    name: String,
+    description: String,
+    prompt: String,
+    agent: Option<AgentPresetKind>,
+    path: PathBuf,
+    repo_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 enum TextEditAction {
     Insert(String),
     Backspace,
@@ -1700,6 +1748,7 @@ struct ArborWindow {
     preferred_checkout_kind: CheckoutKind,
     github_auth_modal: Option<GitHubAuthModal>,
     delete_modal: Option<DeleteModal>,
+    commit_modal: Option<CommitModal>,
     outposts: Vec<OutpostSummary>,
     outpost_store: Box<dyn arbor_core::outpost_store::OutpostStore>,
     active_outpost_index: Option<usize>,
@@ -1720,6 +1769,7 @@ struct ArborWindow {
     pending_remote_daemon_auth: Option<usize>,
     start_daemon_modal: bool,
     connect_to_host_modal: Option<ConnectToHostModal>,
+    command_palette_modal: Option<CommandPaletteModal>,
     connection_history: Vec<connection_history::ConnectionHistoryEntry>,
     daemon_auth_tokens: HashMap<String, String>,
     connected_daemon_label: Option<String>,
@@ -1961,6 +2011,7 @@ impl ArborWindow {
                         .unwrap_or_default(),
                     github_auth_modal: None,
                     delete_modal: None,
+                    commit_modal: None,
                     outposts,
                     outpost_store,
                     active_outpost_index: None,
@@ -1980,6 +2031,7 @@ impl ArborWindow {
                     pending_remote_daemon_auth: None,
                     start_daemon_modal: false,
                     connect_to_host_modal: None,
+                    command_palette_modal: None,
                     connection_history: connection_history::load_history(),
                     daemon_auth_tokens: connection_history::load_tokens(),
                     connected_daemon_label: None,
@@ -2277,6 +2329,7 @@ impl ArborWindow {
             preferred_checkout_kind: startup_ui_state.preferred_checkout_kind.unwrap_or_default(),
             github_auth_modal: None,
             delete_modal: None,
+            commit_modal: None,
             outposts,
             outpost_store,
             active_outpost_index: None,
@@ -2296,6 +2349,7 @@ impl ArborWindow {
             pending_remote_daemon_auth: None,
             start_daemon_modal: false,
             connect_to_host_modal: None,
+            command_palette_modal: None,
             connection_history: connection_history::load_history(),
             daemon_auth_tokens: connection_history::load_tokens(),
             connected_daemon_label: None,
@@ -2959,6 +3013,37 @@ impl ArborWindow {
         if self.notifications_enabled && !self.window_is_active {
             self.notification_service.send(title, body, play_sound);
         }
+    }
+
+    fn repo_allows_desktop_notification(
+        &self,
+        worktree: &WorktreeSummary,
+        event_name: &str,
+    ) -> bool {
+        let Some(config) = self.app_config_store.load_repo_config(&worktree.repo_root) else {
+            return true;
+        };
+
+        let notifications = config.notifications;
+        if notifications.desktop == Some(false) {
+            return false;
+        }
+
+        notifications.events.is_empty()
+            || notifications.events.iter().any(|event| event == event_name)
+    }
+
+    fn maybe_notify_agent_finished(&self, worktree: &WorktreeSummary) {
+        if !self.repo_allows_desktop_notification(worktree, "agent_finished") {
+            return;
+        }
+
+        let body = if let Some(task) = worktree.agent_task.as_deref() {
+            format!("{} is waiting: {task}", worktree.label)
+        } else {
+            format!("{} is waiting", worktree.label)
+        };
+        self.maybe_notify("Agent finished", &body, true);
     }
 
     fn sync_running_terminals(&mut self, cx: &mut Context<Self>) {
@@ -5602,7 +5687,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn run_commit_action(&mut self, cx: &mut Context<Self>) {
+    fn open_commit_modal(&mut self, cx: &mut Context<Self>) {
         if self.git_action_in_flight.is_some() {
             return;
         }
@@ -5613,7 +5698,7 @@ impl ArborWindow {
             return;
         }
 
-        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+        let Some(_) = self.selected_worktree_path().map(Path::to_path_buf) else {
             self.notice = Some("select a worktree before committing".to_owned());
             cx.notify();
             return;
@@ -5625,14 +5710,51 @@ impl ArborWindow {
             return;
         }
 
+        let initial_message = default_commit_message(&self.changed_files);
+        self.commit_modal = Some(CommitModal {
+            message_cursor: char_count(&initial_message),
+            message: initial_message,
+            generating: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn close_commit_modal(&mut self, cx: &mut Context<Self>) {
+        self.commit_modal = None;
+        cx.notify();
+    }
+
+    fn submit_commit_modal(&mut self, cx: &mut Context<Self>) {
+        if self.git_action_in_flight.is_some() {
+            return;
+        }
+
+        let Some(modal) = self.commit_modal.as_ref() else {
+            return;
+        };
+
+        let message = modal.message.trim().to_owned();
+        if message.is_empty() {
+            if let Some(modal) = self.commit_modal.as_mut() {
+                modal.error = Some("Commit message is required.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before committing".to_owned());
+            cx.notify();
+            return;
+        };
+
         let changed_files = self.changed_files.clone();
         self.git_action_in_flight = Some(GitActionKind::Commit);
         self.notice = Some("running git commit".to_owned());
-        cx.notify();
-
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move {
-                run_git_commit_for_worktree(worktree_path.as_path(), &changed_files)
+                run_git_commit_for_worktree(worktree_path.as_path(), &changed_files, &message)
             });
             let result = result.await;
 
@@ -5640,14 +5762,64 @@ impl ArborWindow {
                 this.git_action_in_flight = None;
                 match result {
                     Ok(message) => {
+                        this.commit_modal = None;
                         this.notice = Some(message);
                         let _ = this.reload_changed_files();
                         this.refresh_worktree_diff_summaries(cx);
                         this.refresh_worktree_pull_requests(cx);
                     },
                     Err(error) => {
-                        this.notice = Some(error);
+                        if let Some(modal) = this.commit_modal.as_mut() {
+                            modal.error = Some(error);
+                        } else {
+                            this.notice = Some("failed to create commit".to_owned());
+                        }
                     },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn generate_commit_message_with_ai(&mut self, cx: &mut Context<Self>) {
+        if self.git_action_in_flight.is_some() {
+            return;
+        }
+
+        let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
+            self.notice = Some("select a worktree before generating a commit message".to_owned());
+            cx.notify();
+            return;
+        };
+        let changed_files = self.changed_files.clone();
+        let preset = self.active_preset_tab.unwrap_or(AgentPresetKind::Codex);
+
+        if let Some(modal) = self.commit_modal.as_mut() {
+            modal.generating = true;
+            modal.error = None;
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                generate_commit_message_with_ai(worktree_path.as_path(), &changed_files, preset)
+            });
+            let result = result.await;
+
+            let _ = this.update(cx, |this, cx| {
+                if let Some(modal) = this.commit_modal.as_mut() {
+                    modal.generating = false;
+                    match result {
+                        Ok(message) => {
+                            modal.message = message.clone();
+                            modal.message_cursor = char_count(&message);
+                            modal.error = None;
+                        },
+                        Err(error) => {
+                            modal.error = Some(error);
+                        },
+                    }
                 }
                 cx.notify();
             });
@@ -6116,30 +6288,35 @@ impl ArborWindow {
                 }
 
                 cx.spawn(async move |this, cx| {
-                    let result = if is_discrete_clone {
-                        cx.background_spawn({
-                            let wt_path = wt_path.clone();
-                            async move {
-                                fs::remove_dir_all(&wt_path).map_err(|error| {
-                                    format!(
-                                        "failed to remove discrete clone `{}`: {error}",
-                                        wt_path.display()
-                                    )
-                                })
-                            }
-                        })
-                        .await
-                    } else {
-                        cx.background_spawn({
+                    let result = cx
+                        .background_spawn({
                             let repo_root = repo_root.clone();
                             let wt_path = wt_path.clone();
+                            let branch = branch.clone();
                             async move {
-                                worktree::remove(&repo_root, &wt_path, true)
-                                    .map_err(|error| error.to_string())
+                                let script_context =
+                                    WorktreeScriptContext::new(&repo_root, &wt_path, Some(&branch));
+                                run_worktree_scripts(
+                                    &repo_root,
+                                    WorktreeScriptPhase::Teardown,
+                                    &script_context,
+                                )
+                                .map_err(|error| error.to_string())?;
+
+                                if is_discrete_clone {
+                                    fs::remove_dir_all(&wt_path).map_err(|error| {
+                                        format!(
+                                            "failed to remove discrete clone `{}`: {error}",
+                                            wt_path.display()
+                                        )
+                                    })
+                                } else {
+                                    worktree::remove(&repo_root, &wt_path, true)
+                                        .map_err(|error| error.to_string())
+                                }
                             }
                         })
-                        .await
-                    };
+                        .await;
 
                     if let Err(e) = &result {
                         let err_msg = e.to_string();
@@ -7386,6 +7563,68 @@ impl ArborWindow {
             return;
         }
 
+        if self.commit_modal.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_commit_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.submit_commit_modal(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                if let Some(modal) = self.commit_modal.as_mut() {
+                    apply_text_edit_action(&mut modal.message, &mut modal.message_cursor, &action);
+                    modal.error = None;
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        if self.command_palette_modal.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.close_command_palette(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "enter" | "return" => {
+                    self.execute_command_palette_selection(window, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "up" => {
+                    self.move_command_palette_selection(-1, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "down" => {
+                    self.move_command_palette_selection(1, cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+
+            if let Some(action) = text_edit_action_for_event(event, cx) {
+                if let Some(modal) = self.command_palette_modal.as_mut() {
+                    apply_text_edit_action(&mut modal.query, &mut modal.query_cursor, &action);
+                    modal.selected_index = 0;
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }
+            return;
+        }
+
         if self.connect_to_host_modal.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => {
@@ -7657,6 +7896,306 @@ impl ArborWindow {
     ) {
         let repo_index = self.active_repository_index.unwrap_or(0);
         self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
+    }
+
+    fn open_command_palette(&mut self, cx: &mut Context<Self>) {
+        self.command_palette_modal = Some(CommandPaletteModal {
+            query: String::new(),
+            query_cursor: 0,
+            selected_index: 0,
+        });
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, cx: &mut Context<Self>) {
+        self.command_palette_modal = None;
+        cx.notify();
+    }
+
+    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        let mut items = vec![
+            CommandPaletteItem {
+                title: "New Worktree".to_owned(),
+                subtitle: "Create a local worktree".to_owned(),
+                search_text: "new worktree create".to_owned(),
+                action: CommandPaletteAction::OpenCreateWorktree,
+            },
+            CommandPaletteItem {
+                title: "Refresh Worktrees".to_owned(),
+                subtitle: "Reload repositories and worktrees".to_owned(),
+                search_text: "refresh worktrees reload repos".to_owned(),
+                action: CommandPaletteAction::RefreshWorktrees,
+            },
+            CommandPaletteItem {
+                title: "Open Settings".to_owned(),
+                subtitle: "Edit Arbor settings".to_owned(),
+                search_text: "settings preferences config".to_owned(),
+                action: CommandPaletteAction::OpenSettings,
+            },
+            CommandPaletteItem {
+                title: "Choose Theme".to_owned(),
+                subtitle: "Switch the application theme".to_owned(),
+                search_text: "theme appearance colors".to_owned(),
+                action: CommandPaletteAction::OpenThemePicker,
+            },
+        ];
+
+        for preset in AgentPresetKind::ORDER.iter().copied() {
+            items.push(CommandPaletteItem {
+                title: format!("Launch {}", preset.label()),
+                subtitle: "Start an agent terminal".to_owned(),
+                search_text: format!("launch agent {}", preset.label().to_ascii_lowercase()),
+                action: CommandPaletteAction::LaunchAgentPreset(preset),
+            });
+        }
+
+        for (index, preset) in self.repo_presets.iter().enumerate() {
+            items.push(CommandPaletteItem {
+                title: format!("Run {}", preset.name),
+                subtitle: "Run repo preset".to_owned(),
+                search_text: format!(
+                    "preset repo {} {}",
+                    preset.name.to_ascii_lowercase(),
+                    preset.command.to_ascii_lowercase()
+                ),
+                action: CommandPaletteAction::LaunchRepoPreset(index),
+            });
+        }
+
+        for (index, repository) in self.repositories.iter().enumerate() {
+            items.push(CommandPaletteItem {
+                title: repository.label.clone(),
+                subtitle: "Repository".to_owned(),
+                search_text: format!(
+                    "repository repo {} {}",
+                    repository.label.to_ascii_lowercase(),
+                    repository.root.display()
+                ),
+                action: CommandPaletteAction::SelectRepository(index),
+            });
+        }
+
+        for (index, worktree) in self.worktrees.iter().enumerate() {
+            items.push(CommandPaletteItem {
+                title: worktree.label.clone(),
+                subtitle: format!("Worktree · {}", worktree.branch),
+                search_text: format!(
+                    "worktree {} {} {}",
+                    worktree.label.to_ascii_lowercase(),
+                    worktree.branch.to_ascii_lowercase(),
+                    worktree.path.display()
+                ),
+                action: CommandPaletteAction::SelectWorktree(index),
+            });
+        }
+
+        for task in self.load_all_task_templates() {
+            let agent_label = task
+                .agent
+                .map(|agent| agent.label().to_owned())
+                .unwrap_or_else(|| "Default agent".to_owned());
+            items.push(CommandPaletteItem {
+                title: task.name.clone(),
+                subtitle: format!(
+                    "Task · {} · {}",
+                    repository_display_name(&task.repo_root),
+                    agent_label
+                ),
+                search_text: format!(
+                    "task {} {} {} {}",
+                    task.name.to_ascii_lowercase(),
+                    task.description.to_ascii_lowercase(),
+                    task.prompt.to_ascii_lowercase(),
+                    task.path.display()
+                ),
+                action: CommandPaletteAction::LaunchTaskTemplate(task),
+            });
+        }
+
+        items
+    }
+
+    fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        let Some(modal) = self.command_palette_modal.as_ref() else {
+            return Vec::new();
+        };
+
+        let query = modal.query.trim().to_ascii_lowercase();
+        let mut items = self.command_palette_items();
+        if query.is_empty() {
+            return items;
+        }
+
+        items.retain(|item| {
+            item.search_text.contains(&query) || item.title.to_ascii_lowercase().contains(&query)
+        });
+        items.sort_by_key(|item| {
+            let title = item.title.to_ascii_lowercase();
+            if title.starts_with(&query) {
+                0
+            } else if title.contains(&query) {
+                1
+            } else {
+                2
+            }
+        });
+        items
+    }
+
+    fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let item_count = self.filtered_command_palette_items().len();
+        let Some(modal) = self.command_palette_modal.as_mut() else {
+            return;
+        };
+        if item_count == 0 {
+            modal.selected_index = 0;
+            cx.notify();
+            return;
+        }
+
+        let current = modal.selected_index.min(item_count - 1) as isize;
+        let next = (current + delta).rem_euclid(item_count as isize) as usize;
+        modal.selected_index = next;
+        cx.notify();
+    }
+
+    fn execute_command_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected_index = self
+            .command_palette_modal
+            .as_ref()
+            .map(|modal| modal.selected_index)
+            .unwrap_or(0);
+        let items = self.filtered_command_palette_items();
+        let Some(item) = items.get(selected_index).cloned() else {
+            return;
+        };
+
+        self.command_palette_modal = None;
+        match item.action {
+            CommandPaletteAction::OpenCreateWorktree => {
+                let repo_index = self.active_repository_index.unwrap_or(0);
+                self.open_create_modal(repo_index, CreateModalTab::LocalWorktree, cx);
+            },
+            CommandPaletteAction::RefreshWorktrees => self.refresh_worktrees(cx),
+            CommandPaletteAction::OpenSettings => self.open_settings_modal(cx),
+            CommandPaletteAction::OpenThemePicker => self.show_theme_picker = true,
+            CommandPaletteAction::LaunchAgentPreset(preset) => {
+                self.launch_agent_preset(preset, window, cx);
+            },
+            CommandPaletteAction::LaunchRepoPreset(index) => {
+                self.launch_repo_preset(index, window, cx);
+            },
+            CommandPaletteAction::SelectRepository(index) => self.select_repository(index, cx),
+            CommandPaletteAction::SelectWorktree(index) => self.select_worktree(index, window, cx),
+            CommandPaletteAction::LaunchTaskTemplate(task) => {
+                self.launch_task_template(&task, window, cx);
+            },
+        }
+        cx.notify();
+    }
+
+    fn load_all_task_templates(&self) -> Vec<TaskTemplate> {
+        let mut tasks = Vec::new();
+        for repository in &self.repositories {
+            tasks.extend(load_task_templates_for_repo(&repository.root));
+        }
+        tasks
+    }
+
+    fn launch_task_template(
+        &mut self,
+        task: &TaskTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo_index) = self
+            .repositories
+            .iter()
+            .position(|repository| repository.root == task.repo_root)
+        else {
+            self.notice = Some(format!(
+                "task repository is not available: {}",
+                task.repo_root.display()
+            ));
+            cx.notify();
+            return;
+        };
+
+        if self.active_repository_index != Some(repo_index) {
+            self.select_repository(repo_index, cx);
+        }
+
+        let group_key = self
+            .repositories
+            .get(repo_index)
+            .map(|repository| repository.group_key.clone());
+        let worktree_index = group_key.and_then(|group_key| {
+            self.worktrees
+                .iter()
+                .position(|worktree| worktree.group_key == group_key)
+        });
+        let Some(worktree_index) = worktree_index else {
+            self.notice = Some(format!(
+                "no worktree is available for {}",
+                repository_display_name(&task.repo_root)
+            ));
+            cx.notify();
+            return;
+        };
+
+        if self.active_worktree_index != Some(worktree_index) {
+            self.select_worktree(worktree_index, window, cx);
+        }
+
+        let preset = task
+            .agent
+            .unwrap_or_else(|| self.active_preset_tab.unwrap_or(AgentPresetKind::Codex));
+        let command = self.preset_command_for_kind(preset).trim().to_owned();
+        if command.is_empty() {
+            self.notice = Some(format!("{} preset command is empty", preset.label()));
+            cx.notify();
+            return;
+        }
+
+        let invocation = format!("{command} {}\n", shell_quote(&task.prompt));
+        let terminal_count_before = self.terminals.len();
+        self.spawn_terminal_session(window, cx);
+        if self.terminals.len() <= terminal_count_before {
+            return;
+        }
+
+        let Some(session_id) = self.terminals.last().map(|session| session.id) else {
+            return;
+        };
+
+        if let Err(error) = self.write_input_to_terminal(session_id, invocation.as_bytes()) {
+            self.notice = Some(format!("failed to run task {}: {error}", task.name));
+            cx.notify();
+            return;
+        }
+
+        if let Some(session) = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.last_command = Some(invocation.trim().to_owned());
+            session.pending_command.clear();
+            session.updated_at_unix_ms = current_unix_timestamp_millis();
+        }
+
+        self.notice = Some(format!("launched task {}", task.name));
+        self.sync_daemon_session_store(cx);
+        cx.notify();
+    }
+
+    fn action_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_command_palette(cx);
     }
 
     fn action_open_add_repository(
@@ -12491,7 +13030,7 @@ impl ArborWindow {
                                 )
                                 .when(commit_enabled, |this| {
                                     this.on_click(cx.listener(|this, _, _, cx| {
-                                        this.run_commit_action(cx);
+                                        this.open_commit_modal(cx);
                                     }))
                                 }),
                             )
@@ -15077,6 +15616,295 @@ impl ArborWindow {
                                     }))
                                 }),
                             ),
+                    ),
+            )
+    }
+
+    fn render_commit_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.commit_modal.clone() else {
+            return div();
+        };
+        let theme = self.theme();
+        let default_message = default_commit_message(&self.changed_files);
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_commit_modal(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(modal_backdrop())
+            .child(
+                div()
+                    .w(px(640.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child("Commit Changes"),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgb(theme.text_muted)).child(
+                            "Review or generate the commit message before creating the commit.",
+                        ),
+                    )
+                    .child(
+                        div()
+                            .min_h(px(110.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme.accent))
+                            .bg(rgb(theme.panel_bg))
+                            .px_3()
+                            .py_2()
+                            .font_family(FONT_MONO)
+                            .text_sm()
+                            .text_color(rgb(theme.text_primary))
+                            .child(active_input_display(
+                                theme,
+                                &modal.message,
+                                "commit message",
+                                theme.text_primary,
+                                modal.message_cursor,
+                                240,
+                            )),
+                    )
+                    .child(div().when_some(modal.error.clone(), |this, error| {
+                        this.rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0xa44949))
+                            .bg(rgb(0x4d2a2a))
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(0xffd7d7))
+                            .child(error)
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            "commit-generate",
+                                            if modal.generating {
+                                                "Generating..."
+                                            } else {
+                                                "Generate"
+                                            },
+                                            ActionButtonStyle::Secondary,
+                                            !modal.generating,
+                                        )
+                                        .when(
+                                            !modal.generating,
+                                            |this| {
+                                                this.on_click(cx.listener(|this, _, _, cx| {
+                                                    this.generate_commit_message_with_ai(cx);
+                                                }))
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            "commit-default",
+                                            "Use Default",
+                                            ActionButtonStyle::Secondary,
+                                            true,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                if let Some(modal) = this.commit_modal.as_mut() {
+                                                    modal.message = default_message.clone();
+                                                    modal.message_cursor =
+                                                        char_count(&default_message);
+                                                    modal.error = None;
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            "commit-cancel",
+                                            "Cancel",
+                                            ActionButtonStyle::Secondary,
+                                            true,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.close_commit_modal(cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        action_button(
+                                            theme,
+                                            "commit-submit",
+                                            "Commit",
+                                            ActionButtonStyle::Primary,
+                                            !modal.generating,
+                                        )
+                                        .when(
+                                            !modal.generating,
+                                            |this| {
+                                                this.on_click(cx.listener(|this, _, _, cx| {
+                                                    this.submit_commit_modal(cx);
+                                                }))
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_command_palette_modal(&mut self, cx: &mut Context<Self>) -> Div {
+        let Some(modal) = self.command_palette_modal.clone() else {
+            return div();
+        };
+        let theme = self.theme();
+        let items = self.filtered_command_palette_items();
+        let selected_index = if items.is_empty() {
+            0
+        } else {
+            modal.selected_index.min(items.len() - 1)
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(72.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close_command_palette(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(modal_backdrop())
+            .child(
+                div()
+                    .w(px(640.))
+                    .max_w(px(640.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.sidebar_bg))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(theme.border))
+                            .child(div().font_family(FONT_UI).text_sm().child(
+                                active_input_display(
+                                    theme,
+                                    &modal.query,
+                                    "Search actions, worktrees, presets...",
+                                    theme.text_primary,
+                                    modal.query_cursor,
+                                    72,
+                                ),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .max_h(px(360.))
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .when(items.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .px_3()
+                                        .py_3()
+                                        .text_sm()
+                                        .text_color(rgb(theme.text_muted))
+                                        .child("No results"),
+                                )
+                            })
+                            .children(items.into_iter().take(10).enumerate().map(
+                                |(index, item)| {
+                                    let is_selected = index == selected_index;
+                                    div()
+                                        .id(("command-palette-item", index))
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_2()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        .bg(rgb(if is_selected {
+                                            theme.panel_active_bg
+                                        } else {
+                                            theme.sidebar_bg
+                                        }))
+                                        .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if let Some(modal) = this.command_palette_modal.as_mut()
+                                            {
+                                                modal.selected_index = index;
+                                            }
+                                            this.execute_command_palette_selection(window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(theme.text_primary))
+                                                .child(item.title),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(theme.text_muted))
+                                                .child(item.subtitle),
+                                        )
+                                },
+                            )),
                     ),
             )
     }
@@ -17692,6 +18520,18 @@ impl EntityInputHandler for ArborWindow {
             cx.notify();
             return;
         }
+        if let Some(ref mut modal) = self.command_palette_modal {
+            modal.query.push_str(text);
+            modal.selected_index = 0;
+            cx.notify();
+            return;
+        }
+        if let Some(ref mut modal) = self.commit_modal {
+            modal.message.push_str(text);
+            modal.error = None;
+            cx.notify();
+            return;
+        }
         if self.welcome_clone_url_active {
             self.welcome_clone_url.push_str(text);
             self.welcome_clone_error = None;
@@ -17776,6 +18616,7 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_close_active_terminal))
             .on_action(cx.listener(Self::action_open_manage_presets))
             .on_action(cx.listener(Self::action_open_manage_repo_presets))
+            .on_action(cx.listener(Self::action_open_command_palette))
             .on_action(cx.listener(Self::action_refresh_worktrees))
             .on_action(cx.listener(Self::action_refresh_changes))
             .on_action(cx.listener(Self::action_open_add_repository))
@@ -17841,6 +18682,8 @@ impl Render for ArborWindow {
             .child(self.render_manage_hosts_modal(cx))
             .child(self.render_manage_presets_modal(cx))
             .child(self.render_manage_repo_presets_modal(cx))
+            .child(self.render_commit_modal(cx))
+            .child(self.render_command_palette_modal(cx))
             .child(self.render_about_modal(cx))
             .child(self.render_theme_picker_modal(cx))
             .child(self.render_settings_modal(cx))
@@ -18045,19 +18888,27 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
             .filter(|wt_path| cwd_path.starts_with(wt_path))
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
-        if let Some(matched_path) = best_match
-            && let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path)
-        {
-            tracing::info!(
-                cwd = %cwd,
-                worktree = %worktree.path.display(),
-                ?state,
-                "agent activity matched to worktree"
-            );
-            worktree.agent_state = Some(*state);
-            if let Some(ts) = updated_at {
-                worktree.last_activity_unix_ms =
-                    Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
+        if let Some(matched_path) = best_match {
+            let mut notification_worktree: Option<WorktreeSummary> = None;
+            if let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path) {
+                let previous_state = worktree.agent_state;
+                tracing::info!(
+                    cwd = %cwd,
+                    worktree = %worktree.path.display(),
+                    ?state,
+                    "agent activity matched to worktree"
+                );
+                worktree.agent_state = Some(*state);
+                if let Some(ts) = updated_at {
+                    worktree.last_activity_unix_ms =
+                        Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
+                }
+                if previous_state == Some(AgentState::Working) && *state == AgentState::Waiting {
+                    notification_worktree = Some(worktree.clone());
+                }
+            }
+            if let Some(worktree) = notification_worktree.as_ref() {
+                app.maybe_notify_agent_finished(worktree);
             }
         } else {
             tracing::warn!(
@@ -20889,9 +21740,97 @@ fn auto_commit_body(changed_files: &[ChangedFile]) -> String {
     lines.join("\n")
 }
 
+fn default_commit_message(changed_files: &[ChangedFile]) -> String {
+    format!(
+        "{}\n\n{}",
+        auto_commit_subject(changed_files),
+        auto_commit_body(changed_files)
+    )
+}
+
+fn generate_commit_message_with_ai(
+    worktree_path: &Path,
+    changed_files: &[ChangedFile],
+    preset: AgentPresetKind,
+) -> Result<String, String> {
+    let prompt = build_commit_message_prompt(changed_files);
+
+    let output = match preset {
+        AgentPresetKind::Claude => run_command_output(
+            Command::new("claude")
+                .current_dir(worktree_path)
+                .arg("--print")
+                .arg(&prompt),
+            "claude commit message generation",
+        ),
+        AgentPresetKind::Codex => run_command_output(
+            Command::new("codex")
+                .current_dir(worktree_path)
+                .arg("exec")
+                .arg(&prompt),
+            "codex commit message generation",
+        ),
+        AgentPresetKind::OpenCode => run_command_output(
+            Command::new("opencode")
+                .current_dir(worktree_path)
+                .arg("run")
+                .arg(&prompt),
+            "opencode commit message generation",
+        ),
+        AgentPresetKind::Pi | AgentPresetKind::Copilot => {
+            return Err(format!(
+                "{} does not support non-interactive commit generation yet",
+                preset.label()
+            ));
+        },
+    }?;
+
+    if !output.status.success() {
+        return Err(command_failure_message(
+            "commit message generation",
+            &output,
+        ));
+    }
+
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if message.is_empty() {
+        return Err("AI commit message generation returned empty output".to_owned());
+    }
+
+    Ok(message)
+}
+
+fn build_commit_message_prompt(changed_files: &[ChangedFile]) -> String {
+    let mut prompt = String::from(
+        "Write a concise git commit message for these changes. Return only the commit message text.\n",
+    );
+    prompt
+        .push_str("Use a short subject line, then an optional blank line and body if useful.\n\n");
+    prompt.push_str("Changed files:\n");
+
+    for change in changed_files.iter().take(20) {
+        let mut line = format!("- {} {}", change_code(change.kind), change.path.display());
+        if change.additions > 0 || change.deletions > 0 {
+            line.push_str(&format!(" (+{} -{})", change.additions, change.deletions));
+        }
+        prompt.push_str(&line);
+        prompt.push('\n');
+    }
+
+    if changed_files.len() > 20 {
+        prompt.push_str(&format!(
+            "- ... and {} more files\n",
+            changed_files.len() - 20
+        ));
+    }
+
+    prompt
+}
+
 fn run_git_commit_for_worktree(
     worktree_path: &Path,
     changed_files: &[ChangedFile],
+    message: &str,
 ) -> Result<String, String> {
     if changed_files.is_empty() {
         return Err("nothing to commit".to_owned());
@@ -20933,9 +21872,11 @@ fn run_git_commit_for_worktree(
         return Err("nothing to commit".to_owned());
     }
 
-    let subject = auto_commit_subject(changed_files);
-    let body = auto_commit_body(changed_files);
-    let message = format!("{subject}\n\n{body}");
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("commit message cannot be empty".to_owned());
+    }
+    let subject = message.lines().next().unwrap_or("commit");
 
     let sig = repo
         .signature()
@@ -20947,7 +21888,7 @@ fn run_git_commit_for_worktree(
     };
     let parents: Vec<&git2::Commit<'_>> = parent_commits.iter().collect();
 
-    repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(|error| format!("failed to create commit: {error}"))?;
 
     Ok(format!("commit complete: {subject}"))
@@ -21654,6 +22595,23 @@ fn create_managed_worktree(
         },
     }
 
+    let script_context =
+        WorktreeScriptContext::new(&repository_root, &worktree_path, Some(&branch_name));
+    if let Err(error) = run_worktree_scripts(
+        &repository_root,
+        WorktreeScriptPhase::Setup,
+        &script_context,
+    ) {
+        rollback_created_checkout(
+            &repository_root,
+            &worktree_path,
+            checkout_kind,
+            &branch_name,
+        )
+        .map_err(|rollback_error| format!("{error}. rollback also failed: {rollback_error}"))?;
+        return Err(error.to_string());
+    }
+
     Ok(CreatedWorktree {
         worktree_name: sanitized_worktree_name,
         branch_name,
@@ -21718,6 +22676,123 @@ fn create_discrete_clone(
         .map_err(|error| format!("failed to check out `{branch_name}`: {error}"))?;
 
     Ok(())
+}
+
+fn rollback_created_checkout(
+    repo_root: &Path,
+    worktree_path: &Path,
+    checkout_kind: CheckoutKind,
+    branch_name: &str,
+) -> Result<(), String> {
+    match checkout_kind {
+        CheckoutKind::LinkedWorktree => {
+            worktree::remove(repo_root, worktree_path, true).map_err(|error| error.to_string())?;
+            if !branch_name.trim().is_empty() {
+                worktree::delete_branch(repo_root, branch_name)
+                    .map_err(|error| format!("failed to delete branch `{branch_name}`: {error}"))?;
+            }
+        },
+        CheckoutKind::DiscreteClone => {
+            if worktree_path.exists() {
+                fs::remove_dir_all(worktree_path).map_err(|error| {
+                    format!(
+                        "failed to remove checkout `{}` during rollback: {error}",
+                        worktree_path.display()
+                    )
+                })?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+fn load_task_templates_for_repo(repo_root: &Path) -> Vec<TaskTemplate> {
+    let tasks_dir = repo_root.join(".arbor/tasks");
+    let Ok(entries) = fs::read_dir(&tasks_dir) else {
+        return Vec::new();
+    };
+
+    let mut tasks = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(task) = parse_task_template(&path, repo_root) {
+            tasks.push(task);
+        }
+    }
+    tasks.sort_by(|left, right| left.name.cmp(&right.name));
+    tasks
+}
+
+fn parse_task_template(path: &Path, repo_root: &Path) -> Option<TaskTemplate> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut name = path.file_stem()?.to_string_lossy().into_owned();
+    let mut agent = None;
+    let mut body = content.as_str();
+
+    if content
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim() == "---")
+    {
+        let mut frontmatter = Vec::new();
+        let mut body_start_offset = None;
+        let mut offset = 0usize;
+        for (index, line) in content.lines().enumerate() {
+            offset += line.len() + 1;
+            if index == 0 {
+                continue;
+            }
+            if line.trim() == "---" {
+                body_start_offset = Some(offset);
+                break;
+            }
+            frontmatter.push(line);
+        }
+
+        if let Some(start) = body_start_offset {
+            body = &content[start..];
+            for line in frontmatter {
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
+                let key = key.trim();
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                match key {
+                    "name" if !value.is_empty() => name = value.to_owned(),
+                    "agent" => agent = AgentPresetKind::from_key(value),
+                    _ => {},
+                }
+            }
+        }
+    }
+
+    let prompt = body.trim().to_owned();
+    if prompt.is_empty() {
+        return None;
+    }
+    let description = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("Task template")
+        .to_owned();
+
+    Some(TaskTemplate {
+        name,
+        description,
+        prompt,
+        agent,
+        path: path.to_path_buf(),
+        repo_root: repo_root.to_path_buf(),
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn styled_lines_for_session(
@@ -22648,6 +23723,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-q", RequestQuit, None),
         KeyBinding::new("cmd-t", SpawnTerminal, None),
         KeyBinding::new("cmd-w", CloseActiveTerminal, None),
+        KeyBinding::new("cmd-k", OpenCommandPalette, None),
         KeyBinding::new("cmd-shift-o", OpenAddRepository, None),
         KeyBinding::new("cmd-shift-n", OpenCreateWorktree, None),
         KeyBinding::new("cmd-shift-r", RefreshWorktrees, None),
@@ -22699,6 +23775,8 @@ fn build_app_menus(discovered_daemons: &[mdns_browser::DiscoveredDaemon]) -> Vec
             name: "File".into(),
             items: vec![
                 MenuItem::action("New Window", NewWindow),
+                MenuItem::separator(),
+                MenuItem::action("Command Palette...", OpenCommandPalette),
                 MenuItem::separator(),
                 MenuItem::action("Add Repository...", OpenAddRepository),
                 MenuItem::separator(),

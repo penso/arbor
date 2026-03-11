@@ -1,4 +1,5 @@
 use {
+    arbor_core::repo_config,
     config::{Config, File},
     serde::Deserialize,
     std::{
@@ -319,43 +320,11 @@ fn remove_remote_host_at(path: &Path, name: &str) -> Result<(), String> {
 
 // ── Per-repository config (arbor.toml) ───────────────────────────────
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct RepoConfig {
-    pub presets: Vec<RepoPresetConfig>,
-    pub processes: Vec<ProcessConfig>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ProcessConfig {
-    pub name: String,
-    pub command: String,
-    pub working_dir: Option<String>,
-    pub auto_start: Option<bool>,
-    pub auto_restart: Option<bool>,
-    pub restart_delay_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct RepoPresetConfig {
-    pub name: String,
-    pub icon: String,
-    pub command: String,
-}
+pub type RepoConfig = repo_config::RepoConfig;
+pub type RepoPresetConfig = repo_config::RepoPresetConfig;
 
 pub fn load_repo_config(repo_root: &Path) -> Option<RepoConfig> {
-    let path = repo_root.join("arbor.toml");
-    if !path.exists() {
-        return None;
-    }
-    let config: RepoConfig = Config::builder()
-        .add_source(File::from(path.as_path()).required(false))
-        .build()
-        .ok()
-        .and_then(|settings| settings.try_deserialize().ok())?;
-    Some(config)
+    repo_config::load_repo_config(repo_root)
 }
 
 pub fn save_repo_presets(repo_root: &Path, presets: &[RepoPresetConfig]) -> Result<(), String> {

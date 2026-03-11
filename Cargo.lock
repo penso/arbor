@@ -125,6 +125,7 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 name = "arbor-core"
 version = "0.1.0"
 dependencies = [
+ "config",
  "git2",
  "gix",
  "gix-diff",
@@ -216,6 +217,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "zeroconf",
 ]
 
