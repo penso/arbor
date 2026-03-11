@@ -81,8 +81,17 @@ impl GhCheckContext {
     }
 
     fn to_check_status(&self) -> CheckStatus {
+        if self
+            .status
+            .as_deref()
+            .is_some_and(|status| !status.eq_ignore_ascii_case("completed"))
+        {
+            return CheckStatus::Pending;
+        }
+
         if let Some(conclusion) = &self.conclusion {
             return match conclusion.as_str() {
+                "" => CheckStatus::Pending,
                 "SUCCESS" | "success" | "NEUTRAL" | "neutral" | "SKIPPED" | "skipped" => {
                     CheckStatus::Success
                 },
@@ -311,4 +320,45 @@ pub fn github_access_token_from_gh_cli() -> Option<String> {
     let stdout = String::from_utf8(output.stdout).ok()?;
     let token = stdout.trim();
     (!token.is_empty()).then_some(token.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckStatus, GhCheckContext, GhPrResponse, parse_pr_details};
+
+    #[test]
+    fn in_progress_checks_remain_pending_without_conclusion() {
+        let details = parse_pr_details(GhPrResponse {
+            number: 40,
+            title: "Fix native toolbar buttons and linked worktree grouping".to_owned(),
+            url: "https://github.com/penso/arbor/pull/40".to_owned(),
+            state: "OPEN".to_owned(),
+            is_draft: false,
+            additions: 10,
+            deletions: 2,
+            review_decision: None,
+            status_check_rollup: vec![
+                GhCheckContext {
+                    name: Some("Clippy".to_owned()),
+                    context: None,
+                    conclusion: Some(String::new()),
+                    status: Some("IN_PROGRESS".to_owned()),
+                    state: None,
+                },
+                GhCheckContext {
+                    name: Some("Test".to_owned()),
+                    context: None,
+                    conclusion: Some(String::new()),
+                    status: Some("IN_PROGRESS".to_owned()),
+                    state: None,
+                },
+            ],
+        });
+
+        assert_eq!(details.checks_status, CheckStatus::Pending);
+        assert_eq!(details.checks, vec![
+            ("Clippy".to_owned(), CheckStatus::Pending),
+            ("Test".to_owned(), CheckStatus::Pending),
+        ]);
+    }
 }
