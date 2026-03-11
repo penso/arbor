@@ -67,6 +67,10 @@ All dependency versions live in the root `Cargo.toml` `[workspace.dependencies]`
 - Do not amend commits unless explicitly asked.
 - Only create commits when the user asks.
 
+## UI Verification
+
+When adding or modifying UI, use `screencapture -x /tmp/screenshot.png` to take a screenshot and verify the result visually. Run the app with `just run`, capture, then inspect the image.
+
 ## Changelog
 
 - Use `git-cliff` for changelog generation.
