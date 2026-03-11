@@ -148,6 +148,7 @@ dependencies = [
 name = "arbor-core"
 version = "0.1.0"
 dependencies = [
+ "codspeed-divan-compat",
  "git2",
  "gix",
  "gix-diff",

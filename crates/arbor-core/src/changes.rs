@@ -171,7 +171,7 @@ fn compute_line_stats_for_file(
 }
 
 /// Count added/removed lines between two byte slices using imara-diff.
-fn diff_line_stats(old: &[u8], new: &[u8]) -> DiffLineSummary {
+pub fn diff_line_stats(old: &[u8], new: &[u8]) -> DiffLineSummary {
     use gix_diff::blob::v2::{Algorithm, Diff, InternedInput};
 
     let input = InternedInput::new(old, new);
@@ -220,7 +220,7 @@ fn summary_to_change_kind(summary: Summary) -> ChangeKind {
     }
 }
 
-fn count_lines(contents: &[u8]) -> usize {
+pub fn count_lines(contents: &[u8]) -> usize {
     if contents.is_empty() {
         return 0;
     }

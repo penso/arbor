@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # `workflow_dispatch` allows CodSpeed to trigger backtest
+  # performance analysis in order to generate initial data.
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +17,6 @@ permissions: {}
 env:
   CARGO_TERM_COLOR: always
   NIGHTLY_TOOLCHAIN: nightly-2025-11-30
-  RUSTFLAGS: -L native=${{ github.workspace }}/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,${{ github.workspace }}/target/ghostty-vt-bridge/lib
 
 jobs:
   zizmor:
@@ -43,26 +44,14 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          submodules: recursive
           persist-credentials: false
-
       - name: Install Rust toolchain
         run: |
           rustup toolchain install ${{ env.NIGHTLY_TOOLCHAIN }} --profile minimal
           rustup default ${{ env.NIGHTLY_TOOLCHAIN }}
-
-      - name: Install Zig
-        run: |
-          ZIG_VERSION=0.15.2
-          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
-          tar -xf zig.tar.xz
-          echo "${PWD}/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
-
-      - name: Install cargo-codspeed
-        uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # cargo-codspeed
+      - uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # cargo-codspeed
         with:
           tool: cargo-codspeed
-
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -71,13 +60,55 @@ jobs:
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             libavahi-client-dev
+      - name: Build the benchmark target(s)
+        run: cargo codspeed build -p arbor-core -m simulation
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
+        with:
+          mode: simulation
+          run: cargo codspeed run
 
+  ghostty-codspeed:
+    name: Ghostty Benchmarks
+    needs: zizmor
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTFLAGS: -L native=${{ github.workspace }}/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,${{ github.workspace }}/target/ghostty-vt-bridge/lib
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ env.NIGHTLY_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Install Zig
+        run: |
+          ZIG_VERSION=0.15.2
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "${PWD}/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # cargo-codspeed
+        with:
+          tool: cargo-codspeed
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
       - name: Build Ghostty VT bridge
         run: ./scripts/build-ghostty-vt-bridge.sh
-
       - name: Build the benchmark target(s)
         run: cargo codspeed build -p arbor-benchmarks --features ghostty-vt-experimental --bench embedded_terminal -m simulation
-
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@281164b0f014a4e7badd2c02cecad9b595b70537 # v4.11.1
         with:
