@@ -109,84 +109,88 @@ impl Runner for AppServerRunner {
         }
 
         let mut child = spawn_process(&request).await?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| RunnerError::Io("missing stdin".to_owned()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| RunnerError::Io("missing stdout".to_owned()))?;
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(log_stderr(stderr));
-        }
-
-        let mut process = AppServerProcess::new(stdin, stdout);
-        process.initialize(&request).await?;
-        let thread_id = process.start_thread(&request).await?;
-
-        let mut result = RunResult {
-            thread_id: Some(thread_id.clone()),
-            ..RunResult::default()
-        };
-        let mut current_issue = request.issue.clone();
-
-        for turn_index in 0..request.config.agent.max_turns {
-            let turn_prompt = if turn_index == 0 {
-                request.prompt.clone()
-            } else {
-                "Continue working on the same issue. Use the existing thread context and focus only on the remaining work.".to_owned()
-            };
-
-            let turn_id = process
-                .start_turn(&thread_id, &turn_prompt, &request)
-                .await?;
-            let session_id = format!("{thread_id}-{turn_id}");
-            result.session_id = Some(session_id.clone());
-            result.turn_count = turn_index + 1;
-            let _ = events.send(RunnerEvent {
-                event: "session_started".to_owned(),
-                session_id: Some(session_id.clone()),
-                message: None,
-                totals: None,
-                rate_limits: None,
-                at: now_rfc3339(),
-            });
-
-            let turn_outcome = process
-                .stream_turn(&session_id, &mut result, &events, &request.config)
-                .await?;
-
-            match turn_outcome {
-                RunOutcome::Completed => {
-                    let refreshed = request
-                        .tracker
-                        .fetch_issue_states_by_ids(&[current_issue.id.clone()])
-                        .await
-                        .map_err(|error| RunnerError::ResponseError(error.to_string()))?;
-                    if let Some(issue) = refreshed.into_iter().next() {
-                        current_issue = issue;
-                    }
-                    result.outcome = RunOutcome::Completed;
-                    if !request
-                        .config
-                        .tracker
-                        .active_states
-                        .iter()
-                        .any(|state| state.eq_ignore_ascii_case(&current_issue.state))
-                    {
-                        break;
-                    }
-                },
-                outcome => {
-                    result.outcome = outcome;
-                    break;
-                },
+        let run_result = async {
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| RunnerError::Io("missing stdin".to_owned()))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| RunnerError::Io("missing stdout".to_owned()))?;
+            if let Some(stderr) = child.stderr.take() {
+                tokio::spawn(log_stderr(stderr));
             }
-        }
 
+            let mut process = AppServerProcess::new(stdin, stdout);
+            process.initialize(&request).await?;
+            let thread_id = process.start_thread(&request).await?;
+
+            let mut result = RunResult {
+                thread_id: Some(thread_id.clone()),
+                ..RunResult::default()
+            };
+            let mut current_issue = request.issue.clone();
+
+            for turn_index in 0..request.config.agent.max_turns {
+                let turn_prompt = if turn_index == 0 {
+                    request.prompt.clone()
+                } else {
+                    "Continue working on the same issue. Use the existing thread context and focus only on the remaining work.".to_owned()
+                };
+
+                let turn_id = process
+                    .start_turn(&thread_id, &turn_prompt, &request)
+                    .await?;
+                let session_id = format!("{thread_id}-{turn_id}");
+                result.session_id = Some(session_id.clone());
+                result.turn_count = turn_index + 1;
+                let _ = events.send(RunnerEvent {
+                    event: "session_started".to_owned(),
+                    session_id: Some(session_id.clone()),
+                    message: None,
+                    totals: None,
+                    rate_limits: None,
+                    at: now_rfc3339(),
+                });
+
+                let turn_outcome = process
+                    .stream_turn(&session_id, &mut result, &events, &request.config)
+                    .await?;
+
+                match turn_outcome {
+                    RunOutcome::Completed => {
+                        let refreshed = request
+                            .tracker
+                            .fetch_issue_states_by_ids(&[current_issue.id.clone()])
+                            .await
+                            .map_err(|error| RunnerError::ResponseError(error.to_string()))?;
+                        if let Some(issue) = refreshed.into_iter().next() {
+                            current_issue = issue;
+                        }
+                        result.outcome = RunOutcome::Completed;
+                        if !request
+                            .config
+                            .tracker
+                            .active_states
+                            .iter()
+                            .any(|state| state.eq_ignore_ascii_case(&current_issue.state))
+                        {
+                            break;
+                        }
+                    },
+                    outcome => {
+                        result.outcome = outcome;
+                        break;
+                    },
+                }
+            }
+
+            Ok(result)
+        }
+        .await;
         stop_child(&mut child).await;
-        Ok(result)
+        run_result
     }
 }
 
@@ -585,6 +589,7 @@ async fn spawn_process(request: &RunAttemptRequest) -> Result<Child, RunnerError
         .arg("-lc")
         .arg(&request.config.codex.command)
         .current_dir(&request.workspace_path)
+        .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

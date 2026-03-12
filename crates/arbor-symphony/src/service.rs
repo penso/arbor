@@ -179,6 +179,7 @@ struct RunningEntry {
     issue_state: String,
     workspace_path: PathBuf,
     started_at: Instant,
+    last_activity_at: Instant,
     started_at_text: String,
     last_event: Option<String>,
     last_event_at: Option<String>,
@@ -189,7 +190,20 @@ struct RunningEntry {
     output_tokens: u64,
     total_tokens: u64,
     retry_attempt: Option<u32>,
+    cancellation: Option<CancellationAction>,
     abort_handle: tokio::task::AbortHandle,
+}
+
+#[derive(Debug, Clone)]
+enum CancellationAction {
+    Retry {
+        reason: String,
+        record_error: bool,
+    },
+    Release {
+        reason: Option<String>,
+        record_error: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +251,7 @@ impl Actor {
                     match command {
                         ServiceCommand::Refresh => self.tick().await,
                         ServiceCommand::Stop => {
+                            self.stop_all_running();
                             self.last_error = None;
                             break;
                         },
@@ -253,6 +268,11 @@ impl Actor {
 
         {
             let mut snapshot = self.snapshot.write().await;
+            snapshot.running.clear();
+            snapshot.retrying.clear();
+            snapshot.codex_totals = CodexTotals::default();
+            snapshot.rate_limits = None;
+            snapshot.last_error = None;
             snapshot.service_status = ServiceStatus::Stopped;
             snapshot.generated_at = now_string();
         }
@@ -273,18 +293,24 @@ impl Actor {
     }
 
     async fn tick(&mut self) {
+        let mut tick_error = None;
         if let Err(error) = self.reload_workflow_if_changed().await {
-            self.last_error = Some(error.to_string());
+            tick_error = Some(error.to_string());
         }
 
-        self.reconcile_running().await;
-        self.process_due_retries().await;
+        if let Some(error) = self.reconcile_running().await {
+            tick_error = Some(error);
+        }
+        if let Some(error) = self.process_due_retries().await {
+            tick_error = Some(error);
+        }
 
         match self.tracker.fetch_candidate_issues().await {
             Ok(issues) => self.dispatch_candidates(issues).await,
-            Err(error) => self.last_error = Some(error.to_string()),
+            Err(error) => tick_error = Some(error.to_string()),
         }
 
+        self.last_error = tick_error;
         self.rebuild_snapshots().await;
     }
 
@@ -307,22 +333,31 @@ impl Actor {
         Ok(())
     }
 
-    async fn reconcile_running(&mut self) {
+    async fn reconcile_running(&mut self) -> Option<String> {
         if self.running.is_empty() {
-            return;
+            return None;
         }
 
+        let mut reconciliation_error = None;
         if self.config.codex.stall_timeout_ms > 0 {
             let stall_timeout = Duration::from_millis(self.config.codex.stall_timeout_ms as u64);
             let mut stalled = Vec::new();
             for (issue_id, entry) in &self.running {
-                let elapsed = entry.started_at.elapsed();
+                let elapsed = entry.last_activity_at.elapsed();
                 if elapsed > stall_timeout {
                     stalled.push(issue_id.clone());
                 }
             }
             for issue_id in stalled {
-                self.cancel_running(&issue_id, Some("stall timeout".to_owned()), false);
+                reconciliation_error.get_or_insert_with(|| "stall timeout".to_owned());
+                self.cancel_running(
+                    &issue_id,
+                    CancellationAction::Retry {
+                        reason: "stall timeout".to_owned(),
+                        record_error: true,
+                    },
+                    false,
+                );
             }
         }
 
@@ -351,21 +386,37 @@ impl Actor {
                         .iter()
                         .any(|state| state.eq_ignore_ascii_case(&issue.state));
                     if is_terminal {
-                        self.cancel_running(&issue_id, Some("terminal state".to_owned()), true);
+                        self.cancel_running(
+                            &issue_id,
+                            CancellationAction::Release {
+                                reason: None,
+                                record_error: false,
+                            },
+                            true,
+                        );
                     } else if !is_active {
-                        self.cancel_running(&issue_id, Some("non-active state".to_owned()), false);
+                        self.cancel_running(
+                            &issue_id,
+                            CancellationAction::Release {
+                                reason: None,
+                                record_error: false,
+                            },
+                            false,
+                        );
                     } else if let Some(entry) = self.running.get_mut(&issue_id) {
                         entry.issue_state = issue.state.clone();
                     }
                 }
             },
             Err(error) => {
-                self.last_error = Some(error.to_string());
+                reconciliation_error = Some(error.to_string());
             },
         }
+
+        reconciliation_error
     }
 
-    async fn process_due_retries(&mut self) {
+    async fn process_due_retries(&mut self) -> Option<String> {
         let now = Instant::now();
         let due_ids: Vec<String> = self
             .retry_attempts
@@ -374,14 +425,13 @@ impl Actor {
             .map(|(issue_id, _)| issue_id.clone())
             .collect();
         if due_ids.is_empty() {
-            return;
+            return None;
         }
 
         let candidates = match self.tracker.fetch_candidate_issues().await {
             Ok(candidates) => candidates,
             Err(error) => {
-                self.last_error = Some(error.to_string());
-                return;
+                return Some(error.to_string());
             },
         };
 
@@ -389,6 +439,7 @@ impl Actor {
             let Some(retry) = self.retry_attempts.remove(&issue_id) else {
                 continue;
             };
+            self.claimed.remove(&issue_id);
 
             let Some(issue) = candidates
                 .iter()
@@ -411,6 +462,8 @@ impl Actor {
                 );
             }
         }
+
+        None
     }
 
     async fn dispatch_candidates(&mut self, mut issues: Vec<crate::domain::Issue>) {
@@ -605,6 +658,7 @@ impl Actor {
             issue_state: worker_issue_state,
             workspace_path,
             started_at: Instant::now(),
+            last_activity_at: Instant::now(),
             started_at_text: now_string(),
             last_event: None,
             last_event_at: None,
@@ -615,14 +669,21 @@ impl Actor {
             output_tokens: 0,
             total_tokens: 0,
             retry_attempt: attempt,
+            cancellation: None,
             abort_handle,
         });
     }
 
-    fn cancel_running(&mut self, issue_id: &str, reason: Option<String>, cleanup_workspace: bool) {
-        let Some(entry) = self.running.get(issue_id) else {
+    fn cancel_running(
+        &mut self,
+        issue_id: &str,
+        action: CancellationAction,
+        cleanup_workspace: bool,
+    ) {
+        let Some(entry) = self.running.get_mut(issue_id) else {
             return;
         };
+        entry.cancellation = Some(action);
         entry.abort_handle.abort();
         if cleanup_workspace {
             let workspace_manager = self.workspace_manager.clone();
@@ -631,9 +692,15 @@ impl Actor {
                 let _ = workspace_manager.remove_workspace(&issue_identifier).await;
             });
         }
-        if let Some(reason) = reason {
-            self.last_error = Some(reason);
+    }
+
+    fn stop_all_running(&mut self) {
+        for entry in self.running.values() {
+            entry.abort_handle.abort();
         }
+        self.running.clear();
+        self.retry_attempts.clear();
+        self.claimed.clear();
     }
 
     async fn handle_event(&mut self, event: ServiceEvent) {
@@ -642,11 +709,15 @@ impl Actor {
                 if let Some(entry) = self.running.get_mut(&issue_id) {
                     entry.last_event = Some(event.event.clone());
                     entry.last_event_at = Some(event.at.clone());
+                    entry.last_activity_at = Instant::now();
                     entry.last_message = event.message.clone();
                     entry.session_id = event
                         .session_id
                         .clone()
                         .or_else(|| entry.session_id.clone());
+                    if event.event == "session_started" {
+                        entry.turn_count = entry.turn_count.saturating_add(1);
+                    }
                     if let Some(totals) = event.totals {
                         entry.input_tokens = totals.input_tokens;
                         entry.output_tokens = totals.output_tokens;
@@ -667,43 +738,76 @@ impl Actor {
                     return;
                 };
                 self.accumulated_runtime_secs += entry.started_at.elapsed().as_secs();
+                let cancellation = entry.cancellation.clone();
 
-                match result {
-                    Ok(run_result) if run_result.outcome == RunOutcome::Completed => {
+                match cancellation {
+                    Some(CancellationAction::Retry {
+                        reason,
+                        record_error,
+                    }) => {
+                        let next_attempt = entry.retry_attempt.unwrap_or(0) + 1;
+                        if record_error {
+                            self.last_error = Some(reason.clone());
+                        }
                         self.schedule_retry(
                             issue_id.clone(),
                             issue_identifier.clone(),
-                            1,
-                            None,
-                            1_000,
+                            next_attempt,
+                            Some(reason),
+                            retry_delay_ms(next_attempt, self.config.agent.max_retry_backoff_ms),
                         );
-                        if let Some(rate_limits) = run_result.rate_limits {
-                            self.latest_rate_limits = Some(rate_limits);
+                    },
+                    Some(CancellationAction::Release {
+                        reason,
+                        record_error,
+                    }) => {
+                        self.claimed.remove(&issue_id);
+                        self.retry_attempts.remove(&issue_id);
+                        if record_error {
+                            self.last_error = reason;
                         }
                     },
-                    Ok(run_result) => {
-                        self.schedule_retry(
-                            issue_id.clone(),
-                            issue_identifier.clone(),
-                            entry.retry_attempt.unwrap_or(0) + 1,
-                            Some(format!("worker exited: {:?}", run_result.outcome)),
-                            retry_delay_ms(
+                    None => match result {
+                        Ok(run_result) if run_result.outcome == RunOutcome::Completed => {
+                            self.schedule_retry(
+                                issue_id.clone(),
+                                issue_identifier.clone(),
+                                1,
+                                None,
+                                1_000,
+                            );
+                            if let Some(rate_limits) = run_result.rate_limits {
+                                self.latest_rate_limits = Some(rate_limits);
+                            }
+                        },
+                        Ok(run_result) => {
+                            let error = Some(format!("worker exited: {:?}", run_result.outcome));
+                            self.last_error = error.clone();
+                            self.schedule_retry(
+                                issue_id.clone(),
+                                issue_identifier.clone(),
                                 entry.retry_attempt.unwrap_or(0) + 1,
-                                self.config.agent.max_retry_backoff_ms,
-                            ),
-                        );
-                    },
-                    Err(error) => {
-                        self.schedule_retry(
-                            issue_id.clone(),
-                            issue_identifier.clone(),
-                            entry.retry_attempt.unwrap_or(0) + 1,
-                            Some(error.to_string()),
-                            retry_delay_ms(
+                                error,
+                                retry_delay_ms(
+                                    entry.retry_attempt.unwrap_or(0) + 1,
+                                    self.config.agent.max_retry_backoff_ms,
+                                ),
+                            );
+                        },
+                        Err(error) => {
+                            let error = error.to_string();
+                            self.last_error = Some(error.clone());
+                            self.schedule_retry(
+                                issue_id.clone(),
+                                issue_identifier.clone(),
                                 entry.retry_attempt.unwrap_or(0) + 1,
-                                self.config.agent.max_retry_backoff_ms,
-                            ),
-                        );
+                                Some(error),
+                                retry_delay_ms(
+                                    entry.retry_attempt.unwrap_or(0) + 1,
+                                    self.config.agent.max_retry_backoff_ms,
+                                ),
+                            );
+                        },
                     },
                 }
 
@@ -741,6 +845,7 @@ impl Actor {
         error: Option<String>,
         delay_ms: u64,
     ) {
+        self.claimed.insert(issue_id.clone());
         self.retry_attempts.insert(issue_id.clone(), RetryEntry {
             issue_id,
             issue_identifier,
@@ -869,17 +974,24 @@ mod tests {
             tracker::TrackerError,
         },
         async_trait::async_trait,
-        std::sync::{Arc, Mutex as StdMutex},
+        std::sync::{
+            Arc, Mutex as StdMutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     #[derive(Default)]
     struct MockTracker {
         issues: StdMutex<Vec<Issue>>,
+        candidate_errors: StdMutex<Vec<String>>,
     }
 
     #[async_trait]
     impl IssueTracker for MockTracker {
         async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            if let Some(error) = self.candidate_errors.lock().expect("lock").pop() {
+                return Err(TrackerError::LinearApiRequest(error));
+            }
             Ok(self.issues.lock().expect("lock").clone())
         }
 
@@ -927,6 +1039,95 @@ mod tests {
         }
     }
 
+    struct CountingRunner {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Runner for CountingRunner {
+        async fn run_attempt(
+            &self,
+            _request: RunAttemptRequest,
+            events: mpsc::UnboundedSender<RunnerEvent>,
+        ) -> Result<RunResult, RunnerError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let _ = events.send(RunnerEvent {
+                event: "session_started".to_owned(),
+                at: now_string(),
+                ..RunnerEvent::default()
+            });
+            let _ = events.send(RunnerEvent {
+                event: "turn/completed".to_owned(),
+                at: now_string(),
+                ..RunnerEvent::default()
+            });
+            Ok(RunResult {
+                outcome: RunOutcome::Completed,
+                ..RunResult::default()
+            })
+        }
+    }
+
+    struct ActiveRunner {
+        events_before_finish: usize,
+        interval: Duration,
+    }
+
+    #[async_trait]
+    impl Runner for ActiveRunner {
+        async fn run_attempt(
+            &self,
+            _request: RunAttemptRequest,
+            events: mpsc::UnboundedSender<RunnerEvent>,
+        ) -> Result<RunResult, RunnerError> {
+            for _ in 0..self.events_before_finish {
+                let _ = events.send(RunnerEvent {
+                    event: "notification".to_owned(),
+                    at: now_string(),
+                    ..RunnerEvent::default()
+                });
+                tokio::time::sleep(self.interval).await;
+            }
+
+            Ok(RunResult {
+                outcome: RunOutcome::Completed,
+                ..RunResult::default()
+            })
+        }
+    }
+
+    struct HangingRunner;
+
+    #[async_trait]
+    impl Runner for HangingRunner {
+        async fn run_attempt(
+            &self,
+            _request: RunAttemptRequest,
+            _events: mpsc::UnboundedSender<RunnerEvent>,
+        ) -> Result<RunResult, RunnerError> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(RunResult {
+                outcome: RunOutcome::Completed,
+                ..RunResult::default()
+            })
+        }
+    }
+
+    fn write_workflow(path: &std::path::Path, polling_ms: u64, stall_timeout_ms: i64) {
+        let workspace_root = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("workspaces");
+        std::fs::write(
+            path,
+            format!(
+                "---\ntracker:\n  kind: linear\n  api_key: token\n  project_slug: arbor\npolling:\n  interval_ms: {polling_ms}\nworkspace:\n  root: {}\nagent:\n  max_turns: 1\ncodex:\n  command: codex app-server\n  stall_timeout_ms: {stall_timeout_ms}\n---\nIssue {{{{ issue.identifier }}}}",
+                workspace_root.display(),
+            ),
+        )
+        .expect("workflow");
+    }
+
     #[tokio::test]
     async fn retry_backoff_scales_and_caps() {
         assert_eq!(retry_delay_ms(1, 300_000), 10_000);
@@ -938,11 +1139,7 @@ mod tests {
     async fn starts_service_and_dispatches_unblocked_issue() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workflow_path = temp.path().join("WORKFLOW.md");
-        std::fs::write(
-            &workflow_path,
-            "---\ntracker:\n  kind: linear\n  api_key: token\n  project_slug: arbor\nworkspace:\n  root: ./tmp\ncodex:\n  command: codex app-server\n---\nIssue {{ issue.identifier }}",
-        )
-        .expect("workflow");
+        write_workflow(&workflow_path, 30_000, 300_000);
 
         let handle = SymphonyService::start(ServiceOptions {
             workflow_path: Some(workflow_path),
@@ -955,6 +1152,7 @@ mod tests {
                     state: "Todo".to_owned(),
                     ..Issue::default()
                 }]),
+                candidate_errors: StdMutex::default(),
             })),
         })
         .await
@@ -964,6 +1162,152 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(25)).await;
         let snapshot = handle.snapshot().await;
         assert_eq!(snapshot.service_status, ServiceStatus::Running);
+        let _ = handle.stop();
+    }
+
+    #[tokio::test]
+    async fn redispatches_retry_after_successful_completion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workflow_path = temp.path().join("WORKFLOW.md");
+        write_workflow(&workflow_path, 25, 300_000);
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let handle = SymphonyService::start(ServiceOptions {
+            workflow_path: Some(workflow_path),
+            runner: Arc::new(CountingRunner {
+                attempts: attempts.clone(),
+            }),
+            tracker: Some(Arc::new(MockTracker {
+                issues: StdMutex::new(vec![Issue {
+                    id: "1".to_owned(),
+                    identifier: "ARB-1".to_owned(),
+                    title: "Retry me".to_owned(),
+                    state: "Todo".to_owned(),
+                    ..Issue::default()
+                }]),
+                candidate_errors: StdMutex::default(),
+            })),
+        })
+        .await
+        .expect("service");
+
+        let _ = handle.refresh();
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "expected retry redispatch to run a second attempt"
+        );
+        let _ = handle.stop();
+    }
+
+    #[tokio::test]
+    async fn clears_degraded_status_after_successful_tick() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workflow_path = temp.path().join("WORKFLOW.md");
+        write_workflow(&workflow_path, 30_000, 300_000);
+
+        let handle = SymphonyService::start(ServiceOptions {
+            workflow_path: Some(workflow_path),
+            runner: Arc::new(MockRunner),
+            tracker: Some(Arc::new(MockTracker {
+                issues: StdMutex::new(vec![Issue {
+                    id: "1".to_owned(),
+                    identifier: "ARB-1".to_owned(),
+                    title: "Recover".to_owned(),
+                    state: "Todo".to_owned(),
+                    ..Issue::default()
+                }]),
+                candidate_errors: StdMutex::new(vec!["transient".to_owned()]),
+            })),
+        })
+        .await
+        .expect("service");
+
+        let _ = handle.refresh();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            handle.snapshot().await.service_status,
+            ServiceStatus::Degraded
+        );
+
+        let _ = handle.refresh();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            handle.snapshot().await.service_status,
+            ServiceStatus::Running
+        );
+        let _ = handle.stop();
+    }
+
+    #[tokio::test]
+    async fn stop_aborts_running_workers_and_clears_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workflow_path = temp.path().join("WORKFLOW.md");
+        write_workflow(&workflow_path, 25, 300_000);
+
+        let handle = SymphonyService::start(ServiceOptions {
+            workflow_path: Some(workflow_path),
+            runner: Arc::new(HangingRunner),
+            tracker: Some(Arc::new(MockTracker {
+                issues: StdMutex::new(vec![Issue {
+                    id: "1".to_owned(),
+                    identifier: "ARB-1".to_owned(),
+                    title: "Hang".to_owned(),
+                    state: "Todo".to_owned(),
+                    ..Issue::default()
+                }]),
+                candidate_errors: StdMutex::default(),
+            })),
+        })
+        .await
+        .expect("service");
+
+        let _ = handle.refresh();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(handle.snapshot().await.running.len(), 1);
+
+        let _ = handle.stop();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let snapshot = handle.snapshot().await;
+        assert_eq!(snapshot.service_status, ServiceStatus::Stopped);
+        assert!(snapshot.running.is_empty());
+        assert!(snapshot.retrying.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stall_detection_uses_last_activity_instead_of_start_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workflow_path = temp.path().join("WORKFLOW.md");
+        write_workflow(&workflow_path, 25, 100);
+
+        let handle = SymphonyService::start(ServiceOptions {
+            workflow_path: Some(workflow_path),
+            runner: Arc::new(ActiveRunner {
+                events_before_finish: 8,
+                interval: Duration::from_millis(30),
+            }),
+            tracker: Some(Arc::new(MockTracker {
+                issues: StdMutex::new(vec![Issue {
+                    id: "1".to_owned(),
+                    identifier: "ARB-1".to_owned(),
+                    title: "Active".to_owned(),
+                    state: "Todo".to_owned(),
+                    ..Issue::default()
+                }]),
+                candidate_errors: StdMutex::default(),
+            })),
+        })
+        .await
+        .expect("service");
+
+        let _ = handle.refresh();
+        tokio::time::sleep(Duration::from_millis(160)).await;
+
+        let snapshot = handle.snapshot().await;
+        assert_eq!(snapshot.running.len(), 1);
+        assert!(snapshot.retrying.is_empty());
         let _ = handle.stop();
     }
 
