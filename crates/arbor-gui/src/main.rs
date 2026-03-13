@@ -1650,7 +1650,13 @@ impl ArborWindow {
         cx: &mut Context<Self>,
         mode: WorktreeInventoryRefreshMode,
     ) -> WorktreeInventoryRefreshResult {
-        let previously_selected = self.selected_worktree_path().map(Path::to_path_buf);
+        let previous_local_selection = self.selected_local_worktree_path().map(Path::to_path_buf);
+        let active_repository_group_key = self
+            .active_repository_index
+            .and_then(|repository_index| self.repositories.get(repository_index))
+            .map(|repository| repository.group_key.clone());
+        let preserve_non_local_selection =
+            self.active_outpost_index.is_some() || self.active_remote_worktree.is_some();
         let previous_summaries: HashMap<PathBuf, changes::DiffLineSummary> = self
             .worktrees
             .iter()
@@ -1822,24 +1828,12 @@ impl ArborWindow {
             .iter()
             .any(|worktree| worktree.diff_summary.is_none());
 
-        self.active_worktree_index = previously_selected
-            .and_then(|path| {
-                self.worktrees
-                    .iter()
-                    .position(|worktree| worktree.path == path)
-            })
-            .or_else(|| {
-                self.active_repository_index.and_then(|repository_index| {
-                    self.repositories
-                        .get(repository_index)
-                        .and_then(|repository| {
-                            self.worktrees
-                                .iter()
-                                .position(|worktree| worktree.group_key == repository.group_key)
-                        })
-                })
-            })
-            .or_else(|| (!self.worktrees.is_empty()).then_some(0));
+        self.active_worktree_index = next_active_worktree_index(
+            previous_local_selection.as_deref(),
+            active_repository_group_key.as_deref(),
+            &self.worktrees,
+            preserve_non_local_selection,
+        );
 
         self.active_terminal_by_worktree.retain(|path, _| {
             self.worktrees
@@ -4861,6 +4855,28 @@ fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary])
     })
 }
 
+fn next_active_worktree_index(
+    previous_local_selection: Option<&Path>,
+    active_repository_group_key: Option<&str>,
+    worktrees: &[WorktreeSummary],
+    preserve_non_local_selection: bool,
+) -> Option<usize> {
+    if preserve_non_local_selection {
+        return None;
+    }
+
+    previous_local_selection
+        .and_then(|path| worktrees.iter().position(|worktree| worktree.path == path))
+        .or_else(|| {
+            active_repository_group_key.and_then(|group_key| {
+                worktrees
+                    .iter()
+                    .position(|worktree| worktree.group_key == group_key)
+            })
+        })
+        .or_else(|| (!worktrees.is_empty()).then_some(0))
+}
+
 fn estimated_worktree_hover_popover_card_height(
     worktree: &WorktreeSummary,
     checks_expanded: bool,
@@ -7604,6 +7620,38 @@ mod tests {
         );
         assert!(
             !crate::WorktreeInventoryRefreshMode::EnsureSelectedTerminal.created_terminal(|| false)
+        );
+    }
+
+    #[test]
+    fn next_active_worktree_index_preserves_non_local_selection() {
+        let worktree = sample_worktree_summary();
+        let group_key = worktree.group_key.clone();
+
+        assert_eq!(
+            crate::next_active_worktree_index(None, Some(group_key.as_str()), &[worktree], true),
+            None
+        );
+    }
+
+    #[test]
+    fn next_active_worktree_index_restores_previous_local_selection() {
+        let first = sample_worktree_summary();
+        let mut second = sample_worktree_summary();
+        second.path = "/tmp/repo/wt-two".into();
+        second.label = "wt-two".to_owned();
+        second.branch = "feature/two".to_owned();
+        let second_path = second.path.clone();
+        let first_group_key = first.group_key.clone();
+
+        assert_eq!(
+            crate::next_active_worktree_index(
+                Some(second_path.as_path()),
+                Some(first_group_key.as_str()),
+                &[first, second],
+                false,
+            ),
+            Some(1)
         );
     }
 
