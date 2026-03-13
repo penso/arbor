@@ -793,11 +793,21 @@ impl ArborWindow {
                         return;
                     }
 
+                    let refresh = this.refresh_worktree_inventory(cx);
                     this.refresh_worktree_diff_summaries(cx);
                     this.refresh_worktree_ports(cx);
-                    if this.active_outpost_index.is_some() {
+                    this.refresh_agent_tasks(cx);
+                    this.refresh_agent_sessions(cx);
+                    if refresh.rows_changed {
+                        this.refresh_worktree_pull_requests(cx);
+                    }
+                    let changed_files_changed = if this.active_outpost_index.is_some() {
                         this.refresh_remote_changed_files(cx);
-                    } else if this.reload_changed_files() {
+                        false
+                    } else {
+                        this.reload_changed_files()
+                    };
+                    if changed_files_changed || refresh.visible_change() {
                         cx.notify();
                     }
                 });
@@ -1632,8 +1642,10 @@ impl ArborWindow {
         }
     }
 
-    fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
-        tracing::debug!("refreshing worktrees");
+    fn refresh_worktree_inventory(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> WorktreeInventoryRefreshResult {
         let previously_selected = self.selected_worktree_path().map(Path::to_path_buf);
         let previous_summaries: HashMap<PathBuf, changes::DiffLineSummary> = self
             .worktrees
@@ -1862,18 +1874,28 @@ impl ArborWindow {
             ));
         }
 
+        self.sync_selected_worktree_notes();
+        let created_terminal = self.ensure_selected_worktree_terminal();
+        if created_terminal {
+            self.sync_daemon_session_store(cx);
+        }
+
+        WorktreeInventoryRefreshResult {
+            rows_changed,
+            created_terminal,
+        }
+    }
+
+    fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
+        tracing::debug!("refreshing worktrees");
+        let refresh = self.refresh_worktree_inventory(cx);
         self.refresh_worktree_diff_summaries(cx);
         self.refresh_worktree_ports(cx);
         self.refresh_agent_tasks(cx);
         self.refresh_agent_sessions(cx);
         self.refresh_worktree_pull_requests(cx);
         let changed_files_changed = self.reload_changed_files();
-        self.sync_selected_worktree_notes();
-        let created_terminal = self.ensure_selected_worktree_terminal();
-        if created_terminal {
-            self.sync_daemon_session_store(cx);
-        }
-        if rows_changed || changed_files_changed || created_terminal {
+        if changed_files_changed || refresh.visible_change() {
             cx.notify();
         }
     }
@@ -3994,6 +4016,18 @@ impl RepositorySummary {
         self.checkout_roots
             .iter()
             .any(|checkout_root| checkout_root.path == root)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WorktreeInventoryRefreshResult {
+    rows_changed: bool,
+    created_terminal: bool,
+}
+
+impl WorktreeInventoryRefreshResult {
+    fn visible_change(self) -> bool {
+        self.rows_changed || self.created_terminal
     }
 }
 
@@ -7482,6 +7516,20 @@ mod tests {
 
         let attention = crate::worktree_attention_indicator(&worktree);
         assert_eq!(attention.label, "Stuck");
+    }
+
+    #[test]
+    fn worktree_rows_changed_detects_external_worktree_addition() {
+        let previous = sample_worktree_summary();
+        let current = sample_worktree_summary();
+        let mut external = sample_worktree_summary();
+        external.path = "/tmp/repo/wt-external".into();
+        external.label = "wt-external".to_owned();
+        external.branch = "feature/external".to_owned();
+
+        assert!(crate::worktree_rows_changed(&[previous], &[
+            current, external
+        ]));
     }
 
     #[test]
