@@ -9,7 +9,7 @@ use {
 
 const OUTPOST_STORE_RELATIVE_PATH: &str = ".arbor/outposts.json";
 
-pub trait OutpostStore {
+pub trait OutpostStore: Send + Sync {
     fn load(&self) -> Result<Vec<OutpostRecord>, OutpostStoreError>;
     fn save(&self, outposts: &[OutpostRecord]) -> Result<(), OutpostStoreError>;
 

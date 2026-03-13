@@ -89,7 +89,7 @@ impl ArborWindow {
                         Ok(message) => {
                             this.commit_modal = None;
                             this.notice = Some(message);
-                            let _ = this.reload_changed_files();
+                            this.refresh_changed_files(cx);
                             this.refresh_worktree_diff_summaries(cx);
                             this.refresh_worktree_pull_requests(cx);
                         },
@@ -209,7 +209,7 @@ impl ArborWindow {
                                         this.open_external_url(&url, cx);
                                     }
                                     this.notice = Some(message);
-                                    let _ = this.reload_changed_files();
+                                    this.refresh_changed_files(cx);
                                     this.refresh_worktree_diff_summaries(cx);
                                     this.refresh_worktree_pull_requests(cx);
                                 },
@@ -228,7 +228,7 @@ impl ArborWindow {
                                     this.notice = Some(format!(
                                         "{commit_message}; push failed: {error}"
                                     ));
-                                    let _ = this.reload_changed_files();
+                                    this.refresh_changed_files(cx);
                                     this.refresh_worktree_diff_summaries(cx);
                                     this.refresh_worktree_pull_requests(cx);
                                 },
@@ -241,7 +241,7 @@ impl ArborWindow {
                                     this.notice = Some(format!(
                                         "{commit_message}; {push_message}; PR creation failed: {error}"
                                     ));
-                                    let _ = this.reload_changed_files();
+                                    this.refresh_changed_files(cx);
                                     this.refresh_worktree_diff_summaries(cx);
                                     this.refresh_worktree_pull_requests(cx);
                                 },

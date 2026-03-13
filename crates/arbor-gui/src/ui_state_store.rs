@@ -5,6 +5,7 @@ use {
         collections::HashMap,
         env, fs,
         path::{Path, PathBuf},
+        sync::Arc,
     },
 };
 
@@ -103,8 +104,8 @@ impl UiStateStore for JsonUiStateStore {
     }
 }
 
-pub fn default_ui_state_store() -> Box<dyn UiStateStore> {
-    Box::new(JsonUiStateStore::default())
+pub fn default_ui_state_store() -> Arc<dyn UiStateStore> {
+    Arc::new(JsonUiStateStore::default())
 }
 
 pub fn load_startup_state() -> UiState {

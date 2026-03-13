@@ -10,6 +10,7 @@ impl ArborWindow {
             user_cursor: 0,
             active_field: ManageHostsField::Name,
             error: None,
+            saving: false,
         });
         cx.notify();
     }
@@ -73,21 +74,28 @@ impl ArborWindow {
     }
 
     fn submit_add_host(&mut self, cx: &mut Context<Self>) {
-        let Some(modal) = self.manage_hosts_modal.as_mut() else {
+        let Some(modal) = self.manage_hosts_modal.clone() else {
             return;
         };
+        if modal.saving {
+            return;
+        }
         let name = modal.name.trim().to_owned();
         let hostname = modal.hostname.trim().to_owned();
         let user = modal.user.trim().to_owned();
 
         if name.is_empty() || hostname.is_empty() || user.is_empty() {
-            modal.error = Some("All fields are required.".to_owned());
+            if let Some(modal) = self.manage_hosts_modal.as_mut() {
+                modal.error = Some("All fields are required.".to_owned());
+            }
             cx.notify();
             return;
         }
 
         if self.remote_hosts.iter().any(|host| host.name == name) {
-            modal.error = Some(format!("Host \"{name}\" already exists."));
+            if let Some(modal) = self.manage_hosts_modal.as_mut() {
+                modal.error = Some(format!("Host \"{name}\" already exists."));
+            }
             cx.notify();
             return;
         }
@@ -104,38 +112,71 @@ impl ArborWindow {
             mosh_server_path: None,
         };
 
-        if let Err(error) = self.app_config_store.append_remote_host(&host_config) {
-            modal.error = Some(error);
-            cx.notify();
-            return;
-        }
-
-        self.config_last_modified = None;
-        self.refresh_config_if_changed(cx);
-        self.notice = Some(format!("Host \"{name}\" added."));
         if let Some(modal) = self.manage_hosts_modal.as_mut() {
-            modal.adding = false;
-            modal.name.clear();
-            modal.name_cursor = 0;
-            modal.hostname.clear();
-            modal.hostname_cursor = 0;
-            modal.user.clear();
-            modal.user_cursor = 0;
             modal.error = None;
+            modal.saving = true;
         }
+        let store = self.app_config_store.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.append_remote_host(&host_config) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.config_last_modified = None;
+                        this.refresh_config_if_changed(cx);
+                        this.notice = Some(format!("Host \"{name}\" added."));
+                        if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                            modal.adding = false;
+                            modal.name.clear();
+                            modal.name_cursor = 0;
+                            modal.hostname.clear();
+                            modal.hostname_cursor = 0;
+                            modal.user.clear();
+                            modal.user_cursor = 0;
+                            modal.error = None;
+                            modal.saving = false;
+                        }
+                    },
+                    Err(error) => {
+                        if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                            modal.error = Some(error.clone());
+                            modal.saving = false;
+                        } else {
+                            this.notice = Some(error);
+                        }
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
     fn remove_host_at(&mut self, host_name: String, cx: &mut Context<Self>) {
-        if let Err(error) = self.app_config_store.remove_remote_host(&host_name) {
-            self.notice = Some(error);
-            cx.notify();
-            return;
-        }
-        self.config_last_modified = None;
-        self.refresh_config_if_changed(cx);
-        self.notice = Some(format!("Host \"{host_name}\" removed."));
-        cx.notify();
+        let store = self.app_config_store.clone();
+        let host_name_for_save = host_name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.remove_remote_host(&host_name_for_save) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.config_last_modified = None;
+                        this.refresh_config_if_changed(cx);
+                        this.notice = Some(format!("Host \"{host_name}\" removed."));
+                    },
+                    Err(error) => {
+                        this.notice = Some(error);
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_manage_hosts_modal(&mut self, cx: &mut Context<Self>) -> Div {
@@ -151,7 +192,8 @@ impl ArborWindow {
             let user_active = modal.active_field == ManageHostsField::User;
             let add_disabled = modal.name.trim().is_empty()
                 || modal.hostname.trim().is_empty()
-                || modal.user.trim().is_empty();
+                || modal.user.trim().is_empty()
+                || modal.saving;
 
             return div()
                 .absolute()
@@ -212,15 +254,17 @@ impl ArborWindow {
                                         "back-manage-hosts",
                                         "Back",
                                         ActionButtonStyle::Secondary,
-                                        true,
+                                        !modal.saving,
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(modal) = this.manage_hosts_modal.as_mut() {
-                                            modal.adding = false;
-                                            modal.error = None;
-                                            cx.notify();
-                                        }
-                                    })),
+                                    .when(!modal.saving, |this| {
+                                        this.on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                                                modal.adding = false;
+                                                modal.error = None;
+                                                cx.notify();
+                                            }
+                                        }))
+                                    }),
                                 ),
                         )
                         .child(
@@ -301,15 +345,17 @@ impl ArborWindow {
                                         "cancel-add-host",
                                         "Cancel",
                                         ActionButtonStyle::Secondary,
-                                        true,
+                                        !modal.saving,
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(modal) = this.manage_hosts_modal.as_mut() {
-                                            modal.adding = false;
-                                            modal.error = None;
-                                            cx.notify();
-                                        }
-                                    })),
+                                    .when(!modal.saving, |this| {
+                                        this.on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                                                modal.adding = false;
+                                                modal.error = None;
+                                                cx.notify();
+                                            }
+                                        }))
+                                    }),
                                 )
                                 .child(
                                     action_button(

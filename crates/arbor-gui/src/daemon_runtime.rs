@@ -14,18 +14,20 @@ fn local_embedded_runtime(runtime: EmbeddedTerminal) -> SharedTerminalRuntime {
 fn local_daemon_runtime(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
+    rows: u16,
+    cols: u16,
     poll_notify: Option<std::sync::mpsc::Sender<()>>,
 ) -> SharedTerminalRuntime {
-    let ws_state = Arc::new(DaemonTerminalWsState::new(poll_notify));
+    let ws_state = Arc::new(DaemonTerminalWsState::new(poll_notify, rows, cols));
     spawn_daemon_terminal_ws_watcher(daemon.clone(), session_id.clone(), &ws_state);
 
     Arc::new(DaemonTerminalRuntime {
         daemon,
         ws_state,
         last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
+        snapshot_request_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kind: TerminalRuntimeKind::Local,
         resize_error_label: "failed to resize terminal",
-        snapshot_error_label: "daemon snapshot",
         exit_labels: Some(RuntimeExitLabels {
             completed_title: "Terminal completed",
             failed_title: "Terminal failed",
@@ -61,6 +63,26 @@ fn outpost_mosh_runtime(mosh: arbor_mosh::MoshShell) -> SharedTerminalRuntime {
     })
 }
 
+const DAEMON_TERMINAL_WS_MAX_LINES: usize = 220;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum DaemonTerminalWsServerEvent {
+    Snapshot {
+        output_tail: String,
+        state: TerminalSessionState,
+        exit_code: Option<i32>,
+        updated_at_unix_ms: Option<u64>,
+    },
+    Exit {
+        state: TerminalSessionState,
+        exit_code: Option<i32>,
+    },
+    Error {
+        message: String,
+    },
+}
+
 fn apply_terminal_emulator_snapshot(
     session: &mut TerminalSession,
     snapshot: arbor_terminal_emulator::TerminalSnapshot,
@@ -87,6 +109,27 @@ fn apply_terminal_emulator_snapshot(
     }
 
     changed
+}
+
+fn trim_terminal_snapshot(
+    mut snapshot: arbor_terminal_emulator::TerminalSnapshot,
+    max_lines: usize,
+) -> arbor_terminal_emulator::TerminalSnapshot {
+    snapshot.output = trim_to_last_lines(snapshot.output, max_lines);
+
+    let keep_from = snapshot.styled_lines.len().saturating_sub(max_lines);
+    snapshot.cursor = snapshot.cursor.and_then(|cursor| {
+        (cursor.line >= keep_from).then_some(TerminalCursor {
+            line: cursor.line - keep_from,
+            column: cursor.column,
+        })
+    });
+
+    if keep_from > 0 {
+        snapshot.styled_lines.drain(..keep_from);
+    }
+
+    snapshot
 }
 
 fn track_terminal_command_keystroke(session: &mut TerminalSession, keystroke: &Keystroke) {
@@ -237,7 +280,6 @@ fn spawn_daemon_terminal_ws_watcher(
             match tungstenite::connect(request) {
                 Ok((mut socket, _)) => {
                     configure_ws_socket_for_low_latency(&socket);
-                    ws_state.note_event();
                     reconnect_delay = DAEMON_TERMINAL_WS_RECONNECT_BASE_DELAY;
 
                     // Set up write channel for low-latency keystroke delivery
@@ -265,9 +307,46 @@ fn spawn_daemon_terminal_ws_watcher(
 
                         // Read incoming messages (may timeout quickly due to read timeout)
                         match socket.read() {
-                            Ok(tungstenite::Message::Binary(_))
-                            | Ok(tungstenite::Message::Text(_)) => {
-                                ws_state.note_event();
+                            Ok(tungstenite::Message::Binary(bytes)) => {
+                                ws_state.apply_output_bytes(&bytes);
+                            },
+                            Ok(tungstenite::Message::Text(payload)) => {
+                                match serde_json::from_str::<DaemonTerminalWsServerEvent>(&payload)
+                                {
+                                    Ok(DaemonTerminalWsServerEvent::Snapshot {
+                                        output_tail,
+                                        state,
+                                        exit_code,
+                                        updated_at_unix_ms,
+                                    }) => {
+                                        ws_state.apply_snapshot_text(
+                                            &output_tail,
+                                            terminal_state_from_daemon_state(state),
+                                            exit_code,
+                                            updated_at_unix_ms,
+                                        );
+                                    },
+                                    Ok(DaemonTerminalWsServerEvent::Exit { state, exit_code }) => {
+                                        ws_state.apply_exit(
+                                            terminal_state_from_daemon_state(state),
+                                            exit_code,
+                                        );
+                                    },
+                                    Ok(DaemonTerminalWsServerEvent::Error { message }) => {
+                                        tracing::debug!(
+                                            session_id = %session_id,
+                                            %message,
+                                            "daemon terminal websocket reported an error"
+                                        );
+                                    },
+                                    Err(error) => {
+                                        tracing::debug!(
+                                            session_id = %session_id,
+                                            %error,
+                                            "failed to decode daemon terminal websocket event"
+                                        );
+                                    },
+                                }
                             },
                             Ok(tungstenite::Message::Ping(_))
                             | Ok(tungstenite::Message::Pong(_))
@@ -288,6 +367,9 @@ fn spawn_daemon_terminal_ws_watcher(
                                     %error,
                                     "daemon terminal websocket disconnected"
                                 );
+                                if daemon_error_is_connection_refused(&error.to_string()) {
+                                    ws_state.note_connection_refused();
+                                }
                                 ws_state.set_writer(None);
                                 break;
                             },
@@ -300,6 +382,9 @@ fn spawn_daemon_terminal_ws_watcher(
                         %error,
                         "failed to connect daemon terminal websocket"
                     );
+                    if daemon_error_is_connection_refused(&error.to_string()) {
+                        ws_state.note_connection_refused();
+                    }
                 },
             }
 
@@ -320,6 +405,58 @@ fn daemon_terminal_ws_next_backoff(current: Duration) -> Duration {
         .min(DAEMON_TERMINAL_WS_RECONNECT_MAX_DELAY)
 }
 
+fn request_async_daemon_snapshot(
+    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+    session_id: String,
+    ws_state: Arc<DaemonTerminalWsState>,
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
+) {
+    if in_flight
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        let result = daemon.snapshot(daemon::SnapshotRequest {
+            session_id: session_id.clone().into(),
+            max_lines: DAEMON_TERMINAL_WS_MAX_LINES,
+        });
+
+        match result {
+            Ok(Some(snapshot)) => {
+                if ws_state.snapshot().is_none() {
+                    ws_state.apply_snapshot_text(
+                        &snapshot.output_tail,
+                        terminal_state_from_daemon_state(snapshot.state),
+                        snapshot.exit_code,
+                        snapshot.updated_at_unix_ms,
+                    );
+                }
+            },
+            Ok(None) => {},
+            Err(error) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    %error,
+                    "failed to load daemon terminal snapshot asynchronously"
+                );
+                if daemon_error_is_connection_refused(&error.to_string()) {
+                    ws_state.note_connection_refused();
+                }
+            },
+        }
+
+        in_flight.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
 fn ordered_terminal_sync_indices(
     terminals: &[TerminalSession],
     active_terminal_id: Option<u64>,
@@ -337,6 +474,7 @@ fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionStat
     }
 }
 
+#[cfg(test)]
 fn emulate_raw_output(
     raw: &str,
     rows: u16,
@@ -355,6 +493,7 @@ fn emulate_raw_output(
     )
 }
 
+#[cfg(test)]
 fn daemon_cursor_to_terminal_cursor(cursor: daemon::DaemonTerminalCursor) -> TerminalCursor {
     TerminalCursor {
         line: cursor.line,
@@ -362,6 +501,7 @@ fn daemon_cursor_to_terminal_cursor(cursor: daemon::DaemonTerminalCursor) -> Ter
     }
 }
 
+#[cfg(test)]
 fn daemon_modes_to_terminal_modes(modes: daemon::DaemonTerminalModes) -> TerminalModes {
     TerminalModes {
         app_cursor: modes.app_cursor,
@@ -369,6 +509,7 @@ fn daemon_modes_to_terminal_modes(modes: daemon::DaemonTerminalModes) -> Termina
     }
 }
 
+#[cfg(test)]
 fn daemon_styled_line_to_terminal_line(
     line: daemon::DaemonTerminalStyledLine,
 ) -> TerminalStyledLine {
@@ -395,6 +536,7 @@ fn daemon_styled_line_to_terminal_line(
     }
 }
 
+#[cfg(test)]
 fn apply_daemon_snapshot(
     session: &mut TerminalSession,
     snapshot: &daemon::TerminalSnapshot,

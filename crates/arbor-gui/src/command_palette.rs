@@ -6,6 +6,7 @@ impl ArborWindow {
             selected_index: 0,
         });
         self.command_palette_scroll_handle.scroll_to_item(0);
+        self.refresh_repo_config_if_changed(cx);
         cx.notify();
     }
 
@@ -128,7 +129,7 @@ impl ArborWindow {
             });
         }
 
-        for task in self.load_all_task_templates() {
+        for task in self.command_palette_task_templates.clone() {
             let agent_label = task
                 .agent
                 .map(|agent| agent.label().to_owned())
@@ -277,7 +278,7 @@ impl ArborWindow {
                 } else {
                     "compact sidebar disabled".to_owned()
                 });
-                self.sync_ui_state_store(window);
+                self.sync_ui_state_store(window, cx);
             },
             CommandPaletteAction::OpenSettings => self.open_settings_modal(cx),
             CommandPaletteAction::OpenThemePicker => self.open_theme_picker_modal(cx),
@@ -315,14 +316,6 @@ impl ArborWindow {
         modal.selected_index = next;
         self.command_palette_scroll_handle.scroll_to_item(next);
         cx.notify();
-    }
-
-    fn load_all_task_templates(&self) -> Vec<TaskTemplate> {
-        let mut tasks = Vec::new();
-        for repository in &self.repositories {
-            tasks.extend(load_task_templates_for_repo(&repository.root));
-        }
-        tasks
     }
 
     fn launch_task_template(

@@ -36,8 +36,12 @@ impl ArborWindow {
             outpost_active_field: CreateOutpostField::CloneUrl,
             is_creating: false,
             creating_status: None,
+            worktree_branch_preview: String::new(),
+            review_branch_preview: String::new(),
+            outpost_branch_preview: String::new(),
             error: None,
         });
+        self.refresh_create_modal_previews(cx);
         cx.notify();
     }
 
@@ -104,6 +108,7 @@ impl ArborWindow {
             },
         }
 
+        self.refresh_create_modal_previews(cx);
         cx.notify();
     }
 
@@ -122,11 +127,13 @@ impl ArborWindow {
         modal.checkout_kind = checkout_kind;
         modal.error = None;
         self.preferred_checkout_kind = checkout_kind;
+        self.refresh_create_modal_previews(cx);
         cx.notify();
     }
 
     fn close_create_modal(&mut self, cx: &mut Context<Self>) {
         self.create_modal = None;
+        self._create_modal_preview_task = None;
         cx.notify();
     }
 
@@ -365,6 +372,7 @@ impl ArborWindow {
             },
         }
 
+        self.refresh_create_modal_previews(cx);
         cx.notify();
     }
 
@@ -446,8 +454,8 @@ impl ArborWindow {
                             .position(|worktree| worktree.path == created.worktree_path)
                         {
                             this.active_worktree_index = Some(index);
-                            let _ = this.reload_changed_files();
-                            if this.ensure_selected_worktree_terminal() {
+                            this.refresh_changed_files(cx);
+                            if this.ensure_selected_worktree_terminal(cx) {
                                 this.sync_daemon_session_store(cx);
                             }
                             this.terminal_scroll_handle.scroll_to_bottom();
@@ -563,8 +571,8 @@ impl ArborWindow {
                             .position(|worktree| worktree.path == created.worktree_path)
                         {
                             this.active_worktree_index = Some(index);
-                            let _ = this.reload_changed_files();
-                            if this.ensure_selected_worktree_terminal() {
+                            this.refresh_changed_files(cx);
+                            if this.ensure_selected_worktree_terminal(cx) {
                                 this.sync_daemon_session_store(cx);
                             }
                             this.terminal_scroll_handle.scroll_to_bottom();
@@ -672,7 +680,73 @@ impl ArborWindow {
             },
         }
 
+        self.refresh_create_modal_previews(cx);
         cx.notify();
+    }
+
+    fn refresh_create_modal_previews(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.create_modal.clone() else {
+            self._create_modal_preview_task = None;
+            return;
+        };
+
+        let github_login = self.branch_prefix_github_login();
+        let repo_root = self.repo_root.clone();
+        self._create_modal_preview_task = Some(cx.spawn(async move |this, cx| {
+            let repository_path = modal.repository_path.clone();
+            let worktree_name = modal.worktree_name.clone();
+            let pr_reference = modal.pr_reference.clone();
+            let outpost_name = modal.outpost_name.clone();
+            let previews = cx
+                .background_spawn(async move {
+                    let worktree_branch_preview = derive_branch_name_for_repo_with_login(
+                        Path::new(repository_path.trim()),
+                        worktree_name.trim(),
+                        github_login.as_deref(),
+                    );
+                    let review_branch_preview = review_worktree_name_preview(
+                        pr_reference.trim(),
+                        worktree_name.trim(),
+                    )
+                    .map(|name| {
+                        derive_branch_name_for_repo_with_login(
+                            Path::new(repository_path.trim()),
+                            &name,
+                            github_login.as_deref(),
+                        )
+                    })
+                    .unwrap_or_else(|| "Will derive from pull request".to_owned());
+                    let outpost_branch_preview = derive_branch_name_for_repo_with_login(
+                        &repo_root,
+                        outpost_name.trim(),
+                        github_login.as_deref(),
+                    );
+                    (
+                        worktree_branch_preview,
+                        review_branch_preview,
+                        outpost_branch_preview,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let Some(current) = this.create_modal.as_mut() else {
+                    return;
+                };
+                if current.repository_path != modal.repository_path
+                    || current.worktree_name != modal.worktree_name
+                    || current.pr_reference != modal.pr_reference
+                    || current.outpost_name != modal.outpost_name
+                {
+                    return;
+                }
+
+                current.worktree_branch_preview = previews.0;
+                current.review_branch_preview = previews.1;
+                current.outpost_branch_preview = previews.2;
+                cx.notify();
+            });
+        }));
     }
 
     fn submit_create_outpost_modal(&mut self, cx: &mut Context<Self>) {
@@ -938,10 +1012,7 @@ impl ArborWindow {
         let is_outpost_tab = modal.tab == CreateModalTab::RemoteOutpost;
 
         // Worktree tab data
-        let branch_name = self.derive_branch_name_for_repo(
-            Path::new(modal.repository_path.trim()),
-            &modal.worktree_name,
-        );
+        let branch_name = modal.worktree_branch_preview.clone();
         let target_path_preview =
             preview_managed_worktree_path(modal.repository_path.trim(), modal.worktree_name.trim())
                 .unwrap_or_else(|_| "-".to_owned());
@@ -961,10 +1032,7 @@ impl ArborWindow {
         let review_name_active = modal.review_active_field == CreateReviewPrField::WorktreeName;
         let review_name_preview =
             review_worktree_name_preview(modal.pr_reference.trim(), modal.worktree_name.trim());
-        let review_branch_preview = review_name_preview
-            .as_deref()
-            .map(|name| self.derive_branch_name_for_repo(Path::new(modal.repository_path.trim()), name))
-            .unwrap_or_else(|| "Will derive from pull request".to_owned());
+        let review_branch_preview = modal.review_branch_preview.clone();
         let review_path_preview = review_name_preview
             .as_deref()
             .and_then(|name| preview_managed_worktree_path(modal.repository_path.trim(), name).ok())
@@ -999,7 +1067,7 @@ impl ArborWindow {
         let selected_host_index = modal.host_index;
         let clone_url_active = modal.outpost_active_field == CreateOutpostField::CloneUrl;
         let outpost_name_active = modal.outpost_active_field == CreateOutpostField::OutpostName;
-        let outpost_branch_preview = self.derive_branch_name_for_repo(&self.repo_root, &modal.outpost_name);
+        let outpost_branch_preview = modal.outpost_branch_preview.clone();
         let outpost_create_disabled = modal.is_creating
             || modal.clone_url.trim().is_empty()
             || modal.outpost_name.trim().is_empty()

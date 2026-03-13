@@ -22,6 +22,7 @@ impl ArborWindow {
         };
 
         let Some(runtime) = self.terminals[index].runtime.clone() else {
+            self.terminals[index].queued_input.extend_from_slice(input);
             return Ok(());
         };
 
@@ -30,6 +31,28 @@ impl ArborWindow {
             runtime.write_input(session, input)?;
         }
 
+        self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+        Ok(())
+    }
+
+    fn flush_queued_input_for_terminal(&mut self, session_id: u64) -> Result<(), String> {
+        let Some(index) = self
+            .terminals
+            .iter()
+            .position(|session| session.id == session_id)
+        else {
+            return Ok(());
+        };
+        let Some(runtime) = self.terminals[index].runtime.clone() else {
+            return Ok(());
+        };
+        if self.terminals[index].queued_input.is_empty() {
+            return Ok(());
+        }
+
+        let queued_input = std::mem::take(&mut self.terminals[index].queued_input);
+        let session = self.terminals[index].clone();
+        runtime.write_input(&session, &queued_input)?;
         self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
         Ok(())
     }

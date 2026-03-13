@@ -40,10 +40,6 @@ impl HttpTerminalDaemonError {
     pub fn is_unauthorized(&self) -> bool {
         self.message.contains("status 401")
     }
-
-    pub fn is_forbidden(&self) -> bool {
-        self.message.contains("status 403")
-    }
 }
 
 impl fmt::Display for HttpTerminalDaemonError {

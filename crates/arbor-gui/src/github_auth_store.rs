@@ -3,6 +3,7 @@ use {
     std::{
         env, fs,
         path::{Path, PathBuf},
+        sync::Arc,
     },
 };
 
@@ -101,8 +102,8 @@ impl GithubAuthStore for JsonGithubAuthStore {
     }
 }
 
-pub fn default_github_auth_store() -> Box<dyn GithubAuthStore> {
-    Box::new(JsonGithubAuthStore::default())
+pub fn default_github_auth_store() -> Arc<dyn GithubAuthStore> {
+    Arc::new(JsonGithubAuthStore::default())
 }
 
 fn default_github_auth_store_path() -> PathBuf {

@@ -15,6 +15,18 @@ This file defines how coding agents should behave in this repository.
 3. Before committing code, always run `just format` and `just lint` and fix any failures.
 4. Before handoff, run relevant checks for touched code.
 
+## GPUI Threading Rules
+
+- Treat the GPUI app/window/entity context as the UI thread unless you have explicitly moved work off it.
+- Be extremely careful not to block the UI thread with disk I/O, network I/O, daemon RPCs, SSH, git/process spawning, sleeps, waits, or CPU-heavy work. If it can stall a frame, assume it is forbidden on the UI thread.
+- GPUI/Zed guidance matters here: `App::spawn`, `Context::spawn_in`, and `AsyncWindowContext::spawn` run futures that are polled on the main thread. Do not put blocking or CPU-intensive work directly inside those futures.
+- Use `cx.background_spawn(...)` or a `BackgroundExecutor` for blocking or CPU-heavy work. Use the foreground task only to kick work off, await the result, and then hop back into `update(...)` to apply state changes.
+- If you must adapt a synchronous blocking function, run it on a background thread/executor. Prefer GPUI background tasks, and use `smol::unblock` when you need to wrap a blocking call into a future. Do not introduce Tokio.
+- Render paths must be pure state reads. Never do filesystem scans, config loads, git queries, daemon calls, SSH work, process spawning, or expensive recomputation from `render_*` methods.
+- Event handlers and hot paths must stay thin. `on_action`, `listener`, websocket/message handlers, timers, auto-refresh loops, and key/mouse handlers should schedule background work and return quickly instead of doing the slow part inline.
+- Cache derived data that is expensive to compute or load. If the UI needs it often, compute it in the background, store it in state, and render from the cached state.
+- When reviewing GPUI code, ask two questions every time: `could this block?` and `could this run during render or a hot UI path?` If yes, move it off-thread.
+
 ## Commands
 
 - Format: `just format`

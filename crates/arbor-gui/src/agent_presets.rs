@@ -201,7 +201,7 @@ impl ArborWindow {
         }
 
         self.notice = Some(format!("execution mode set to {}", mode.label()));
-        self.sync_ui_state_store(window);
+        self.sync_ui_state_store(window, cx);
         cx.notify();
     }
 

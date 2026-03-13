@@ -5,6 +5,7 @@ use {
     std::{
         env, fs,
         path::{Path, PathBuf},
+        sync::Arc,
         time::SystemTime,
     },
     toml_edit::DocumentMut,
@@ -113,7 +114,7 @@ pub struct LoadedArborConfig {
     pub notices: Vec<String>,
 }
 
-pub trait AppConfigStore {
+pub trait AppConfigStore: Send + Sync {
     fn config_path(&self) -> PathBuf;
     fn config_last_modified(&self) -> Option<SystemTime>;
     fn load_or_create_config(&self) -> LoadedArborConfig;
@@ -197,8 +198,8 @@ impl AppConfigStore for FileAppConfigStore {
     }
 }
 
-pub fn default_app_config_store() -> Box<dyn AppConfigStore> {
-    Box::new(FileAppConfigStore::default())
+pub fn default_app_config_store() -> Arc<dyn AppConfigStore> {
+    Arc::new(FileAppConfigStore::default())
 }
 
 fn load_or_create_config_at(path: &Path) -> LoadedArborConfig {

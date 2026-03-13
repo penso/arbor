@@ -24,8 +24,7 @@ use {
         changes::{self, ChangeKind, ChangedFile},
         daemon::{
             self, CreateOrAttachRequest, DaemonSessionRecord, DetachRequest, KillRequest,
-            ResizeRequest, SignalRequest, SnapshotRequest, TerminalSessionState, TerminalSignal,
-            WriteRequest,
+            ResizeRequest, SignalRequest, TerminalSessionState, TerminalSignal, WriteRequest,
         },
         worktree,
         worktree_scripts::{WorktreeScriptContext, WorktreeScriptPhase, run_worktree_scripts},
@@ -101,11 +100,11 @@ impl ArborWindow {
     where
         S: daemon::DaemonSessionStore + Default + 'static,
     {
-        Self::load(Box::new(S::default()), startup_ui_state, log_buffer, cx)
+        Self::load(Arc::new(S::default()), startup_ui_state, log_buffer, cx)
     }
 
     fn load(
-        daemon_session_store: Box<dyn daemon::DaemonSessionStore>,
+        daemon_session_store: Arc<dyn daemon::DaemonSessionStore>,
         startup_ui_state: ui_state_store::UiState,
         log_buffer: log_layer::LogBuffer,
         cx: &mut Context<Self>,
@@ -197,7 +196,7 @@ impl ArborWindow {
                     })
                     .collect();
                 let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
-                let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
+                let outpost_store = Arc::new(arbor_core::outpost_store::default_outpost_store());
                 let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
                 let (terminal_poll_tx, terminal_poll_rx) = std::sync::mpsc::channel();
 
@@ -281,11 +280,13 @@ impl ArborWindow {
                     settings_modal: None,
                     daemon_auth_modal: None,
                     pending_remote_daemon_auth: None,
+                    pending_remote_create_repo_root: None,
                     start_daemon_modal: false,
                     connect_to_host_modal: None,
                     command_palette_modal: None,
                     command_palette_scroll_handle: ScrollHandle::new(),
                     command_palette_recent_actions: Vec::new(),
+                    command_palette_task_templates: Vec::new(),
                     compact_sidebar: startup_ui_state.compact_sidebar.unwrap_or(false),
                     execution_mode: startup_ui_state
                         .execution_mode
@@ -305,7 +306,8 @@ impl ArborWindow {
                     notification_service,
                     notifications_enabled,
                     last_agent_finished_notifications: HashMap::new(),
-                    auto_checkpoint_in_flight: HashSet::new(),
+                    auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
+                    agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
                     window_is_active: true,
                     notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
                     theme_toast: None,
@@ -319,7 +321,9 @@ impl ArborWindow {
                     worktree_notes_path: None,
                     worktree_notes_active: false,
                     worktree_notes_error: None,
+                    _worktree_notes_save_task: None,
                     file_tree_entries: Vec::new(),
+                    file_tree_loading: false,
                     expanded_dirs: HashSet::new(),
                     selected_file_tree_entry: None,
                     left_pane_visible: true,
@@ -329,6 +333,19 @@ impl ArborWindow {
                     worktree_hover_popover: None,
                     _hover_show_task: None,
                     _hover_dismiss_task: None,
+                    _worktree_refresh_task: None,
+                    _changed_files_refresh_task: None,
+                    _config_refresh_task: None,
+                    _repo_metadata_refresh_task: None,
+                    _launcher_refresh_task: None,
+                    _ui_state_save_task: None,
+                    _daemon_session_store_save_task: None,
+                    _create_modal_preview_task: None,
+                    _file_tree_refresh_task: None,
+                    worktree_refresh_epoch: 0,
+                    config_refresh_epoch: 0,
+                    repo_metadata_refresh_epoch: 0,
+                    launcher_refresh_epoch: 0,
                     last_mouse_position: point(px(0.), px(0.)),
                     outpost_context_menu: None,
                     discovered_daemons: Vec::new(),
@@ -509,7 +526,7 @@ impl ArborWindow {
             .collect();
         let agent_presets = normalize_agent_presets(&loaded_config.config.agent_presets);
 
-        let outpost_store = Box::new(arbor_core::outpost_store::default_outpost_store());
+        let outpost_store = Arc::new(arbor_core::outpost_store::default_outpost_store());
         let outposts = load_outpost_summaries(outpost_store.as_ref(), &remote_hosts);
 
         let active_backend_kind =
@@ -621,11 +638,13 @@ impl ArborWindow {
             settings_modal: None,
             daemon_auth_modal: None,
             pending_remote_daemon_auth: None,
+            pending_remote_create_repo_root: None,
             start_daemon_modal: false,
             connect_to_host_modal: None,
             command_palette_modal: None,
             command_palette_scroll_handle: ScrollHandle::new(),
             command_palette_recent_actions: Vec::new(),
+            command_palette_task_templates: Vec::new(),
             compact_sidebar: startup_ui_state.compact_sidebar.unwrap_or(false),
             execution_mode: startup_ui_state
                 .execution_mode
@@ -647,6 +666,19 @@ impl ArborWindow {
             worktree_hover_popover: None,
             _hover_show_task: None,
             _hover_dismiss_task: None,
+            _worktree_refresh_task: None,
+            _changed_files_refresh_task: None,
+            _config_refresh_task: None,
+            _repo_metadata_refresh_task: None,
+            _launcher_refresh_task: None,
+            _ui_state_save_task: None,
+            _daemon_session_store_save_task: None,
+            _create_modal_preview_task: None,
+            _file_tree_refresh_task: None,
+            worktree_refresh_epoch: 0,
+            config_refresh_epoch: 0,
+            repo_metadata_refresh_epoch: 0,
+            launcher_refresh_epoch: 0,
             last_mouse_position: point(px(0.), px(0.)),
             outpost_context_menu: None,
             discovered_daemons: Vec::new(),
@@ -659,7 +691,8 @@ impl ArborWindow {
             notification_service,
             notifications_enabled,
             last_agent_finished_notifications: HashMap::new(),
-            auto_checkpoint_in_flight: HashSet::new(),
+            auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
+            agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
             window_is_active: true,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
             theme_toast: None,
@@ -673,7 +706,9 @@ impl ArborWindow {
             worktree_notes_path: None,
             worktree_notes_active: false,
             worktree_notes_error: None,
+            _worktree_notes_save_task: None,
             file_tree_entries: Vec::new(),
+            file_tree_loading: false,
             expanded_dirs: HashSet::new(),
             selected_file_tree_entry: None,
             log_buffer,
@@ -698,7 +733,7 @@ impl ArborWindow {
         app.refresh_repo_config_if_changed(cx);
         app.refresh_github_auth_identity(cx);
         app.restore_terminal_sessions_from_records(initial_daemon_records, attach_daemon_runtime);
-        let _ = app.ensure_selected_worktree_terminal();
+        let _ = app.ensure_selected_worktree_terminal(cx);
         app.sync_daemon_session_store(cx);
         app.start_terminal_poller(cx);
         app.start_log_poller(cx);
@@ -797,8 +832,8 @@ impl ArborWindow {
                     this.refresh_worktree_ports(cx);
                     if this.active_outpost_index.is_some() {
                         this.refresh_remote_changed_files(cx);
-                    } else if this.reload_changed_files() {
-                        cx.notify();
+                    } else {
+                        this.refresh_changed_files(cx);
                     }
                 });
                 if updated.is_err() {
@@ -945,174 +980,294 @@ impl ArborWindow {
     }
 
     fn refresh_config_if_changed(&mut self, cx: &mut Context<Self>) {
-        let next_modified = self.app_config_store.config_last_modified();
-        if self.config_last_modified == next_modified {
-            return;
-        }
-        self.config_last_modified = next_modified;
-
-        let loaded = self.app_config_store.load_or_create_config();
-        let mut notices = loaded.notices;
-        let mut changed = false;
-
-        match parse_theme_kind(loaded.config.theme.as_deref()) {
-            Ok(theme_kind) => {
-                if self.theme_kind != theme_kind {
-                    self.theme_kind = theme_kind;
-                    changed = true;
-                }
-            },
-            Err(error) => notices.push(error),
+        struct ConfigRefreshOutcome {
+            next_modified: Option<SystemTime>,
+            next_theme_kind: Option<ThemeKind>,
+            next_backend_kind: Option<TerminalBackendKind>,
+            next_embedded_shell: Option<String>,
+            next_daemon_base_url: String,
+            next_terminal_daemon: Option<terminal_daemon_http::SharedTerminalDaemonClient>,
+            daemon_records: Option<Vec<DaemonSessionRecord>>,
+            daemon_connection_refused: bool,
+            remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
+            agent_presets: Vec<AgentPreset>,
+            notifications_enabled: bool,
+            notices: Vec<String>,
         }
 
-        match parse_terminal_backend_kind(loaded.config.terminal_backend.as_deref()) {
-            Ok(backend_kind) => {
-                if self.active_backend_kind != backend_kind {
-                    self.active_backend_kind = backend_kind;
-                    changed = true;
-                }
-            },
-            Err(error) => notices.push(error),
-        }
+        let store = self.app_config_store.clone();
+        let current_modified = self.config_last_modified;
+        let current_daemon = self.terminal_daemon.clone();
+        let current_daemon_base_url = self.daemon_base_url.clone();
+        let next_epoch = self.config_refresh_epoch.wrapping_add(1);
+        self.config_refresh_epoch = next_epoch;
+        self._config_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    let next_modified = store.config_last_modified();
+                    if next_modified == current_modified {
+                        return None;
+                    }
 
-        let next_engine = resolve_embedded_terminal_engine(
-            loaded.config.embedded_terminal_engine.as_deref(),
-            &mut notices,
-        );
-        tracing::info!(
-            terminal_engine = next_engine.as_str(),
-            "reloaded embedded terminal engine",
-        );
+                    let loaded = store.load_or_create_config();
+                    let mut notices = loaded.notices;
 
-        if self.configured_embedded_shell != loaded.config.embedded_shell {
-            self.configured_embedded_shell = loaded.config.embedded_shell.clone();
-            changed = true;
-        }
+                    let next_theme_kind = match parse_theme_kind(loaded.config.theme.as_deref()) {
+                        Ok(theme_kind) => Some(theme_kind),
+                        Err(error) => {
+                            notices.push(error);
+                            None
+                        },
+                    };
 
-        let next_daemon_base_url = daemon_base_url_from_config(loaded.config.daemon_url.as_deref());
-        if self.daemon_base_url != next_daemon_base_url {
-            // Remove hooks pointing at the old daemon before switching
-            remove_claude_code_hooks();
-            remove_pi_agent_extension();
-            self.daemon_base_url = next_daemon_base_url.clone();
-            self.terminal_daemon =
-                match terminal_daemon_http::default_terminal_daemon_client(&next_daemon_base_url) {
-                    Ok(client) => Some(client),
-                    Err(error) => {
-                        notices.push(format!(
-                            "invalid daemon_url `{next_daemon_base_url}`: {error}"
-                        ));
-                        None
-                    },
-                };
-            changed = true;
-        }
+                    let next_backend_kind =
+                        match parse_terminal_backend_kind(loaded.config.terminal_backend.as_deref())
+                        {
+                            Ok(backend_kind) => Some(backend_kind),
+                            Err(error) => {
+                                notices.push(error);
+                                None
+                            },
+                        };
 
-        if let Some(daemon) = self.terminal_daemon.as_ref() {
-            match daemon.list_sessions() {
-                Ok(records) => {
-                    changed |= self.restore_terminal_sessions_from_records(records, true);
-                },
-                Err(error) => {
-                    let error_text = error.to_string();
-                    if daemon_error_is_connection_refused(&error_text) {
-                        self.terminal_daemon = None;
+                    let _ = resolve_embedded_terminal_engine(
+                        loaded.config.embedded_terminal_engine.as_deref(),
+                        &mut notices,
+                    );
+
+                    let next_daemon_base_url =
+                        daemon_base_url_from_config(loaded.config.daemon_url.as_deref());
+                    let daemon_url_changed = next_daemon_base_url != current_daemon_base_url;
+                    if daemon_url_changed {
                         remove_claude_code_hooks();
                         remove_pi_agent_extension();
-                        changed = true;
-                    } else {
-                        notices.push(format!(
-                            "failed to list terminal sessions from daemon at {}: {error}",
-                            daemon.base_url()
-                        ));
                     }
-                },
-            }
-        }
 
-        let next_remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded
-            .config
-            .remote_hosts
-            .iter()
-            .map(|host_config| arbor_core::outpost::RemoteHost {
-                name: host_config.name.clone(),
-                hostname: host_config.hostname.clone(),
-                port: host_config.port,
-                user: host_config.user.clone(),
-                identity_file: host_config.identity_file.clone(),
-                remote_base_path: host_config.remote_base_path.clone(),
-                daemon_port: host_config.daemon_port,
-                mosh: host_config.mosh,
-                mosh_server_path: host_config.mosh_server_path.clone(),
-            })
-            .collect();
-        if self.remote_hosts != next_remote_hosts {
-            self.remote_hosts = next_remote_hosts;
-            self.outposts = load_outpost_summaries(self.outpost_store.as_ref(), &self.remote_hosts);
-            changed = true;
-        }
+                    let next_terminal_daemon = if daemon_url_changed {
+                        match terminal_daemon_http::default_terminal_daemon_client(
+                            &next_daemon_base_url,
+                        ) {
+                            Ok(client) => Some(client),
+                            Err(error) => {
+                                notices.push(format!(
+                                    "invalid daemon_url `{next_daemon_base_url}`: {error}"
+                                ));
+                                None
+                            },
+                        }
+                    } else {
+                        current_daemon.clone()
+                    };
 
-        let next_agent_presets = normalize_agent_presets(&loaded.config.agent_presets);
-        if self.agent_presets != next_agent_presets {
-            self.agent_presets = next_agent_presets;
-            if let Some(modal) = self.manage_presets_modal.as_mut()
-                && let Some(preset) = self
-                    .agent_presets
-                    .iter()
-                    .find(|preset| preset.kind == modal.active_preset)
-            {
-                modal.command = preset.command.clone();
-            }
-            changed = true;
-        }
+                    let mut daemon_records = None;
+                    let mut daemon_connection_refused = false;
+                    if let Some(daemon) = next_terminal_daemon.as_ref() {
+                        match daemon.list_sessions() {
+                            Ok(records) => daemon_records = Some(records),
+                            Err(error) => {
+                                let error_text = error.to_string();
+                                daemon_connection_refused =
+                                    daemon_error_is_connection_refused(&error_text);
+                                if daemon_connection_refused {
+                                    remove_claude_code_hooks();
+                                    remove_pi_agent_extension();
+                                }
+                                if !daemon_connection_refused {
+                                    notices.push(format!(
+                                        "failed to list terminal sessions from daemon at {}: {error}",
+                                        daemon.base_url()
+                                    ));
+                                }
+                            },
+                        }
+                    }
 
-        self.notifications_enabled = loaded.config.notifications.unwrap_or(true);
+                    let remote_hosts: Vec<arbor_core::outpost::RemoteHost> = loaded
+                        .config
+                        .remote_hosts
+                        .iter()
+                        .map(|host_config| arbor_core::outpost::RemoteHost {
+                            name: host_config.name.clone(),
+                            hostname: host_config.hostname.clone(),
+                            port: host_config.port,
+                            user: host_config.user.clone(),
+                            identity_file: host_config.identity_file.clone(),
+                            remote_base_path: host_config.remote_base_path.clone(),
+                            daemon_port: host_config.daemon_port,
+                            mosh: host_config.mosh,
+                            mosh_server_path: host_config.mosh_server_path.clone(),
+                        })
+                        .collect();
 
-        if !notices.is_empty() {
-            self.notice = Some(notices.join(" | "));
-            changed = true;
-        }
+                    Some(ConfigRefreshOutcome {
+                        next_modified,
+                        next_theme_kind,
+                        next_backend_kind,
+                        next_embedded_shell: loaded.config.embedded_shell.clone(),
+                        next_daemon_base_url,
+                        next_terminal_daemon,
+                        daemon_records,
+                        daemon_connection_refused,
+                        remote_hosts,
+                        agent_presets: normalize_agent_presets(&loaded.config.agent_presets),
+                        notifications_enabled: loaded.config.notifications.unwrap_or(true),
+                        notices,
+                    })
+                })
+                .await;
 
-        if changed {
-            cx.notify();
-        }
+            let _ = this.update(cx, |this, cx| {
+                if this.config_refresh_epoch != next_epoch {
+                    return;
+                }
+                let Some(outcome) = outcome else {
+                    return;
+                };
+
+                this.config_last_modified = outcome.next_modified;
+                let mut changed = false;
+
+                if let Some(theme_kind) = outcome.next_theme_kind
+                    && this.theme_kind != theme_kind
+                {
+                    this.theme_kind = theme_kind;
+                    changed = true;
+                }
+                if let Some(backend_kind) = outcome.next_backend_kind
+                    && this.active_backend_kind != backend_kind
+                {
+                    this.active_backend_kind = backend_kind;
+                    changed = true;
+                }
+                if this.configured_embedded_shell != outcome.next_embedded_shell {
+                    this.configured_embedded_shell = outcome.next_embedded_shell.clone();
+                    changed = true;
+                }
+                if this.daemon_base_url != outcome.next_daemon_base_url {
+                    this.daemon_base_url = outcome.next_daemon_base_url.clone();
+                    changed = true;
+                }
+
+                if outcome.daemon_connection_refused {
+                    this.terminal_daemon = None;
+                    changed = true;
+                } else if this.terminal_daemon.as_ref().map(|daemon| daemon.base_url())
+                    != outcome
+                        .next_terminal_daemon
+                        .as_ref()
+                        .map(|daemon| daemon.base_url())
+                {
+                    this.terminal_daemon = outcome.next_terminal_daemon.clone();
+                    changed = true;
+                } else {
+                    this.terminal_daemon = outcome.next_terminal_daemon.clone();
+                }
+
+                if let Some(records) = outcome.daemon_records {
+                    changed |= this.restore_terminal_sessions_from_records(records, true);
+                }
+
+                if this.remote_hosts != outcome.remote_hosts {
+                    this.remote_hosts = outcome.remote_hosts;
+                    this.outposts =
+                        load_outpost_summaries(this.outpost_store.as_ref(), &this.remote_hosts);
+                    changed = true;
+                }
+
+                if this.agent_presets != outcome.agent_presets {
+                    this.agent_presets = outcome.agent_presets;
+                    if let Some(modal) = this.manage_presets_modal.as_mut()
+                        && let Some(preset) = this
+                            .agent_presets
+                            .iter()
+                            .find(|preset| preset.kind == modal.active_preset)
+                    {
+                        modal.command = preset.command.clone();
+                    }
+                    changed = true;
+                }
+
+                if this.notifications_enabled != outcome.notifications_enabled {
+                    this.notifications_enabled = outcome.notifications_enabled;
+                    changed = true;
+                }
+
+                if !outcome.notices.is_empty() {
+                    this.notice = Some(outcome.notices.join(" | "));
+                    changed = true;
+                }
+
+                if changed {
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn refresh_repo_config_if_changed(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
-        let next_presets = self.load_all_repo_presets();
-        if self.repo_presets != next_presets {
-            self.repo_presets = next_presets;
-            changed = true;
-        }
+        let repo_root = self.repo_root.clone();
+        let result_repo_root = repo_root.clone();
+        let selected_worktree_path = self.selected_worktree_path().map(Path::to_path_buf);
+        let repositories = self.repositories.clone();
+        let store = self.app_config_store.clone();
+        let next_epoch = self.repo_metadata_refresh_epoch.wrapping_add(1);
+        self.repo_metadata_refresh_epoch = next_epoch;
+        self._repo_metadata_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let (next_presets, next_default_preset, task_templates) = cx
+                .background_spawn(async move {
+                    let mut presets = load_repo_presets(store.as_ref(), &repo_root);
+                    if let Some(worktree_path) = selected_worktree_path
+                        .as_ref()
+                        .filter(|worktree_path| *worktree_path != &repo_root)
+                    {
+                        for preset in load_repo_presets(store.as_ref(), worktree_path) {
+                            if !presets
+                                .iter()
+                                .any(|candidate| candidate.name == preset.name)
+                            {
+                                presets.push(preset);
+                            }
+                        }
+                    }
+                    let default_preset = store
+                        .load_repo_config(&repo_root)
+                        .and_then(|config| config.agent.default_preset)
+                        .and_then(|value| AgentPresetKind::from_key(&value));
+                    let mut task_templates = Vec::new();
+                    for repository in repositories {
+                        task_templates.extend(load_task_templates_for_repo(&repository.root));
+                    }
+                    (presets, default_preset, task_templates)
+                })
+                .await;
 
-        if self.active_preset_tab.is_none()
-            && let Some(preset) = self
-                .active_repo_config()
-                .and_then(|config| config.agent.default_preset)
-                .and_then(|value| AgentPresetKind::from_key(&value))
-        {
-            self.active_preset_tab = Some(preset);
-            changed = true;
-        }
-
-        if changed {
-            cx.notify();
-        }
-    }
-
-    fn load_all_repo_presets(&self) -> Vec<RepoPreset> {
-        let mut presets = load_repo_presets(self.app_config_store.as_ref(), &self.repo_root);
-        if let Some(wt_path) = self.selected_worktree_path()
-            && wt_path != self.repo_root.as_path()
-        {
-            for wt_preset in load_repo_presets(self.app_config_store.as_ref(), wt_path) {
-                if !presets.iter().any(|p| p.name == wt_preset.name) {
-                    presets.push(wt_preset);
+            let _ = this.update(cx, |this, cx| {
+                if this.repo_metadata_refresh_epoch != next_epoch
+                    || this.repo_root != result_repo_root
+                {
+                    return;
                 }
-            }
-        }
-        presets
+
+                let mut changed = false;
+                if this.repo_presets != next_presets {
+                    this.repo_presets = next_presets;
+                    changed = true;
+                }
+                if this.command_palette_task_templates != task_templates {
+                    this.command_palette_task_templates = task_templates;
+                    changed = true;
+                }
+                if this.active_preset_tab.is_none()
+                    && let Some(preset) = next_default_preset
+                {
+                    this.active_preset_tab = Some(preset);
+                    changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Returns the directory where repo preset edits should be saved.
@@ -1123,17 +1278,8 @@ impl ArborWindow {
             .unwrap_or_else(|| self.repo_root.clone())
     }
 
-    fn active_repo_config(&self) -> Option<app_config::RepoConfig> {
-        self.app_config_store.load_repo_config(&self.repo_root)
-    }
-
     fn selected_agent_preset_or_default(&self) -> AgentPresetKind {
-        self.active_preset_tab.unwrap_or_else(|| {
-            self.active_repo_config()
-                .and_then(|config| config.agent.default_preset)
-                .and_then(|value| AgentPresetKind::from_key(&value))
-                .unwrap_or(AgentPresetKind::Codex)
-        })
+        self.active_preset_tab.unwrap_or(AgentPresetKind::Codex)
     }
 
     fn branch_prefix_github_login(&self) -> Option<String> {
@@ -1145,23 +1291,115 @@ impl ArborWindow {
             .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
     }
 
-    fn derive_branch_name_for_repo(&self, repo_root: &Path, worktree_name: &str) -> String {
-        if repo_root.as_os_str().is_empty() || !repo_root.exists() {
-            return derive_branch_name(worktree_name);
-        }
-        let repo_root = worktree::repo_root(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-        derive_branch_name_with_repo_config(
-            &repo_root,
-            worktree_name,
-            self.branch_prefix_github_login().as_deref(),
-        )
+    fn spawn_agent_waiting_transition(
+        &mut self,
+        request: AgentWaitingTransitionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let app_config_store = self.app_config_store.clone();
+        let auto_checkpoint_in_flight = Arc::clone(&self.auto_checkpoint_in_flight);
+        let agent_activity_epochs = Arc::clone(&self.agent_activity_epochs);
+
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    evaluate_agent_waiting_transition(
+                        request,
+                        app_config_store,
+                        auto_checkpoint_in_flight,
+                        agent_activity_epochs,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.apply_agent_waiting_transition_result(outcome, cx);
+            });
+        })
+        .detach();
     }
 
-    fn repo_auto_checkpoint_enabled(&self, worktree: &WorktreeSummary) -> bool {
-        self.app_config_store
-            .load_repo_config(&worktree.repo_root)
-            .and_then(|config| config.agent.auto_checkpoint)
-            .unwrap_or(false)
+    fn apply_agent_waiting_transition_result(
+        &mut self,
+        outcome: AgentWaitingTransitionOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let AgentWaitingTransitionOutcome {
+            path,
+            epoch,
+            updated_at,
+            diff_summary,
+            notifications_allowed,
+            auto_checkpoint,
+        } = outcome;
+
+        if !agent_activity_epoch_is_current(self.agent_activity_epochs.as_ref(), &path, epoch) {
+            return;
+        }
+
+        let mut notification_worktree = None;
+        if let Some(worktree) = self
+            .worktrees
+            .iter_mut()
+            .find(|candidate| candidate.path == path)
+        {
+            if worktree.agent_state != Some(AgentState::Waiting) {
+                return;
+            }
+
+            let next_snapshot = AgentTurnSnapshot {
+                timestamp_unix_ms: updated_at.or(worktree.last_activity_unix_ms),
+                diff_summary,
+            };
+
+            if worktree
+                .recent_turns
+                .first()
+                .is_some_and(|previous| previous.diff_summary == next_snapshot.diff_summary)
+            {
+                worktree.stuck_turn_count += 1;
+            } else {
+                worktree.stuck_turn_count = 0;
+            }
+
+            worktree.recent_turns.insert(0, next_snapshot);
+            worktree.recent_turns.truncate(5);
+
+            if let Some(auto_checkpoint) = auto_checkpoint.as_ref()
+                && auto_checkpoint.committed
+            {
+                worktree.diff_summary = auto_checkpoint.diff_summary;
+                worktree.branch_divergence = auto_checkpoint.branch_divergence;
+            }
+
+            if notifications_allowed {
+                notification_worktree = Some(worktree.clone());
+            }
+        } else {
+            return;
+        }
+
+        if let Some(worktree) = notification_worktree.as_ref() {
+            self.maybe_notify_agent_finished(worktree, updated_at);
+        }
+
+        if let Some(auto_checkpoint) = auto_checkpoint {
+            if auto_checkpoint.committed
+                && self
+                    .selected_local_worktree_path()
+                    .is_some_and(|selected| selected == path.as_path())
+            {
+                self.changed_files.clear();
+                self.selected_changed_file = None;
+                self.refresh_changed_files(cx);
+            }
+
+            if let Some(notice) = auto_checkpoint.notice {
+                self.notice = Some(notice);
+            }
+        }
+
+        cx.notify();
     }
 
     fn refresh_worktree_ports(&mut self, cx: &mut Context<Self>) {
@@ -1238,61 +1476,6 @@ impl ArborWindow {
         .detach();
     }
 
-    fn maybe_run_auto_checkpoint(&mut self, worktree: &WorktreeSummary) {
-        if !self.repo_auto_checkpoint_enabled(worktree) {
-            return;
-        }
-        if self.active_outpost_index.is_some() {
-            return;
-        }
-        if !self.auto_checkpoint_in_flight.insert(worktree.path.clone()) {
-            return;
-        }
-
-        let changed_files = match changes::changed_files(&worktree.path) {
-            Ok(files) => files,
-            Err(error) => {
-                self.auto_checkpoint_in_flight.remove(&worktree.path);
-                self.notice = Some(format!(
-                    "failed to inspect auto-checkpoint changes: {error}"
-                ));
-                return;
-            },
-        };
-        if changed_files.is_empty() {
-            self.auto_checkpoint_in_flight.remove(&worktree.path);
-            return;
-        }
-
-        let message =
-            auto_checkpoint_commit_message(&changed_files, worktree.agent_task.as_deref());
-        match run_git_commit_for_worktree(&worktree.path, &changed_files, &message) {
-            Ok(summary) => {
-                if let Some(target) = self
-                    .worktrees
-                    .iter_mut()
-                    .find(|candidate| candidate.path == worktree.path)
-                {
-                    target.diff_summary = changes::diff_line_summary(&target.path).ok();
-                    target.branch_divergence = branch_divergence_summary(&target.path);
-                }
-                if self
-                    .selected_local_worktree_path()
-                    .is_some_and(|selected| selected == worktree.path.as_path())
-                {
-                    let _ = self.reload_changed_files();
-                }
-                self.notice = Some(summary);
-            },
-            Err(error) if error == "nothing to commit" => {},
-            Err(error) => {
-                self.notice = Some(format!("auto-checkpoint failed: {error}"));
-            },
-        }
-
-        self.auto_checkpoint_in_flight.remove(&worktree.path);
-    }
-
     fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
         let shell = self.embedded_shell();
         let updated_at_unix_ms = current_unix_timestamp_millis();
@@ -1320,11 +1503,18 @@ impl ArborWindow {
                 updated_at_unix_ms: session.updated_at_unix_ms.or(updated_at_unix_ms),
             })
             .collect();
-
-        if let Err(error) = self.daemon_session_store.save(&records) {
-            self.notice = Some(format!("failed to persist daemon sessions: {error}"));
-            cx.notify();
-        }
+        let store = self.daemon_session_store.clone();
+        self._daemon_session_store_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { store.save(&records) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to persist daemon sessions: {error}"));
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn restore_terminal_sessions_from_records(
@@ -1425,6 +1615,8 @@ impl ArborWindow {
                     session.runtime = Some(local_daemon_runtime(
                         daemon.clone(),
                         session.daemon_session_id.clone(),
+                        session.rows,
+                        session.cols,
                         Some(self.terminal_poll_tx.clone()),
                     ));
                     changed = true;
@@ -1454,12 +1646,16 @@ impl ArborWindow {
                     cursor: None,
                     modes: TerminalModes::default(),
                     last_runtime_sync_at: None,
+                    queued_input: Vec::new(),
+                    is_initializing: false,
                     runtime: attach_runtime
                         .then(|| {
                             self.terminal_daemon.as_ref().map(|daemon| {
                                 local_daemon_runtime(
                                     daemon.clone(),
                                     record.session_id.to_string(),
+                                    rows,
+                                    cols,
                                     Some(self.terminal_poll_tx.clone()),
                                 )
                             })
@@ -1506,29 +1702,7 @@ impl ArborWindow {
         }
     }
 
-    fn repo_allows_desktop_notification(
-        &self,
-        worktree: &WorktreeSummary,
-        event_name: &str,
-    ) -> bool {
-        let Some(config) = self.app_config_store.load_repo_config(&worktree.repo_root) else {
-            return true;
-        };
-
-        let notifications = config.notifications;
-        if notifications.desktop == Some(false) {
-            return false;
-        }
-
-        notifications.events.is_empty()
-            || notifications.events.iter().any(|event| event == event_name)
-    }
-
     fn maybe_notify_agent_finished(&mut self, worktree: &WorktreeSummary, updated_at: Option<u64>) {
-        if !self.repo_allows_desktop_notification(worktree, "agent_finished") {
-            return;
-        }
-
         if !should_emit_agent_finished_notification(
             &mut self.last_agent_finished_notifications,
             &worktree.path,
@@ -1635,6 +1809,7 @@ impl ArborWindow {
     fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
         tracing::debug!("refreshing worktrees");
         let previously_selected = self.selected_worktree_path().map(Path::to_path_buf);
+        let repositories = self.repositories.clone();
         let previous_summaries: HashMap<PathBuf, changes::DiffLineSummary> = self
             .worktrees
             .iter()
@@ -1729,153 +1904,162 @@ impl ArborWindow {
                     .map(|ts| (worktree.path.clone(), ts))
             })
             .collect();
-
-        let mut refresh_errors = Vec::new();
-        let mut next_worktrees = Vec::new();
-        let mut seen_worktree_paths = HashSet::new();
-
-        for repository in &self.repositories {
-            for checkout_root in &repository.checkout_roots {
-                match worktree::list(&checkout_root.path) {
-                    Ok(entries) => {
-                        for entry in entries {
-                            if !seen_worktree_paths.insert(entry.path.clone()) {
-                                continue;
-                            }
-                            next_worktrees.push(WorktreeSummary::from_worktree(
-                                &entry,
-                                &checkout_root.path,
-                                &repository.group_key,
-                                if checkout_root.kind == CheckoutKind::DiscreteClone
-                                    && entry.path == checkout_root.path
-                                {
-                                    CheckoutKind::DiscreteClone
-                                } else {
-                                    CheckoutKind::LinkedWorktree
+        let next_epoch = self.worktree_refresh_epoch.wrapping_add(1);
+        self.worktree_refresh_epoch = next_epoch;
+        self._worktree_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let (mut next_worktrees, refresh_errors) = cx
+                .background_spawn(async move {
+                    let mut refresh_errors = Vec::new();
+                    let mut next_worktrees = Vec::new();
+                    let mut seen_worktree_paths = HashSet::new();
+                    for repository in &repositories {
+                        for checkout_root in &repository.checkout_roots {
+                            match worktree::list(&checkout_root.path) {
+                                Ok(entries) => {
+                                    for entry in entries {
+                                        if !seen_worktree_paths.insert(entry.path.clone()) {
+                                            continue;
+                                        }
+                                        next_worktrees.push(WorktreeSummary::from_worktree(
+                                            &entry,
+                                            &checkout_root.path,
+                                            &repository.group_key,
+                                            if checkout_root.kind == CheckoutKind::DiscreteClone
+                                                && entry.path == checkout_root.path
+                                            {
+                                                CheckoutKind::DiscreteClone
+                                            } else {
+                                                CheckoutKind::LinkedWorktree
+                                            },
+                                        ));
+                                    }
                                 },
-                            ));
+                                Err(error) => refresh_errors.push(format!(
+                                    "{} ({}): {error}",
+                                    repository.label,
+                                    checkout_root.path.display()
+                                )),
+                            }
                         }
-                    },
-                    Err(error) => {
-                        refresh_errors.push(format!(
-                            "{} ({}): {error}",
-                            repository.label,
-                            checkout_root.path.display()
-                        ));
-                    },
-                }
-            }
-        }
-
-        for worktree in &mut next_worktrees {
-            worktree.diff_summary = previous_summaries.get(&worktree.path).copied();
-            worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
-            worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
-            worktree.pr_details = previous_pr_details.get(&worktree.path).cloned();
-            worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
-            worktree.agent_task = previous_agent_tasks.get(&worktree.path).cloned();
-            worktree.detected_ports = previous_detected_ports
-                .get(&worktree.path)
-                .cloned()
-                .unwrap_or_default();
-            worktree.recent_turns = previous_recent_turns
-                .get(&worktree.path)
-                .cloned()
-                .unwrap_or_default();
-            worktree.recent_agent_sessions = previous_recent_agent_sessions
-                .get(&worktree.path)
-                .cloned()
-                .unwrap_or_default();
-            worktree.stuck_turn_count = previous_stuck_turn_counts
-                .get(&worktree.path)
-                .copied()
-                .unwrap_or_default();
-            // Take the max of fresh git-based timestamp and previous value
-            // (which may include agent activity).
-            let prev = previous_activity.get(&worktree.path).copied();
-            worktree.last_activity_unix_ms = match (worktree.last_activity_unix_ms, prev) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            };
-        }
-
-        let rows_changed = worktree_rows_changed(&self.worktrees, &next_worktrees);
-        self.worktrees = next_worktrees;
-        self.worktree_stats_loading = self
-            .worktrees
-            .iter()
-            .any(|worktree| worktree.diff_summary.is_none());
-
-        self.active_worktree_index = previously_selected
-            .and_then(|path| {
-                self.worktrees
-                    .iter()
-                    .position(|worktree| worktree.path == path)
-            })
-            .or_else(|| {
-                self.active_repository_index.and_then(|repository_index| {
-                    self.repositories
-                        .get(repository_index)
-                        .and_then(|repository| {
-                            self.worktrees
-                                .iter()
-                                .position(|worktree| worktree.group_key == repository.group_key)
-                        })
+                    }
+                    (next_worktrees, refresh_errors)
                 })
-            })
-            .or_else(|| (!self.worktrees.is_empty()).then_some(0));
+                .await;
 
-        self.active_terminal_by_worktree.retain(|path, _| {
-            self.worktrees
-                .iter()
-                .any(|worktree| worktree.path.as_path() == path.as_path())
-        });
-        self.diff_sessions.retain(|session| {
-            self.worktrees
-                .iter()
-                .any(|worktree| worktree.path == session.worktree_path)
-        });
-        if self.active_diff_session_id.is_some_and(|diff_id| {
-            !self
-                .diff_sessions
-                .iter()
-                .any(|session| session.id == diff_id)
-        }) {
-            self.active_diff_session_id = None;
-        }
-
-        self.sync_active_repository_from_selected_worktree();
-
-        if refresh_errors.is_empty() {
-            if self
-                .notice
-                .as_deref()
-                .is_some_and(|notice| notice.starts_with("failed to refresh worktrees:"))
-            {
-                self.notice = None;
+            for worktree in &mut next_worktrees {
+                worktree.diff_summary = previous_summaries.get(&worktree.path).copied();
+                worktree.pr_number = previous_pr_numbers.get(&worktree.path).copied();
+                worktree.pr_url = previous_pr_urls.get(&worktree.path).cloned();
+                worktree.pr_details = previous_pr_details.get(&worktree.path).cloned();
+                worktree.agent_state = previous_agent_states.get(&worktree.path).copied();
+                worktree.agent_task = previous_agent_tasks.get(&worktree.path).cloned();
+                worktree.detected_ports = previous_detected_ports
+                    .get(&worktree.path)
+                    .cloned()
+                    .unwrap_or_default();
+                worktree.recent_turns = previous_recent_turns
+                    .get(&worktree.path)
+                    .cloned()
+                    .unwrap_or_default();
+                worktree.recent_agent_sessions = previous_recent_agent_sessions
+                    .get(&worktree.path)
+                    .cloned()
+                    .unwrap_or_default();
+                worktree.stuck_turn_count = previous_stuck_turn_counts
+                    .get(&worktree.path)
+                    .copied()
+                    .unwrap_or_default();
+                let previous = previous_activity.get(&worktree.path).copied();
+                worktree.last_activity_unix_ms = match (worktree.last_activity_unix_ms, previous) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (left, right) => left.or(right),
+                };
             }
-        } else {
-            self.worktree_stats_loading = false;
-            self.notice = Some(format!(
-                "failed to refresh worktrees: {}",
-                refresh_errors.join(", ")
-            ));
-        }
 
-        self.refresh_worktree_diff_summaries(cx);
-        self.refresh_worktree_ports(cx);
-        self.refresh_agent_tasks(cx);
-        self.refresh_agent_sessions(cx);
-        self.refresh_worktree_pull_requests(cx);
-        let changed_files_changed = self.reload_changed_files();
-        self.sync_selected_worktree_notes();
-        let created_terminal = self.ensure_selected_worktree_terminal();
-        if created_terminal {
-            self.sync_daemon_session_store(cx);
-        }
-        if rows_changed || changed_files_changed || created_terminal {
-            cx.notify();
-        }
+            let _ =
+                this.update(cx, |this, cx| {
+                    if this.worktree_refresh_epoch != next_epoch {
+                        return;
+                    }
+
+                    let rows_changed = worktree_rows_changed(&this.worktrees, &next_worktrees);
+                    this.worktrees = next_worktrees;
+                    this.worktree_stats_loading = this
+                        .worktrees
+                        .iter()
+                        .any(|worktree| worktree.diff_summary.is_none());
+
+                    this.active_worktree_index = previously_selected
+                        .as_ref()
+                        .and_then(|path| {
+                            this.worktrees
+                                .iter()
+                                .position(|worktree| worktree.path == *path)
+                        })
+                        .or_else(|| {
+                            this.active_repository_index.and_then(|repository_index| {
+                                this.repositories
+                                    .get(repository_index)
+                                    .and_then(|repository| {
+                                        this.worktrees.iter().position(|worktree| {
+                                            worktree.group_key == repository.group_key
+                                        })
+                                    })
+                            })
+                        })
+                        .or_else(|| (!this.worktrees.is_empty()).then_some(0));
+
+                    this.active_terminal_by_worktree.retain(|path, _| {
+                        this.worktrees
+                            .iter()
+                            .any(|worktree| worktree.path.as_path() == path.as_path())
+                    });
+                    this.diff_sessions.retain(|session| {
+                        this.worktrees
+                            .iter()
+                            .any(|worktree| worktree.path == session.worktree_path)
+                    });
+                    if this.active_diff_session_id.is_some_and(|diff_id| {
+                        !this
+                            .diff_sessions
+                            .iter()
+                            .any(|session| session.id == diff_id)
+                    }) {
+                        this.active_diff_session_id = None;
+                    }
+
+                    this.sync_active_repository_from_selected_worktree();
+
+                    if refresh_errors.is_empty() {
+                        if this.notice.as_deref().is_some_and(|notice| {
+                            notice.starts_with("failed to refresh worktrees:")
+                        }) {
+                            this.notice = None;
+                        }
+                    } else {
+                        this.worktree_stats_loading = false;
+                        this.notice = Some(format!(
+                            "failed to refresh worktrees: {}",
+                            refresh_errors.join(", ")
+                        ));
+                    }
+
+                    this.refresh_worktree_diff_summaries(cx);
+                    this.refresh_worktree_ports(cx);
+                    this.refresh_agent_tasks(cx);
+                    this.refresh_agent_sessions(cx);
+                    this.refresh_worktree_pull_requests(cx);
+                    this.refresh_changed_files(cx);
+                    this.sync_selected_worktree_notes(cx);
+                    let created_terminal = this.ensure_selected_worktree_terminal(cx);
+                    if created_terminal {
+                        this.sync_daemon_session_store(cx);
+                    }
+                    if rows_changed || created_terminal {
+                        cx.notify();
+                    }
+                });
+        }));
     }
 
     fn refresh_worktree_diff_summaries(&mut self, cx: &mut Context<Self>) {
@@ -2360,14 +2544,23 @@ impl ArborWindow {
 
         self.theme_kind = theme_kind;
         self.theme_picker_selected_index = theme_picker_index_for_kind(theme_kind);
-        if let Err(error) = self
-            .app_config_store
-            .save_scalar_settings(&[("theme", Some(theme_kind.slug()))])
-        {
-            self.notice = Some(format!("failed to save theme setting: {error}"));
-        } else {
-            self.config_last_modified = None;
-        }
+        self.config_last_modified = None;
+        let store = self.app_config_store.clone();
+        let theme_slug = theme_kind.slug();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    store.save_scalar_settings(&[("theme", Some(theme_slug))])
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to save theme setting: {error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         if !self.show_theme_picker {
             self.theme_toast = Some(format!("Theme switched to {}", theme_kind.label()));
         }
@@ -3107,7 +3300,7 @@ impl ArborWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = self.reload_changed_files();
+        self.refresh_changed_files(cx);
         cx.notify();
     }
 
@@ -3161,8 +3354,8 @@ impl ArborWindow {
             self.active_worktree_index = Some(target);
             self.active_diff_session_id = None;
             self.sync_active_repository_from_selected_worktree();
-            let _ = self.reload_changed_files();
-            if self.ensure_selected_worktree_terminal() {
+            self.refresh_changed_files(cx);
+            if self.ensure_selected_worktree_terminal(cx) {
                 self.sync_daemon_session_store(cx);
             }
             self.terminal_scroll_handle.scroll_to_bottom();
@@ -3185,8 +3378,8 @@ impl ArborWindow {
             self.active_worktree_index = Some(target);
             self.active_diff_session_id = None;
             self.sync_active_repository_from_selected_worktree();
-            let _ = self.reload_changed_files();
-            if self.ensure_selected_worktree_terminal() {
+            self.refresh_changed_files(cx);
+            if self.ensure_selected_worktree_terminal(cx) {
                 self.sync_daemon_session_store(cx);
             }
             self.terminal_scroll_handle.scroll_to_bottom();
@@ -3295,7 +3488,11 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn spawn_terminal_session_inner(&mut self, show_notice_on_missing_worktree: bool) -> bool {
+    fn spawn_terminal_session_inner(
+        &mut self,
+        show_notice_on_missing_worktree: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(cwd) = self.selected_worktree_path().map(Path::to_path_buf) else {
             if show_notice_on_missing_worktree {
                 self.notice = Some("select a worktree before opening a terminal tab".to_owned());
@@ -3309,12 +3506,12 @@ impl ArborWindow {
         self.next_terminal_id += 1;
         self.active_terminal_by_worktree
             .insert(cwd.clone(), session_id);
-
-        let mut session = TerminalSession {
+        let title = format!("term-{session_id}");
+        self.terminals.push(TerminalSession {
             id: session_id,
             daemon_session_id: session_id.to_string(),
             worktree_path: cwd.clone(),
-            title: format!("term-{session_id}"),
+            title: title.clone(),
             last_command: None,
             pending_command: String::new(),
             command: String::new(),
@@ -3332,114 +3529,239 @@ impl ArborWindow {
             cursor: None,
             modes: TerminalModes::default(),
             last_runtime_sync_at: None,
+            queued_input: Vec::new(),
+            is_initializing: true,
             runtime: None,
-        };
+        });
 
-        let mut launched_with_daemon = false;
-        if backend_kind == TerminalBackendKind::Embedded
-            && let Some(daemon) = self.terminal_daemon.as_ref()
-        {
-            let shell = self.embedded_shell();
-            match daemon.create_or_attach(CreateOrAttachRequest {
-                session_id: String::new().into(),
-                workspace_id: cwd.display().to_string().into(),
-                cwd: cwd.clone(),
-                shell,
-                cols: 120,
-                rows: 35,
-                title: Some(session.title.clone()),
-                command: None,
-            }) {
-                Ok(response) => {
-                    let daemon_session = response.session;
-                    session.daemon_session_id = daemon_session.session_id.to_string();
-                    session.title = daemon_session
-                        .title
-                        .clone()
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or(session.title);
-                    session.last_command = daemon_session.last_command.clone();
-                    session.command = daemon_session.shell.clone();
-                    session.output = daemon_session.output_tail.clone().unwrap_or_default();
-                    session.state = terminal_state_from_daemon_record(&daemon_session);
-                    session.exit_code = daemon_session.exit_code;
-                    session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
-                    session.root_pid = daemon_session.root_pid;
-                    session.cols = daemon_session.cols.max(2);
-                    session.rows = daemon_session.rows.max(1);
-                    session.runtime = Some(local_daemon_runtime(
-                        daemon.clone(),
-                        daemon_session.session_id.to_string(),
-                        Some(self.terminal_poll_tx.clone()),
-                    ));
-                    launched_with_daemon = true;
+        let daemon = (backend_kind == TerminalBackendKind::Embedded)
+            .then(|| self.terminal_daemon.clone())
+            .flatten();
+        let shell = self.embedded_shell();
+        let target_grid_size = self.last_terminal_grid_size.unwrap_or((0, 0));
+        let poll_tx = self.terminal_poll_tx.clone();
+        cx.spawn(async move |this, cx| {
+            enum SpawnTerminalOutcome {
+                Daemon {
+                    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+                    record: DaemonSessionRecord,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
                 },
-                Err(error) => {
-                    let error_text = error.to_string();
-                    tracing::warn!(%error, "failed to create daemon terminal session, falling back to local");
-                    if daemon_error_is_connection_refused(&error_text) {
-                        self.terminal_daemon = None;
-                    } else {
-                        self.notice = Some(format!(
-                            "failed to create daemon terminal session (falling back to local embedded terminal): {error}"
-                        ));
-                    }
+                Embedded {
+                    runtime: EmbeddedTerminal,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
+                },
+                External {
+                    result: terminal_backend::TerminalRunResult,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
+                },
+                Failed {
+                    error: String,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
                 },
             }
-        }
 
-        if !launched_with_daemon {
-            let (initial_rows, initial_cols) = self.last_terminal_grid_size.unwrap_or((0, 0));
-            match terminal_backend::launch_backend(backend_kind, &cwd, initial_rows, initial_cols) {
-                Ok(TerminalLaunch::Embedded(runtime)) => {
-                    session.root_pid = runtime.root_pid();
-                    runtime.set_notify(self.terminal_poll_tx.clone());
-                    session.command = "embedded shell".to_owned();
-                    session.generation = runtime.generation();
-                    session.runtime = Some(local_embedded_runtime(runtime));
-                    session.output = String::new();
-                    session.styled_output = Vec::new();
-                    session.cursor = None;
-                    session.exit_code = None;
-                    session.updated_at_unix_ms = current_unix_timestamp_millis();
-                },
-                Ok(TerminalLaunch::External(result)) => {
-                    session.command = result.command;
-                    session.output = trim_to_last_lines(result.output, 120);
-                    session.styled_output = Vec::new();
-                    session.cursor = None;
-                    session.state = if result.success {
-                        TerminalState::Completed
-                    } else {
-                        TerminalState::Failed
-                    };
-                    session.exit_code = result.code;
-                    session.updated_at_unix_ms = current_unix_timestamp_millis();
-                    if !result.success {
-                        self.notice = Some(format!(
-                            "terminal backend launch failed with code {:?}",
-                            result.code,
-                        ));
+            let outcome = cx
+                .background_spawn(async move {
+                    let mut fallback_notice = None;
+                    let mut clear_global_daemon = false;
+
+                    if let Some(daemon) = daemon {
+                        match daemon.create_or_attach(CreateOrAttachRequest {
+                            session_id: String::new().into(),
+                            workspace_id: cwd.display().to_string().into(),
+                            cwd: cwd.clone(),
+                            shell,
+                            cols: 120,
+                            rows: 35,
+                            title: Some(title),
+                            command: None,
+                        }) {
+                            Ok(response) => {
+                                return SpawnTerminalOutcome::Daemon {
+                                    daemon,
+                                    record: response.session,
+                                    notice: None,
+                                    clear_global_daemon: false,
+                                };
+                            },
+                            Err(error) => {
+                                let error_text = error.to_string();
+                                tracing::warn!(
+                                    %error,
+                                    "failed to create daemon terminal session, falling back to local"
+                                );
+                                clear_global_daemon =
+                                    daemon_error_is_connection_refused(&error_text);
+                                if !clear_global_daemon {
+                                    fallback_notice = Some(format!(
+                                        "failed to create daemon terminal session (falling back to local embedded terminal): {error}"
+                                    ));
+                                }
+                            },
+                        }
                     }
-                },
-                Err(error) => {
-                    session.command = "launch backend".to_owned();
-                    session.output = error.clone();
-                    session.styled_output = Vec::new();
-                    session.cursor = None;
-                    session.state = TerminalState::Failed;
-                    session.updated_at_unix_ms = current_unix_timestamp_millis();
-                    self.notice = Some(format!("terminal session failed: {error}"));
-                },
-            }
-        }
 
-        self.terminals.push(session);
+                    match terminal_backend::launch_backend(
+                        backend_kind,
+                        &cwd,
+                        target_grid_size.0,
+                        target_grid_size.1,
+                    ) {
+                        Ok(TerminalLaunch::Embedded(runtime)) => SpawnTerminalOutcome::Embedded {
+                            runtime,
+                            notice: fallback_notice,
+                            clear_global_daemon,
+                        },
+                        Ok(TerminalLaunch::External(result)) => SpawnTerminalOutcome::External {
+                            result,
+                            notice: fallback_notice,
+                            clear_global_daemon,
+                        },
+                        Err(error) => SpawnTerminalOutcome::Failed {
+                            error,
+                            notice: fallback_notice,
+                            clear_global_daemon,
+                        },
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let Some(session) = this
+                    .terminals
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    return;
+                };
+
+                match outcome {
+                    SpawnTerminalOutcome::Daemon {
+                        daemon,
+                        record,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.daemon_session_id = record.session_id.to_string();
+                        session.title = record
+                            .title
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| session.title.clone());
+                        session.last_command = record.last_command.clone();
+                        session.command = record.shell.clone();
+                        session.output = record.output_tail.clone().unwrap_or_default();
+                        session.state = terminal_state_from_daemon_record(&record);
+                        session.exit_code = record.exit_code;
+                        session.updated_at_unix_ms = record.updated_at_unix_ms;
+                        session.root_pid = record.root_pid;
+                        session.cols = record.cols.max(2);
+                        session.rows = record.rows.max(1);
+                        session.runtime = Some(local_daemon_runtime(
+                            daemon,
+                            record.session_id.to_string(),
+                            session.rows,
+                            session.cols,
+                            Some(poll_tx.clone()),
+                        ));
+                    },
+                    SpawnTerminalOutcome::Embedded {
+                        runtime,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.root_pid = runtime.root_pid();
+                        runtime.set_notify(poll_tx.clone());
+                        session.command = "embedded shell".to_owned();
+                        session.generation = runtime.generation();
+                        session.runtime = Some(local_embedded_runtime(runtime));
+                        session.output.clear();
+                        session.styled_output.clear();
+                        session.cursor = None;
+                        session.exit_code = None;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                    },
+                    SpawnTerminalOutcome::External {
+                        result,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.command = result.command;
+                        session.output = trim_to_last_lines(result.output, 120);
+                        session.styled_output.clear();
+                        session.cursor = None;
+                        session.state = if result.success {
+                            TerminalState::Completed
+                        } else {
+                            TerminalState::Failed
+                        };
+                        session.exit_code = result.code;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        if !result.success {
+                            this.notice = Some(format!(
+                                "terminal backend launch failed with code {:?}",
+                                result.code,
+                            ));
+                        }
+                    },
+                    SpawnTerminalOutcome::Failed {
+                        error,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.command = "launch backend".to_owned();
+                        session.output = error.clone();
+                        session.styled_output.clear();
+                        session.cursor = None;
+                        session.state = TerminalState::Failed;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        this.notice = Some(format!("terminal session failed: {error}"));
+                    },
+                }
+
+                session.is_initializing = false;
+                if let Err(error) = this.flush_queued_input_for_terminal(session_id) {
+                    this.notice = Some(format!("failed to write queued terminal input: {error}"));
+                }
+                this.sync_daemon_session_store(cx);
+                cx.notify();
+            });
+        })
+        .detach();
         true
     }
 
     fn open_editor_in_terminal(&mut self, editor: &str, file_path: &Path, cx: &mut Context<Self>) {
-        if !self.spawn_terminal_session_inner(true) {
+        if !self.spawn_terminal_session_inner(true, cx) {
             cx.notify();
             return;
         }
@@ -3481,7 +3803,7 @@ impl ArborWindow {
             return;
         }
 
-        if !self.spawn_terminal_session_inner(true) {
+        if !self.spawn_terminal_session_inner(true, cx) {
             cx.notify();
             return;
         }
@@ -3494,7 +3816,7 @@ impl ArborWindow {
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
-        self.sync_ui_state_store(window);
+        self.sync_ui_state_store(window, cx);
         cx.notify();
     }
 
@@ -3529,7 +3851,7 @@ impl ArborWindow {
             .insert(worktree_path.clone(), session_id);
 
         let title = format!("ssh-{}", outpost.label);
-        let mut session = TerminalSession {
+        let session = TerminalSession {
             id: session_id,
             daemon_session_id: session_id.to_string(),
             worktree_path,
@@ -3551,101 +3873,124 @@ impl ArborWindow {
             cursor: None,
             modes: TerminalModes::default(),
             last_runtime_sync_at: None,
+            queued_input: Vec::new(),
+            is_initializing: true,
             runtime: None,
         };
-
-        let mut launched = false;
-
-        if host.mosh == Some(true) && arbor_mosh::detect::local_mosh_client_available() {
-            let pool = self.ssh_connection_pool.clone();
-            match pool.get_or_connect(&host) {
-                Ok(conn_slot) => {
-                    let mosh_result: Result<arbor_mosh::MoshShell, String> = (|| {
-                        let guard = conn_slot
-                            .lock()
-                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
-                        let connection = guard
-                            .as_ref()
-                            .ok_or_else(|| "SSH connection not available".to_owned())?;
-                        let handshake = arbor_mosh::handshake::start_mosh_server(connection, &host)
-                            .map_err(|error| {
-                                format!("mosh handshake failed, falling back to SSH: {error}")
-                            })?;
-                        arbor_mosh::MoshShell::spawn(handshake, 120, 35).map_err(|error| {
-                            format!("mosh-client failed, falling back to SSH: {error}")
-                        })
-                    })(
-                    );
-
-                    match mosh_result {
-                        Ok(mosh) => {
-                            mosh.set_notify(self.terminal_poll_tx.clone());
-                            session.command = "mosh".to_owned();
-                            session.generation = mosh.generation();
-                            session.runtime = Some(outpost_mosh_runtime(mosh));
-                            launched = true;
-                        },
-                        Err(error) => {
-                            self.notice = Some(error);
-                        },
-                    }
-                },
-                Err(error) => {
-                    self.notice =
-                        Some(format!("SSH connection failed for mosh handshake: {error}",));
-                },
-            }
-        } else if host.mosh == Some(true) {
-            self.notice =
-                Some("mosh-client not found locally, falling back to SSH shell".to_owned());
-        }
-
-        if !launched {
-            let pool = self.ssh_connection_pool.clone();
-            match pool.get_or_connect(&host) {
-                Ok(conn_slot) => {
-                    let ssh_result: Result<SshTerminalShell, String> = (|| {
-                        let guard = conn_slot
-                            .lock()
-                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
-                        let connection = guard
-                            .as_ref()
-                            .ok_or_else(|| "SSH connection not available".to_owned())?;
-                        SshTerminalShell::open(connection, 120, 35, &outpost.remote_path)
-                    })();
-
-                    match ssh_result {
-                        Ok(ssh_shell) => {
-                            session.command = "ssh".to_owned();
-                            session.generation = ssh_shell.generation();
-                            session.runtime = Some(outpost_ssh_runtime(ssh_shell));
-                            launched = true;
-                        },
-                        Err(error) => {
-                            self.notice = Some(format!("SSH shell failed: {error}"));
-                        },
-                    }
-                },
-                Err(error) => {
-                    self.notice = Some(format!("SSH connection failed: {error}"));
-                },
-            }
-        }
-
-        if !launched {
-            // Don't push a terminal session with no runtime
-            self.notice
-                .get_or_insert_with(|| "failed to open SSH shell".to_owned());
-            cx.notify();
-            return;
-        }
-
         self.terminals.push(session);
-        self.sync_daemon_session_store(cx);
         self.active_diff_session_id = None;
         self.terminal_scroll_handle.scroll_to_bottom();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
+        let pool = self.ssh_connection_pool.clone();
+        let remote_path = outpost.remote_path.clone();
+        let poll_tx = self.terminal_poll_tx.clone();
+        cx.spawn(async move |this, cx| {
+            enum OutpostLaunchOutcome {
+                Mosh {
+                    mosh: arbor_mosh::MoshShell,
+                    notice: Option<String>,
+                },
+                Ssh {
+                    ssh_shell: SshTerminalShell,
+                    notice: Option<String>,
+                },
+            }
+
+            let result = cx
+                .background_spawn(async move {
+                    let mut fallback_notice = None;
+                    if host.mosh == Some(true) && arbor_mosh::detect::local_mosh_client_available()
+                    {
+                        let conn_slot = pool.get_or_connect(&host).map_err(|error| {
+                            format!("SSH connection failed for mosh handshake: {error}")
+                        })?;
+                        let guard = conn_slot
+                            .lock()
+                            .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                        let connection = guard
+                            .as_ref()
+                            .ok_or_else(|| "SSH connection not available".to_owned())?;
+                        match arbor_mosh::handshake::start_mosh_server(connection, &host)
+                            .map_err(|error| {
+                                format!("mosh handshake failed, falling back to SSH: {error}")
+                            })
+                            .and_then(|handshake| {
+                                arbor_mosh::MoshShell::spawn(handshake, 120, 35).map_err(|error| {
+                                    format!("mosh-client failed, falling back to SSH: {error}")
+                                })
+                            }) {
+                            Ok(mosh) => {
+                                return Ok(OutpostLaunchOutcome::Mosh { mosh, notice: None });
+                            },
+                            Err(error) => fallback_notice = Some(error),
+                        }
+                    } else if host.mosh == Some(true) {
+                        fallback_notice = Some(
+                            "mosh-client not found locally, falling back to SSH shell".to_owned(),
+                        );
+                    }
+
+                    let conn_slot = pool
+                        .get_or_connect(&host)
+                        .map_err(|error| format!("SSH connection failed: {error}"))?;
+                    let guard = conn_slot
+                        .lock()
+                        .map_err(|_| "SSH connection lock poisoned".to_owned())?;
+                    let connection = guard
+                        .as_ref()
+                        .ok_or_else(|| "SSH connection not available".to_owned())?;
+                    let ssh_shell = SshTerminalShell::open(connection, 120, 35, &remote_path)
+                        .map_err(|error| format!("SSH shell failed: {error}"))?;
+                    Ok::<OutpostLaunchOutcome, String>(OutpostLaunchOutcome::Ssh {
+                        ssh_shell,
+                        notice: fallback_notice,
+                    })
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let Some(session) = this
+                    .terminals
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    return;
+                };
+
+                match result {
+                    Ok(OutpostLaunchOutcome::Mosh { mosh, notice }) => {
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        mosh.set_notify(poll_tx.clone());
+                        session.command = "mosh".to_owned();
+                        session.generation = mosh.generation();
+                        session.runtime = Some(outpost_mosh_runtime(mosh));
+                    },
+                    Ok(OutpostLaunchOutcome::Ssh { ssh_shell, notice }) => {
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.command = "ssh".to_owned();
+                        session.generation = ssh_shell.generation();
+                        session.runtime = Some(outpost_ssh_runtime(ssh_shell));
+                    },
+                    Err(error) => {
+                        session.state = TerminalState::Failed;
+                        session.output = error.clone();
+                        this.notice = Some(error);
+                    },
+                }
+                session.is_initializing = false;
+                if let Err(error) = this.flush_queued_input_for_terminal(session_id) {
+                    this.notice = Some(format!("failed to write queued terminal input: {error}"));
+                }
+                this.sync_daemon_session_store(cx);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -4085,7 +4430,7 @@ impl EntityInputHandler for ArborWindow {
             return;
         }
         if self.worktree_notes_active && self.right_pane_tab == RightPaneTab::Notes {
-            self.insert_text_into_selected_worktree_notes(text);
+            self.insert_text_into_selected_worktree_notes(text, cx);
             cx.notify();
             return;
         }
@@ -4151,7 +4496,7 @@ impl Render for ArborWindow {
         }
         let workspace_width = f32::from(window.window_bounds().get_bounds().size.width);
         self.clamp_pane_widths_for_workspace(workspace_width);
-        self.sync_ui_state_store(window);
+        self.sync_ui_state_store(window, cx);
 
         let theme = self.theme();
         div()
@@ -4389,7 +4734,7 @@ fn process_agent_ws_message(
                 tracing::info!(cwd = cwd.as_str(), ?state, "  snapshot entry");
             }
             let _ = this.update(cx, |this, cx| {
-                apply_agent_ws_snapshot(this, &entries);
+                apply_agent_ws_snapshot(this, &entries, cx);
                 cx.notify();
             });
         },
@@ -4407,7 +4752,7 @@ fn process_agent_ws_message(
                     let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
                     let entries = vec![(cwd.to_owned(), state, updated_at)];
                     let _ = this.update(cx, |this, cx| {
-                        apply_agent_ws_update(this, &entries);
+                        apply_agent_ws_update(this, &entries, cx);
                         cx.notify();
                     });
                 }
@@ -4417,19 +4762,32 @@ fn process_agent_ws_message(
     }
 }
 
-fn apply_agent_ws_snapshot(app: &mut ArborWindow, entries: &[(String, AgentState, Option<u64>)]) {
+fn apply_agent_ws_snapshot(
+    app: &mut ArborWindow,
+    entries: &[(String, AgentState, Option<u64>)],
+    cx: &mut Context<ArborWindow>,
+) {
     tracing::info!(
         count = entries.len(),
         "agent WS snapshot: resetting all worktree states"
     );
+    invalidate_agent_activity_epochs(
+        app.agent_activity_epochs.as_ref(),
+        app.worktrees.iter().map(|worktree| worktree.path.as_path()),
+    );
     for worktree in &mut app.worktrees {
         worktree.agent_state = None;
     }
-    apply_agent_ws_update(app, entries);
+    apply_agent_ws_update(app, entries, cx);
 }
 
-fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, Option<u64>)]) {
+fn apply_agent_ws_update(
+    app: &mut ArborWindow,
+    entries: &[(String, AgentState, Option<u64>)],
+    cx: &mut Context<ArborWindow>,
+) {
     let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
+    let allow_auto_checkpoint = app.active_outpost_index.is_none();
 
     for (cwd, state, updated_at) in entries {
         let cwd_path = Path::new(cwd);
@@ -4440,8 +4798,13 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
         if let Some(matched_path) = best_match {
-            let mut notification_worktree: Option<WorktreeSummary> = None;
-            if let Some(worktree) = app.worktrees.iter_mut().find(|w| &w.path == matched_path) {
+            let transition_epoch =
+                advance_agent_activity_epoch(app.agent_activity_epochs.as_ref(), matched_path);
+            let waiting_transition = if let Some(worktree) = app
+                .worktrees
+                .iter_mut()
+                .find(|worktree| &worktree.path == matched_path)
+            {
                 let previous_state = worktree.agent_state;
                 tracing::info!(
                     cwd = %cwd,
@@ -4455,13 +4818,22 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
                         Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
                 }
                 if previous_state == Some(AgentState::Working) && *state == AgentState::Waiting {
-                    capture_agent_turn_snapshot(worktree, *updated_at);
-                    notification_worktree = Some(worktree.clone());
+                    Some(AgentWaitingTransitionRequest {
+                        path: worktree.path.clone(),
+                        repo_root: worktree.repo_root.clone(),
+                        agent_task: worktree.agent_task.clone(),
+                        updated_at: *updated_at,
+                        epoch: transition_epoch,
+                        allow_auto_checkpoint,
+                    })
+                } else {
+                    None
                 }
-            }
-            if let Some(worktree) = notification_worktree.as_ref() {
-                app.maybe_notify_agent_finished(worktree, *updated_at);
-                app.maybe_run_auto_checkpoint(worktree);
+            } else {
+                None
+            };
+            if let Some(request) = waiting_transition {
+                app.spawn_agent_waiting_transition(request, cx);
             }
         } else {
             tracing::warn!(
@@ -4473,25 +4845,177 @@ fn apply_agent_ws_update(app: &mut ArborWindow, entries: &[(String, AgentState, 
     }
 }
 
-fn capture_agent_turn_snapshot(worktree: &mut WorktreeSummary, updated_at: Option<u64>) {
-    let diff_summary = changes::diff_line_summary(&worktree.path).ok();
-    let next_snapshot = AgentTurnSnapshot {
-        timestamp_unix_ms: updated_at.or(worktree.last_activity_unix_ms),
-        diff_summary,
-    };
+#[derive(Clone)]
+struct AgentWaitingTransitionRequest {
+    path: PathBuf,
+    repo_root: PathBuf,
+    agent_task: Option<String>,
+    updated_at: Option<u64>,
+    epoch: u64,
+    allow_auto_checkpoint: bool,
+}
 
-    if worktree
-        .recent_turns
-        .first()
-        .is_some_and(|previous| previous.diff_summary == next_snapshot.diff_summary)
-    {
-        worktree.stuck_turn_count += 1;
-    } else {
-        worktree.stuck_turn_count = 0;
+struct AgentWaitingTransitionOutcome {
+    path: PathBuf,
+    updated_at: Option<u64>,
+    epoch: u64,
+    diff_summary: Option<changes::DiffLineSummary>,
+    notifications_allowed: bool,
+    auto_checkpoint: Option<AgentAutoCheckpointResult>,
+}
+
+struct AgentAutoCheckpointResult {
+    notice: Option<String>,
+    committed: bool,
+    diff_summary: Option<changes::DiffLineSummary>,
+    branch_divergence: Option<BranchDivergenceSummary>,
+}
+
+fn evaluate_agent_waiting_transition(
+    request: AgentWaitingTransitionRequest,
+    app_config_store: Arc<dyn app_config::AppConfigStore>,
+    auto_checkpoint_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    agent_activity_epochs: Arc<Mutex<HashMap<PathBuf, u64>>>,
+) -> AgentWaitingTransitionOutcome {
+    let repo_config = app_config_store.load_repo_config(&request.repo_root);
+    let notifications_allowed =
+        repo_notifications_allow_event(repo_config.as_ref(), "agent_finished");
+    let diff_summary = changes::diff_line_summary(&request.path).ok();
+    let auto_checkpoint_enabled = request.allow_auto_checkpoint
+        && repo_config
+            .as_ref()
+            .and_then(|config| config.agent.auto_checkpoint)
+            .unwrap_or(false);
+    let auto_checkpoint = auto_checkpoint_enabled.then(|| {
+        run_agent_auto_checkpoint(
+            &request,
+            auto_checkpoint_in_flight.as_ref(),
+            agent_activity_epochs.as_ref(),
+        )
+    });
+
+    AgentWaitingTransitionOutcome {
+        path: request.path,
+        updated_at: request.updated_at,
+        epoch: request.epoch,
+        diff_summary,
+        notifications_allowed,
+        auto_checkpoint: auto_checkpoint.flatten(),
+    }
+}
+
+fn run_agent_auto_checkpoint(
+    request: &AgentWaitingTransitionRequest,
+    auto_checkpoint_in_flight: &Mutex<HashSet<PathBuf>>,
+    agent_activity_epochs: &Mutex<HashMap<PathBuf, u64>>,
+) -> Option<AgentAutoCheckpointResult> {
+    if !agent_activity_epoch_is_current(agent_activity_epochs, &request.path, request.epoch) {
+        return None;
     }
 
-    worktree.recent_turns.insert(0, next_snapshot);
-    worktree.recent_turns.truncate(5);
+    let inserted = {
+        let mut in_flight = lock_mutex(auto_checkpoint_in_flight);
+        in_flight.insert(request.path.clone())
+    };
+    if !inserted {
+        return None;
+    }
+
+    let result = run_agent_auto_checkpoint_inner(request, agent_activity_epochs);
+    let mut in_flight = lock_mutex(auto_checkpoint_in_flight);
+    in_flight.remove(&request.path);
+    result
+}
+
+fn run_agent_auto_checkpoint_inner(
+    request: &AgentWaitingTransitionRequest,
+    agent_activity_epochs: &Mutex<HashMap<PathBuf, u64>>,
+) -> Option<AgentAutoCheckpointResult> {
+    let changed_files = match changes::changed_files(&request.path) {
+        Ok(files) => files,
+        Err(error) => {
+            return Some(AgentAutoCheckpointResult {
+                notice: Some(format!(
+                    "failed to inspect auto-checkpoint changes: {error}"
+                )),
+                committed: false,
+                diff_summary: None,
+                branch_divergence: None,
+            });
+        },
+    };
+    if changed_files.is_empty()
+        || !agent_activity_epoch_is_current(agent_activity_epochs, &request.path, request.epoch)
+    {
+        return None;
+    }
+
+    let message = auto_checkpoint_commit_message(&changed_files, request.agent_task.as_deref());
+    match run_git_commit_for_worktree(&request.path, &changed_files, &message) {
+        Ok(summary) => Some(AgentAutoCheckpointResult {
+            notice: Some(summary),
+            committed: true,
+            diff_summary: changes::diff_line_summary(&request.path).ok(),
+            branch_divergence: branch_divergence_summary(&request.path),
+        }),
+        Err(error) if error == "nothing to commit" => None,
+        Err(error) => Some(AgentAutoCheckpointResult {
+            notice: Some(format!("auto-checkpoint failed: {error}")),
+            committed: false,
+            diff_summary: None,
+            branch_divergence: None,
+        }),
+    }
+}
+
+fn repo_notifications_allow_event(
+    config: Option<&app_config::RepoConfig>,
+    event_name: &str,
+) -> bool {
+    let Some(config) = config else {
+        return true;
+    };
+
+    if config.notifications.desktop == Some(false) {
+        return false;
+    }
+
+    config.notifications.events.is_empty()
+        || config
+            .notifications
+            .events
+            .iter()
+            .any(|event| event == event_name)
+}
+
+fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn advance_agent_activity_epoch(epochs: &Mutex<HashMap<PathBuf, u64>>, path: &Path) -> u64 {
+    let mut epochs = lock_mutex(epochs);
+    let next = epochs.get(path).copied().unwrap_or(0).saturating_add(1);
+    epochs.insert(path.to_path_buf(), next);
+    next
+}
+
+fn invalidate_agent_activity_epochs<'a>(
+    epochs: &Mutex<HashMap<PathBuf, u64>>,
+    paths: impl Iterator<Item = &'a Path>,
+) {
+    for path in paths {
+        let _ = advance_agent_activity_epoch(epochs, path);
+    }
+}
+
+fn agent_activity_epoch_is_current(
+    epochs: &Mutex<HashMap<PathBuf, u64>>,
+    path: &Path,
+    epoch: u64,
+) -> bool {
+    lock_mutex(epochs).get(path).copied().unwrap_or(0) == epoch
 }
 
 fn inject_daemon_log_entry(log_buffer: &log_layer::LogBuffer, text: &str) {
@@ -6987,6 +7511,18 @@ fn derive_branch_name(worktree_name: &str) -> String {
     }
 }
 
+fn derive_branch_name_for_repo_with_login(
+    repo_root: &Path,
+    worktree_name: &str,
+    github_login: Option<&str>,
+) -> String {
+    if repo_root.as_os_str().is_empty() || !repo_root.exists() {
+        return derive_branch_name(worktree_name);
+    }
+    let repo_root = worktree::repo_root(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    derive_branch_name_with_repo_config(&repo_root, worktree_name, github_login)
+}
+
 fn derive_branch_name_with_repo_config(
     repo_root: &Path,
     worktree_name: &str,
@@ -7297,13 +7833,14 @@ mod tests {
             agent::AgentState,
             changes::{ChangeKind, ChangedFile, DiffLineSummary},
             daemon,
+            repo_config::RepoConfig,
         },
         gpui::{Keystroke, point, px},
         std::{
             collections::HashMap,
             env, fs,
             path::{Path, PathBuf},
-            sync::Arc,
+            sync::{Arc, Mutex},
             time::{Instant, SystemTime},
         },
     };
@@ -7352,6 +7889,8 @@ mod tests {
             cursor,
             modes: TerminalModes::default(),
             last_runtime_sync_at: None,
+            queued_input: Vec::new(),
+            is_initializing: false,
             runtime: None,
         }
     }
@@ -7384,7 +7923,7 @@ mod tests {
     }
 
     fn daemon_runtime_for_test() -> DaemonTerminalRuntime {
-        let daemon = match HttpTerminalDaemon::new("http://127.0.0.1:8787") {
+        let daemon = match HttpTerminalDaemon::new("http://127.0.0.1:1") {
             Ok(daemon) => daemon,
             Err(error) => panic!("failed to create daemon client: {error}"),
         };
@@ -7393,9 +7932,9 @@ mod tests {
             daemon: Arc::new(daemon),
             ws_state: Arc::new(DaemonTerminalWsState::default()),
             last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
+            snapshot_request_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kind: TerminalRuntimeKind::Local,
             resize_error_label: "resize",
-            snapshot_error_label: "snapshot",
             exit_labels: None,
             clear_global_daemon_on_connection_refused: false,
         }
@@ -7563,6 +8102,63 @@ mod tests {
             Some((session.rows + 1, session.cols, 0, 0)),
             now
         ));
+    }
+
+    #[test]
+    fn daemon_runtime_without_cached_snapshot_returns_without_sync_error() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+        session.last_runtime_sync_at = Some(Instant::now());
+
+        let outcome = runtime.sync(&mut session, true, None);
+
+        assert!(!outcome.changed);
+        assert!(outcome.notice.is_none());
+        assert_eq!(session.state, TerminalState::Running);
+        assert!(session.output.is_empty());
+    }
+
+    #[test]
+    fn daemon_ws_state_rehydrates_trimmed_snapshot_from_ansi_output() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.apply_snapshot_text("hello\r\nworld\r\n", TerminalState::Running, None, Some(42));
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected websocket snapshot to be available"));
+
+        assert_eq!(snapshot.state, TerminalState::Running);
+        assert_eq!(snapshot.updated_at_unix_ms, Some(42));
+        assert!(snapshot.terminal.output.contains("hello"));
+        assert!(snapshot.terminal.output.contains("world"));
+        assert_eq!(snapshot.terminal.styled_lines.len(), 2);
+    }
+
+    #[test]
+    fn daemon_runtime_sync_applies_cached_ws_snapshot_without_http_roundtrip() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+        session.exit_code = None;
+        runtime.ws_state.apply_snapshot_text(
+            "codex> working\r\n",
+            TerminalState::Running,
+            None,
+            Some(99),
+        );
+
+        let outcome = runtime.sync(&mut session, true, None);
+
+        assert!(outcome.changed);
+        assert_eq!(session.state, TerminalState::Running);
+        assert_eq!(session.updated_at_unix_ms, Some(99));
+        assert!(session.output.contains("codex> working"));
+        assert_eq!(session.exit_code, None);
     }
 
     #[test]
@@ -8320,6 +8916,55 @@ mod tests {
             &mut notifications,
             path,
             Some(11),
+        ));
+    }
+
+    #[test]
+    fn agent_activity_epoch_advances_and_invalidates_previous_work() {
+        let epochs = Mutex::new(HashMap::new());
+        let path = Path::new("/tmp/repo/worktree");
+
+        let first = crate::advance_agent_activity_epoch(&epochs, path);
+        let second = crate::advance_agent_activity_epoch(&epochs, path);
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert!(!crate::agent_activity_epoch_is_current(
+            &epochs, path, first
+        ));
+        assert!(crate::agent_activity_epoch_is_current(
+            &epochs, path, second
+        ));
+    }
+
+    #[test]
+    fn repo_notifications_allow_event_honors_filters() {
+        let mut config = RepoConfig::default();
+        assert!(crate::repo_notifications_allow_event(
+            Some(&config),
+            "agent_finished"
+        ));
+
+        config.notifications.desktop = Some(false);
+        assert!(!crate::repo_notifications_allow_event(
+            Some(&config),
+            "agent_finished",
+        ));
+
+        config.notifications.desktop = Some(true);
+        config.notifications.events = vec!["build_finished".to_owned()];
+        assert!(!crate::repo_notifications_allow_event(
+            Some(&config),
+            "agent_finished",
+        ));
+
+        config
+            .notifications
+            .events
+            .push("agent_finished".to_owned());
+        assert!(crate::repo_notifications_allow_event(
+            Some(&config),
+            "agent_finished",
         ));
     }
 

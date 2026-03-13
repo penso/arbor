@@ -34,46 +34,66 @@ pub fn load_history() -> Vec<ConnectionHistoryEntry> {
     entries
 }
 
-fn save_history(entries: &[ConnectionHistoryEntry]) {
+pub fn save_history(entries: &[ConnectionHistoryEntry]) -> Result<(), String> {
     let path = history_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create connection history directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
     }
-    let Ok(json) = serde_json::to_string_pretty(entries) else {
-        return;
-    };
-    let _ = fs::write(&path, json);
+    let json = serde_json::to_string_pretty(entries).map_err(|error| {
+        format!(
+            "failed to serialize connection history `{}`: {error}",
+            path.display()
+        )
+    })?;
+    fs::write(&path, json).map_err(|error| {
+        format!(
+            "failed to write connection history `{}`: {error}",
+            path.display()
+        )
+    })
 }
 
-pub fn record_connection(address: &str, label: Option<&str>) {
-    let mut entries = load_history();
+pub fn updated_history_entries(
+    entries: &[ConnectionHistoryEntry],
+    address: &str,
+    label: Option<&str>,
+) -> Vec<ConnectionHistoryEntry> {
+    let mut entries = entries.to_vec();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    if let Some(existing) = entries.iter_mut().find(|e| e.address == address) {
+    if let Some(existing) = entries.iter_mut().find(|entry| entry.address == address) {
         existing.last_connected = now;
-        if let Some(l) = label {
-            existing.label = Some(l.to_owned());
+        if let Some(label) = label {
+            existing.label = Some(label.to_owned());
         }
     } else {
         entries.push(ConnectionHistoryEntry {
             address: address.to_owned(),
-            label: label.map(|l| l.to_owned()),
+            label: label.map(|value| value.to_owned()),
             last_connected: now,
         });
     }
 
-    entries.sort_by(|a, b| b.last_connected.cmp(&a.last_connected));
+    entries.sort_by(|left, right| right.last_connected.cmp(&left.last_connected));
     entries.truncate(MAX_ENTRIES);
-    save_history(&entries);
+    entries
 }
 
-pub fn remove_entry(address: &str) {
-    let mut entries = load_history();
-    entries.retain(|e| e.address != address);
-    save_history(&entries);
+pub fn history_without_address(
+    entries: &[ConnectionHistoryEntry],
+    address: &str,
+) -> Vec<ConnectionHistoryEntry> {
+    let mut entries = entries.to_vec();
+    entries.retain(|entry| entry.address != address);
+    entries
 }
 
 fn tokens_path() -> PathBuf {
@@ -91,13 +111,75 @@ pub fn load_tokens() -> HashMap<String, String> {
     serde_json::from_str(&data).unwrap_or_default()
 }
 
-pub fn save_tokens(tokens: &HashMap<String, String>) {
+pub fn save_tokens(tokens: &HashMap<String, String>) -> Result<(), String> {
     let path = tokens_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create daemon auth token directory `{}`: {error}",
+                parent.display()
+            )
+        })?;
     }
-    let Ok(json) = serde_json::to_string_pretty(tokens) else {
-        return;
+    let json = serde_json::to_string_pretty(tokens).map_err(|error| {
+        format!(
+            "failed to serialize daemon auth tokens `{}`: {error}",
+            path.display()
+        )
+    })?;
+    fs::write(&path, json).map_err(|error| {
+        format!(
+            "failed to write daemon auth tokens `{}`: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConnectionHistoryEntry, MAX_ENTRIES, history_without_address, updated_history_entries,
     };
-    let _ = fs::write(&path, json);
+
+    #[test]
+    fn updated_history_entries_promotes_existing_addresses_and_caps_length() {
+        let mut entries: Vec<ConnectionHistoryEntry> = (0..MAX_ENTRIES)
+            .map(|index| ConnectionHistoryEntry {
+                address: format!("host-{index}"),
+                label: None,
+                last_connected: index as u64,
+            })
+            .collect();
+        entries.reverse();
+
+        let updated = updated_history_entries(&entries, "host-3", Some("dev box"));
+        assert_eq!(updated.len(), MAX_ENTRIES);
+        assert_eq!(updated[0].address, "host-3");
+        assert_eq!(updated[0].label.as_deref(), Some("dev box"));
+
+        let inserted = updated_history_entries(&updated, "new-host", None);
+        assert_eq!(inserted.len(), MAX_ENTRIES);
+        assert!(inserted.iter().any(|entry| entry.address == "new-host"));
+        assert!(inserted.iter().all(|entry| entry.address != "host-0"));
+    }
+
+    #[test]
+    fn history_without_address_removes_the_target_entry() {
+        let entries = vec![
+            ConnectionHistoryEntry {
+                address: "one".to_owned(),
+                label: None,
+                last_connected: 1,
+            },
+            ConnectionHistoryEntry {
+                address: "two".to_owned(),
+                label: Some("secondary".to_owned()),
+                last_connected: 2,
+            },
+        ];
+
+        let filtered = history_without_address(&entries, "one");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].address, "two");
+    }
 }

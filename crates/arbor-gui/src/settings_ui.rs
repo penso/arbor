@@ -1,27 +1,47 @@
 impl ArborWindow {
     fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
-        let loaded = self.app_config_store.load_or_create_config();
-        let daemon_auth_token = loaded
-            .config
-            .daemon
-            .as_ref()
-            .and_then(|daemon| daemon.auth_token.clone())
-            .unwrap_or_default();
-        let daemon_bind_mode = DaemonBindMode::from_config(
-            loaded
-                .config
-                .daemon
-                .as_ref()
-                .and_then(|daemon| daemon.bind.as_deref()),
-        );
         self.settings_modal = Some(SettingsModal {
             active_control: SettingsControl::DaemonBindMode,
-            daemon_bind_mode,
-            initial_daemon_bind_mode: daemon_bind_mode,
+            daemon_bind_mode: DaemonBindMode::AllInterfaces,
+            initial_daemon_bind_mode: DaemonBindMode::AllInterfaces,
             notifications: self.notifications_enabled,
-            daemon_auth_token,
+            daemon_auth_token: String::new(),
+            loading: true,
             error: None,
         });
+        let store = self.app_config_store.clone();
+        let notifications_enabled = self.notifications_enabled;
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move { store.load_or_create_config() })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let Some(modal) = this.settings_modal.as_mut() else {
+                    return;
+                };
+                let daemon_auth_token = loaded
+                    .config
+                    .daemon
+                    .as_ref()
+                    .and_then(|daemon| daemon.auth_token.clone())
+                    .unwrap_or_default();
+                let daemon_bind_mode = DaemonBindMode::from_config(
+                    loaded
+                        .config
+                        .daemon
+                        .as_ref()
+                        .and_then(|daemon| daemon.bind.as_deref()),
+                );
+                modal.daemon_bind_mode = daemon_bind_mode;
+                modal.initial_daemon_bind_mode = daemon_bind_mode;
+                modal.notifications = notifications_enabled;
+                modal.daemon_auth_token = daemon_auth_token;
+                modal.loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -70,65 +90,94 @@ impl ArborWindow {
     }
 
     fn submit_settings_modal(&mut self, cx: &mut Context<Self>) {
-        let Some(modal) = self.settings_modal.clone() else {
+        let Some(mut modal) = self.settings_modal.clone() else {
             return;
         };
+        if modal.loading {
+            return;
+        }
+        modal.loading = true;
+        self.settings_modal = Some(modal.clone());
+        cx.notify();
 
         let notifications_str = if modal.notifications { "true" } else { "false" };
         let theme_slug = self.theme_kind.slug();
         let daemon_bind_changed = modal.daemon_bind_mode != modal.initial_daemon_bind_mode;
-
-        if let Err(error) = self.app_config_store.save_scalar_settings(&[
-            ("notifications", Some(notifications_str)),
-            ("theme", Some(theme_slug)),
-        ]) {
-            if let Some(modal_state) = self.settings_modal.as_mut() {
-                modal_state.error = Some(error);
+        let store = self.app_config_store.clone();
+        let daemon = self.terminal_daemon.clone();
+        let daemon_base_url = self.daemon_base_url.clone();
+        cx.spawn(async move |this, cx| {
+            enum SettingsSaveOutcome {
+                Saved(Option<bool>),
+                RestartNeeded,
             }
-            cx.notify();
-            return;
-        }
 
-        if let Err(error) = self
-            .app_config_store
-            .save_daemon_bind_mode(Some(modal.daemon_bind_mode.as_config_value()))
-        {
-            if let Some(modal_state) = self.settings_modal.as_mut() {
-                modal_state.error = Some(error);
-            }
-            cx.notify();
-            return;
-        }
+            let result = cx
+                .background_spawn(async move {
+                    store.save_scalar_settings(&[
+                        ("notifications", Some(notifications_str)),
+                        ("theme", Some(theme_slug)),
+                    ])?;
+                    store.save_daemon_bind_mode(Some(modal.daemon_bind_mode.as_config_value()))?;
 
-        self.config_last_modified = None;
-        self.refresh_config_if_changed(cx);
-        self.settings_modal = None;
-        if daemon_bind_changed && daemon_url_is_local(&self.daemon_base_url) {
-            let allow_remote = modal.daemon_bind_mode == DaemonBindMode::AllInterfaces;
-            if let Some(daemon) = &self.terminal_daemon {
-                match daemon.set_bind_mode(allow_remote) {
-                    Ok(()) => {
+                    let daemon_bind_result =
+                        if daemon_bind_changed && daemon_url_is_local(&daemon_base_url) {
+                        let allow_remote = modal.daemon_bind_mode == DaemonBindMode::AllInterfaces;
+                        match daemon
+                            .as_ref()
+                            .map(|daemon| daemon.set_bind_mode(allow_remote).map(|()| allow_remote))
+                            .transpose()
+                        {
+                            Ok(result) => SettingsSaveOutcome::Saved(result),
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to update daemon bind mode, restarting");
+                                SettingsSaveOutcome::RestartNeeded
+                            },
+                        }
+                    } else {
+                        SettingsSaveOutcome::Saved(None)
+                    };
+
+                    Ok::<SettingsSaveOutcome, String>(daemon_bind_result)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(SettingsSaveOutcome::Saved(Some(allow_remote))) => {
+                        this.config_last_modified = None;
+                        this.refresh_config_if_changed(cx);
+                        this.settings_modal = None;
                         let mode = if allow_remote {
                             "all interfaces"
                         } else {
                             "localhost only"
                         };
-                        self.notice =
+                        this.notice =
                             Some(format!("Settings saved. Daemon now listening on {mode}."));
                     },
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to update daemon bind mode, restarting");
-                        self.restart_local_daemon_after_settings_save(cx);
+                    Ok(SettingsSaveOutcome::Saved(None)) => {
+                        this.config_last_modified = None;
+                        this.refresh_config_if_changed(cx);
+                        this.settings_modal = None;
+                        this.notice = Some("Settings saved".to_owned());
+                    },
+                    Ok(SettingsSaveOutcome::RestartNeeded) => {
+                        this.restart_local_daemon_after_settings_save(cx);
                         return;
                     },
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to update settings");
+                        if let Some(modal_state) = this.settings_modal.as_mut() {
+                            modal_state.loading = false;
+                            modal_state.error = Some(error);
+                        }
+                    },
                 }
-            } else {
-                self.notice = Some("Settings saved".to_owned());
-            }
-        } else {
-            self.notice = Some("Settings saved".to_owned());
-        }
-        cx.notify();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn restart_local_daemon_after_settings_save(&mut self, cx: &mut Context<Self>) {
@@ -176,6 +225,7 @@ impl ArborWindow {
 
         let theme = self.theme();
         let daemon_auth_token_empty = modal.daemon_auth_token.trim().is_empty();
+        let loading = modal.loading;
         let section_card = |div: Div| {
             div.rounded_sm()
                 .border_1()
@@ -480,7 +530,7 @@ impl ArborWindow {
                                     "settings-cancel",
                                     "Cancel",
                                     ActionButtonStyle::Secondary,
-                                    true,
+                                    !loading,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.close_settings_modal(cx);
@@ -490,9 +540,9 @@ impl ArborWindow {
                                 action_button(
                                     theme,
                                     "settings-save",
-                                    "Save",
+                                    if loading { "Saving..." } else { "Save" },
                                     ActionButtonStyle::Primary,
-                                    true,
+                                    !loading,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.submit_settings_modal(cx);

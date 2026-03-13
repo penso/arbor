@@ -6,12 +6,13 @@ use {
         collections::{HashMap, HashSet},
         env, fs,
         path::{Path, PathBuf},
+        sync::Arc,
     },
 };
 
 const REPOSITORY_STORE_RELATIVE_PATH: &str = ".arbor/repositories.json";
 
-pub trait RepositoryStore {
+pub trait RepositoryStore: Send + Sync {
     fn load_entries(&self) -> Result<Vec<StoredRepositoryEntry>, String>;
     fn save_entries(&self, entries: &[StoredRepositoryEntry]) -> Result<(), String>;
     fn has_store_file(&self) -> bool;
@@ -119,8 +120,8 @@ impl RepositoryStore for JsonRepositoryStore {
     }
 }
 
-pub fn default_repository_store() -> Box<dyn RepositoryStore> {
-    Box::new(JsonRepositoryStore::new(default_repository_store_path()))
+pub fn default_repository_store() -> Arc<dyn RepositoryStore> {
+    Arc::new(JsonRepositoryStore::new(default_repository_store_path()))
 }
 
 fn default_repository_store_path() -> PathBuf {
