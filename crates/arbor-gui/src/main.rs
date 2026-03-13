@@ -292,7 +292,9 @@ impl ArborWindow {
                         .execution_mode
                         .unwrap_or(ExecutionMode::Build),
                     connection_history: connection_history::load_history(),
+                    connection_history_save: PendingSave::default(),
                     daemon_auth_tokens: connection_history::load_tokens(),
+                    daemon_auth_tokens_save: PendingSave::default(),
                     connected_daemon_label: None,
                     daemon_connect_epoch: 0,
                     pending_diff_scroll_to_file: None,
@@ -305,6 +307,7 @@ impl ArborWindow {
                     last_persisted_ui_state: startup_ui_state,
                     pending_ui_state_save: None,
                     ui_state_save_in_flight: false,
+                    daemon_session_store_save: PendingSave::default(),
                     last_ui_state_error: None,
                     notification_service,
                     notifications_enabled,
@@ -341,6 +344,8 @@ impl ArborWindow {
                     _config_refresh_task: None,
                     _repo_metadata_refresh_task: None,
                     _launcher_refresh_task: None,
+                    _connection_history_save_task: None,
+                    _daemon_auth_tokens_save_task: None,
                     _ui_state_save_task: None,
                     _daemon_session_store_save_task: None,
                     _create_modal_preview_task: None,
@@ -364,6 +369,7 @@ impl ArborWindow {
                     logs_tab_open: false,
                     logs_tab_active: false,
                     quit_overlay_until: None,
+                    quit_after_persistence_flush: false,
                     ime_marked_text: None,
                     welcome_clone_url: String::new(),
                     welcome_clone_url_cursor: 0,
@@ -653,7 +659,9 @@ impl ArborWindow {
                 .execution_mode
                 .unwrap_or(ExecutionMode::Build),
             connection_history: connection_history::load_history(),
+            connection_history_save: PendingSave::default(),
             daemon_auth_tokens: connection_history::load_tokens(),
+            daemon_auth_tokens_save: PendingSave::default(),
             connected_daemon_label: None,
             daemon_connect_epoch: 0,
             pending_diff_scroll_to_file: None,
@@ -675,6 +683,8 @@ impl ArborWindow {
             _config_refresh_task: None,
             _repo_metadata_refresh_task: None,
             _launcher_refresh_task: None,
+            _connection_history_save_task: None,
+            _daemon_auth_tokens_save_task: None,
             _ui_state_save_task: None,
             _daemon_session_store_save_task: None,
             _create_modal_preview_task: None,
@@ -693,6 +703,7 @@ impl ArborWindow {
             last_persisted_ui_state: startup_ui_state,
             pending_ui_state_save: None,
             ui_state_save_in_flight: false,
+            daemon_session_store_save: PendingSave::default(),
             last_ui_state_error: None,
             notification_service,
             notifications_enabled,
@@ -725,6 +736,7 @@ impl ArborWindow {
             logs_tab_open: false,
             logs_tab_active: false,
             quit_overlay_until: None,
+            quit_after_persistence_flush: false,
             ime_marked_text: None,
             welcome_clone_url: String::new(),
             welcome_clone_url_cursor: 0,
@@ -1483,11 +1495,15 @@ impl ArborWindow {
     }
 
     fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
+        let records = self.daemon_session_records_snapshot();
+        self.daemon_session_store_save.queue(records);
+        self.start_pending_daemon_session_store_save(cx);
+    }
+
+    fn daemon_session_records_snapshot(&self) -> Vec<DaemonSessionRecord> {
         let shell = self.embedded_shell();
         let updated_at_unix_ms = current_unix_timestamp_millis();
-
-        let records: Vec<DaemonSessionRecord> = self
-            .terminals
+        self.terminals
             .iter()
             .map(|session| DaemonSessionRecord {
                 session_id: session.daemon_session_id.clone().into(),
@@ -1508,19 +1524,54 @@ impl ArborWindow {
                 state: Some(daemon_state_from_terminal_state(session.state)),
                 updated_at_unix_ms: session.updated_at_unix_ms.or(updated_at_unix_ms),
             })
-            .collect();
+            .collect()
+    }
+
+    fn start_pending_daemon_session_store_save(&mut self, cx: &mut Context<Self>) {
+        let Some(records) = self.daemon_session_store_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
         let store = self.daemon_session_store.clone();
         self._daemon_session_store_save_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { store.save(&records) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.daemon_session_store_save.finish();
                 if let Err(error) = result {
                     this.notice = Some(format!("failed to persist daemon sessions: {error}"));
                     cx.notify();
                 }
+
+                this.start_pending_daemon_session_store_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
             });
         }));
+    }
+
+    fn maybe_finish_quit_after_persistence_flush(&mut self, cx: &mut Context<Self>) {
+        if !self.quit_after_persistence_flush {
+            return;
+        }
+
+        if self.daemon_session_store_save.has_work()
+            || self.connection_history_save.has_work()
+            || self.daemon_auth_tokens_save.has_work()
+        {
+            return;
+        }
+
+        self.quit_after_persistence_flush = false;
+        self.stop_active_ssh_daemon_tunnel();
+        cx.quit();
+    }
+
+    fn request_quit_after_persistence_flush(&mut self, cx: &mut Context<Self>) {
+        self.quit_after_persistence_flush = true;
+        self.sync_daemon_session_store(cx);
+        self.maybe_finish_quit_after_persistence_flush(cx);
     }
 
     fn restore_terminal_sessions_from_records(
@@ -3413,6 +3464,7 @@ impl ArborWindow {
 
     fn action_request_quit(&mut self, _: &RequestQuit, _: &mut Window, cx: &mut Context<Self>) {
         self.quit_overlay_until = if self.quit_overlay_until.is_some() {
+            self.quit_after_persistence_flush = false;
             None
         } else {
             Some(Instant::now())
@@ -3421,20 +3473,17 @@ impl ArborWindow {
     }
 
     fn action_confirm_quit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.sync_daemon_session_store(cx);
-        self.stop_active_ssh_daemon_tunnel();
-        cx.quit();
+        self.request_quit_after_persistence_flush(cx);
     }
 
     fn action_dismiss_quit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.quit_overlay_until = None;
+        self.quit_after_persistence_flush = false;
         cx.notify();
     }
 
     fn action_immediate_quit(&mut self, _: &ImmediateQuit, _: &mut Window, cx: &mut Context<Self>) {
-        self.sync_daemon_session_store(cx);
-        self.stop_active_ssh_daemon_tunnel();
-        cx.quit();
+        self.request_quit_after_persistence_flush(cx);
     }
 
     fn action_view_logs(&mut self, _: &ViewLogs, _: &mut Window, cx: &mut Context<Self>) {
@@ -7819,10 +7868,10 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
 mod tests {
     use {
         crate::{
-            DaemonTerminalRuntime, DaemonTerminalWsState, DiffLineKind, TerminalRuntimeHandle,
-            TerminalRuntimeKind, TerminalSession, TerminalState, WorktreeHoverPopover,
-            WorktreeSummary, apply_daemon_snapshot, auto_commit_body, auto_commit_subject,
-            build_side_by_side_diff_lines,
+            DaemonTerminalRuntime, DaemonTerminalWsState, DiffLineKind, PendingSave,
+            TerminalRuntimeHandle, TerminalRuntimeKind, TerminalSession, TerminalState,
+            WorktreeHoverPopover, WorktreeSummary, apply_daemon_snapshot, auto_commit_body,
+            auto_commit_subject, build_side_by_side_diff_lines,
             checkout::CheckoutKind,
             estimated_worktree_hover_popover_card_height, extract_first_url,
             resolve_github_access_token_from_sources, styled_lines_for_session,
@@ -8941,6 +8990,40 @@ mod tests {
         assert!(crate::agent_activity_epoch_is_current(
             &epochs, path, second
         ));
+    }
+
+    #[test]
+    fn pending_save_coalesces_to_latest_value_after_inflight_write() {
+        let mut pending = PendingSave::default();
+
+        pending.queue("first");
+        assert_eq!(pending.begin_next(), Some("first"));
+        assert!(pending.has_work());
+
+        pending.queue("second");
+        pending.queue("third");
+        assert!(pending.begin_next().is_none());
+
+        pending.finish();
+
+        assert_eq!(pending.begin_next(), Some("third"));
+        pending.finish();
+        assert!(!pending.has_work());
+    }
+
+    #[test]
+    fn pending_save_reports_work_for_pending_and_inflight_states() {
+        let mut pending = PendingSave::default();
+        assert!(!pending.has_work());
+
+        pending.queue(1_u8);
+        assert!(pending.has_work());
+
+        let _ = pending.begin_next();
+        assert!(pending.has_work());
+
+        pending.finish();
+        assert!(!pending.has_work());
     }
 
     #[test]

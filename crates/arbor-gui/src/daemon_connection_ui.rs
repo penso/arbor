@@ -1,18 +1,8 @@
 impl ArborWindow {
     fn persist_connection_history(&mut self, cx: &mut Context<Self>) {
-        let history = self.connection_history.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { connection_history::save_history(&history) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.notice = Some(format!("failed to persist connection history: {error}"));
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.connection_history_save
+            .queue(self.connection_history.clone());
+        self.start_pending_connection_history_save(cx);
     }
 
     fn record_connection_history_entry(
@@ -27,19 +17,55 @@ impl ArborWindow {
     }
 
     fn persist_daemon_auth_tokens(&mut self, cx: &mut Context<Self>) {
-        let tokens = self.daemon_auth_tokens.clone();
-        cx.spawn(async move |this, cx| {
+        self.daemon_auth_tokens_save
+            .queue(self.daemon_auth_tokens.clone());
+        self.start_pending_daemon_auth_tokens_save(cx);
+    }
+
+    fn start_pending_connection_history_save(&mut self, cx: &mut Context<Self>) {
+        let Some(history) = self.connection_history_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        self._connection_history_save_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { connection_history::save_history(&history) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.connection_history_save.finish();
+                if let Err(error) = result {
+                    this.notice = Some(format!("failed to persist connection history: {error}"));
+                    cx.notify();
+                }
+
+                this.start_pending_connection_history_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
+            });
+        }));
+    }
+
+    fn start_pending_daemon_auth_tokens_save(&mut self, cx: &mut Context<Self>) {
+        let Some(tokens) = self.daemon_auth_tokens_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
+        self._daemon_auth_tokens_save_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { connection_history::save_tokens(&tokens) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.daemon_auth_tokens_save.finish();
                 if let Err(error) = result {
                     this.notice = Some(format!("failed to persist daemon auth tokens: {error}"));
                     cx.notify();
                 }
+
+                this.start_pending_daemon_auth_tokens_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
             });
-        })
-        .detach();
+        }));
     }
 
     fn open_remote_create_modal(

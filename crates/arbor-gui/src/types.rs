@@ -1659,6 +1659,36 @@ struct CreatedWorktree {
     review_pull_request_number: Option<u64>,
 }
 
+#[derive(Debug, Default)]
+struct PendingSave<T> {
+    pending: Option<T>,
+    in_flight: bool,
+}
+
+impl<T> PendingSave<T> {
+    fn queue(&mut self, value: T) {
+        self.pending = Some(value);
+    }
+
+    fn begin_next(&mut self) -> Option<T> {
+        if self.in_flight {
+            return None;
+        }
+
+        let value = self.pending.take()?;
+        self.in_flight = true;
+        Some(value)
+    }
+
+    fn finish(&mut self) {
+        self.in_flight = false;
+    }
+
+    fn has_work(&self) -> bool {
+        self.in_flight || self.pending.is_some()
+    }
+}
+
 struct ArborWindow {
     app_config_store: Arc<dyn app_config::AppConfigStore>,
     repository_store: Arc<dyn repository_store::RepositoryStore>,
@@ -1744,7 +1774,9 @@ struct ArborWindow {
     compact_sidebar: bool,
     execution_mode: ExecutionMode,
     connection_history: Vec<connection_history::ConnectionHistoryEntry>,
+    connection_history_save: PendingSave<Vec<connection_history::ConnectionHistoryEntry>>,
     daemon_auth_tokens: HashMap<String, String>,
+    daemon_auth_tokens_save: PendingSave<HashMap<String, String>>,
     connected_daemon_label: Option<String>,
     daemon_connect_epoch: u64,
     pending_diff_scroll_to_file: Option<PathBuf>,
@@ -1757,6 +1789,7 @@ struct ArborWindow {
     last_persisted_ui_state: ui_state_store::UiState,
     pending_ui_state_save: Option<ui_state_store::UiState>,
     ui_state_save_in_flight: bool,
+    daemon_session_store_save: PendingSave<Vec<DaemonSessionRecord>>,
     last_ui_state_error: Option<String>,
     notification_service: Box<dyn notifications::NotificationService>,
     notifications_enabled: bool,
@@ -1793,6 +1826,8 @@ struct ArborWindow {
     _config_refresh_task: Option<gpui::Task<()>>,
     _repo_metadata_refresh_task: Option<gpui::Task<()>>,
     _launcher_refresh_task: Option<gpui::Task<()>>,
+    _connection_history_save_task: Option<gpui::Task<()>>,
+    _daemon_auth_tokens_save_task: Option<gpui::Task<()>>,
     _ui_state_save_task: Option<gpui::Task<()>>,
     _daemon_session_store_save_task: Option<gpui::Task<()>>,
     _create_modal_preview_task: Option<gpui::Task<()>>,
@@ -1816,6 +1851,7 @@ struct ArborWindow {
     logs_tab_open: bool,
     logs_tab_active: bool,
     quit_overlay_until: Option<Instant>,
+    quit_after_persistence_flush: bool,
     ime_marked_text: Option<String>,
     welcome_clone_url: String,
     welcome_clone_url_cursor: usize,
