@@ -298,6 +298,7 @@ impl ArborWindow {
                         .unwrap_or(ExecutionMode::Build),
                     connection_history: connection_history::load_history(),
                     connection_history_save: PendingSave::default(),
+                    repository_entries_save: PendingSave::default(),
                     daemon_auth_tokens: connection_history::load_tokens(),
                     daemon_auth_tokens_save: PendingSave::default(),
                     connected_daemon_label: None,
@@ -350,6 +351,7 @@ impl ArborWindow {
                     _repo_metadata_refresh_task: None,
                     _launcher_refresh_task: None,
                     _connection_history_save_task: None,
+                    _repository_entries_save_task: None,
                     _daemon_auth_tokens_save_task: None,
                     _ui_state_save_task: None,
                     _daemon_session_store_save_task: None,
@@ -666,6 +668,7 @@ impl ArborWindow {
                 .unwrap_or(ExecutionMode::Build),
             connection_history: connection_history::load_history(),
             connection_history_save: PendingSave::default(),
+            repository_entries_save: PendingSave::default(),
             daemon_auth_tokens: connection_history::load_tokens(),
             daemon_auth_tokens_save: PendingSave::default(),
             connected_daemon_label: None,
@@ -690,6 +693,7 @@ impl ArborWindow {
             _repo_metadata_refresh_task: None,
             _launcher_refresh_task: None,
             _connection_history_save_task: None,
+            _repository_entries_save_task: None,
             _daemon_auth_tokens_save_task: None,
             _ui_state_save_task: None,
             _daemon_session_store_save_task: None,
@@ -1569,6 +1573,7 @@ impl ArborWindow {
 
         if self.daemon_session_store_save.has_work()
             || self.connection_history_save.has_work()
+            || self.repository_entries_save.has_work()
             || self.daemon_auth_tokens_save.has_work()
         {
             return;

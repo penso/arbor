@@ -575,21 +575,34 @@ impl ArborWindow {
     }
 
     fn persist_repositories(&mut self, cx: &mut Context<Self>) {
-        let entries_to_save =
-            repository_store::repository_entries_from_summaries(&self.repositories);
+        self.repository_entries_save.queue(
+            repository_store::repository_entries_from_summaries(&self.repositories),
+        );
+        self.start_pending_repository_entries_save(cx);
+    }
+
+    fn start_pending_repository_entries_save(&mut self, cx: &mut Context<Self>) {
+        let Some(entries_to_save) = self.repository_entries_save.begin_next() else {
+            self.maybe_finish_quit_after_persistence_flush(cx);
+            return;
+        };
+
         let store = self.repository_store.clone();
-        cx.spawn(async move |this, cx| {
+        self._repository_entries_save_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { store.save_entries(&entries_to_save) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.repository_entries_save.finish();
                 if let Err(error) = result {
                     this.notice = Some(format!("failed to save repositories: {error}"));
                     cx.notify();
                 }
+
+                this.start_pending_repository_entries_save(cx);
+                this.maybe_finish_quit_after_persistence_flush(cx);
             });
-        })
-        .detach();
+        }));
     }
 
     fn add_repository_from_path(&mut self, selected_path: PathBuf, cx: &mut Context<Self>) {

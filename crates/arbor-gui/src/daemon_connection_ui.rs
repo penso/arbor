@@ -22,6 +22,12 @@ impl ArborWindow {
         self.start_pending_daemon_auth_tokens_save(cx);
     }
 
+    fn begin_daemon_connect_attempt(&mut self) -> u64 {
+        let connect_epoch = self.daemon_connect_epoch.wrapping_add(1);
+        self.daemon_connect_epoch = connect_epoch;
+        connect_epoch
+    }
+
     fn start_pending_connection_history_save(&mut self, cx: &mut Context<Self>) {
         let Some(history) = self.connection_history_save.begin_next() else {
             self.maybe_finish_quit_after_persistence_flush(cx);
@@ -89,6 +95,7 @@ impl ArborWindow {
             None,
             Some(repo_root),
             false,
+            None,
             cx,
         );
     }
@@ -359,6 +366,7 @@ impl ArborWindow {
         auth_key: String,
         cx: &mut Context<Self>,
     ) {
+        let connect_epoch = self.begin_daemon_connect_attempt();
         self.stop_active_ssh_daemon_tunnel();
         let ssh_destination = target.ssh_destination();
         let ssh_port = target.ssh_port;
@@ -375,8 +383,13 @@ impl ArborWindow {
                 .await;
 
             let Some((local_url, local_port)) = this
-                .update(cx, |this, cx| match tunnel_result {
-                    Ok(tunnel) => {
+                .update(cx, |this, cx| {
+                    if this.daemon_connect_epoch != connect_epoch {
+                        return None;
+                    }
+
+                    match tunnel_result {
+                        Ok(tunnel) => {
                         let local_url = tunnel.local_url();
                         let local_port = tunnel.local_port;
                         tracing::info!(
@@ -388,14 +401,15 @@ impl ArborWindow {
                         );
                         this.ssh_daemon_tunnel = Some(tunnel);
                         Some((local_url, local_port))
-                    },
-                    Err(error) => {
-                        this.notice = Some(error);
-                        this.terminal_daemon = None;
-                        this.connected_daemon_label = None;
-                        cx.notify();
-                        None
-                    },
+                        },
+                        Err(error) => {
+                            this.notice = Some(error);
+                            this.terminal_daemon = None;
+                            this.connected_daemon_label = None;
+                            cx.notify();
+                            None
+                        },
+                    }
                 })
                 .ok()
                 .flatten()
@@ -416,6 +430,10 @@ impl ArborWindow {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                if this.daemon_connect_epoch != connect_epoch {
+                    return;
+                }
+
                 this.notice = None;
                 if ready {
                     this.connect_to_daemon_endpoint(
@@ -424,6 +442,7 @@ impl ArborWindow {
                         Some(auth_key),
                         None,
                         true,
+                        Some(connect_epoch),
                         cx,
                     );
                 } else {
@@ -448,11 +467,15 @@ impl ArborWindow {
         auth_key: Option<String>,
         open_create_repo_root: Option<String>,
         stop_tunnel_on_failure: bool,
+        connect_epoch: Option<u64>,
         cx: &mut Context<Self>,
     ) {
+        let connect_epoch = connect_epoch.unwrap_or_else(|| self.begin_daemon_connect_attempt());
+        if self.daemon_connect_epoch != connect_epoch {
+            return;
+        }
+
         tracing::info!(url = %url, "connecting to daemon");
-        let connect_epoch = self.daemon_connect_epoch.wrapping_add(1);
-        self.daemon_connect_epoch = connect_epoch;
         self.daemon_base_url = url.to_owned();
         let token_key = auth_key.unwrap_or_else(|| url.to_owned());
         let client = match terminal_daemon_http::default_terminal_daemon_client(url) {
@@ -693,7 +716,15 @@ impl ArborWindow {
         match target {
             ConnectHostTarget::Http { url, auth_key } => {
                 self.stop_active_ssh_daemon_tunnel();
-                self.connect_to_daemon_endpoint(&url, Some(label), Some(auth_key), None, false, cx);
+                self.connect_to_daemon_endpoint(
+                    &url,
+                    Some(label),
+                    Some(auth_key),
+                    None,
+                    false,
+                    None,
+                    cx,
+                );
             },
             ConnectHostTarget::Ssh { target, auth_key } => {
                 self.connect_to_ssh_daemon(target, Some(label), auth_key, cx);
