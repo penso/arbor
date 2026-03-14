@@ -57,6 +57,9 @@ pub(crate) enum AgentWsEvent {
     Update {
         session: arbor_daemon_client::AgentSessionDto,
     },
+    Clear {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Serialize)]

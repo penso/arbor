@@ -4878,6 +4878,16 @@ fn process_agent_ws_message(
                 }
             }
         },
+        Some("clear") => {
+            if let Some(session_id) = value.get("session_id").and_then(|v| v.as_str()) {
+                tracing::info!(session_id, "agent WS clear received");
+                let session_id = session_id.to_owned();
+                let _ = this.update(cx, |this, cx| {
+                    apply_agent_ws_clear(this, &session_id, cx);
+                    cx.notify();
+                });
+            }
+        },
         _ => {},
     }
 }
@@ -4915,6 +4925,11 @@ fn apply_agent_ws_update(
             });
     }
     reconcile_worktree_agent_activity(app, true, cx);
+}
+
+fn apply_agent_ws_clear(app: &mut ArborWindow, session_id: &str, cx: &mut Context<ArborWindow>) {
+    remove_agent_activity_session(&mut app.agent_activity_sessions, session_id);
+    reconcile_worktree_agent_activity(app, false, cx);
 }
 
 const AGENT_ACTIVITY_SESSION_EXPIRY_SECS: u64 = 300;
@@ -5046,6 +5061,13 @@ fn prune_stale_agent_activity_sessions(
             .updated_at_unix_ms
             .is_none_or(|updated_at_unix_ms| updated_at_unix_ms > cutoff)
     });
+}
+
+fn remove_agent_activity_session(
+    sessions: &mut HashMap<String, AgentActivitySessionRecord>,
+    session_id: &str,
+) {
+    sessions.remove(session_id);
 }
 
 #[derive(Clone)]
@@ -8312,6 +8334,33 @@ mod tests {
 
         assert!(!sessions.contains_key("stale"));
         assert!(sessions.contains_key("fresh"));
+    }
+
+    #[test]
+    fn apply_agent_ws_clear_removes_matching_session() {
+        let mut sessions = HashMap::from([
+            (
+                "terminal:daemon-1".to_owned(),
+                crate::AgentActivitySessionRecord {
+                    cwd: "/tmp/repo/worktree".to_owned(),
+                    state: AgentState::Waiting,
+                    updated_at_unix_ms: Some(42),
+                },
+            ),
+            (
+                "terminal:daemon-2".to_owned(),
+                crate::AgentActivitySessionRecord {
+                    cwd: "/tmp/repo/worktree".to_owned(),
+                    state: AgentState::Working,
+                    updated_at_unix_ms: Some(99),
+                },
+            ),
+        ]);
+
+        crate::remove_agent_activity_session(&mut sessions, "terminal:daemon-1");
+
+        assert!(!sessions.contains_key("terminal:daemon-1"));
+        assert!(sessions.contains_key("terminal:daemon-2"));
     }
 
     #[test]

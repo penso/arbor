@@ -71,7 +71,8 @@ export type AgentSession = {
 
 export type AgentActivityWsEvent =
   | { type: "snapshot"; sessions: AgentSession[] }
-  | { type: "update"; session: AgentSession };
+  | { type: "update"; session: AgentSession }
+  | { type: "clear"; session_id: string };
 
 export type WsClientEvent =
   | { type: "resize"; cols: number; rows: number }

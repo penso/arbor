@@ -998,18 +998,18 @@ async fn upsert_agent_session(
 }
 
 async fn remove_agent_session(state: &AppState, session_id: &str) {
-    let snapshot = {
+    let removed = {
         let mut sessions = state.agent_sessions.lock().await;
-        if sessions.remove(session_id).is_none() {
-            return;
-        }
-        agent_session_snapshot(&mut sessions)
+        sessions.remove(session_id).is_some()
     };
+    if !removed {
+        return;
+    }
 
-    tracing::info!(session_id, "agent session cleared, broadcasting snapshot");
-    let _ = state
-        .agent_broadcast
-        .send(AgentWsEvent::Snapshot { sessions: snapshot });
+    tracing::info!(session_id, "agent session cleared, broadcasting clear");
+    let _ = state.agent_broadcast.send(AgentWsEvent::Clear {
+        session_id: session_id.to_owned(),
+    });
 }
 
 fn terminal_agent_session_key(session_id: &SessionId) -> String {
@@ -2239,6 +2239,22 @@ mod tests {
                 AgentState::Waiting,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn agent_ws_clear_event_serializes_session_id() {
+        let json = serde_json::to_value(AgentWsEvent::Clear {
+            session_id: "terminal:daemon-1".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("clear event should serialize: {error}"));
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "clear",
+                "session_id": "terminal:daemon-1",
+            })
         );
     }
 

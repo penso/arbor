@@ -234,17 +234,26 @@ function parseAgentWsEvent(data: string): AgentActivityWsEvent | null {
     const session = parseAgentSession(rec["session"]);
     if (session !== null) return { type: "update", session };
   }
+  if (eventType === "clear" && typeof rec["session_id"] === "string") {
+    return { type: "clear", session_id: rec["session_id"] };
+  }
   return null;
 }
 
 function applyAgentEvent(event: AgentActivityWsEvent): void {
   if (event.type === "snapshot") {
     updateState({ agentSessions: event.sessions });
-  } else {
+  } else if (event.type === "update") {
     const existing = state.agentSessions.filter(
       (s) => s.session_id !== event.session.session_id,
     );
     updateState({ agentSessions: [...existing, event.session] });
+  } else {
+    updateState({
+      agentSessions: state.agentSessions.filter(
+        (s) => s.session_id !== event.session_id,
+      ),
+    });
   }
 }
 
