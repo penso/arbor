@@ -59,7 +59,7 @@ check_cargo() {
       else
         seen[$lower]="$name ($toml)"
       fi
-    done < <(grep -A1 '^\[\[bin\]\]' "$toml" | grep '^name' | sed 's/.*= *"\([^"]*\)".*/\1/')
+    done < <(awk '/^\[\[bin\]\]/{b=1;next} /^\[/{b=0} b && /^name[ \t]*=/{gsub(/.*= *"/,""); gsub(/".*/,""); print}' "$toml")
   done < <(find "$root_dir/crates" -name Cargo.toml)
 
   if [[ $collisions -gt 0 ]]; then
