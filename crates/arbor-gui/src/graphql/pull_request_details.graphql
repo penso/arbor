@@ -7,10 +7,11 @@ query PullRequestDetails($owner: String!, $repo: String!, $head: String!) {
         url
         state
         isDraft
-        baseRefName
         additions
         deletions
         reviewDecision
+        mergeable
+        mergeStateStatus
         commits(last: 1) {
           nodes {
             commit {
@@ -28,5 +29,12 @@ query PullRequestDetails($owner: String!, $repo: String!, $head: String!) {
         }
       }
     }
+  }
+  rateLimit {
+    cost
+    limit
+    remaining
+    resetAt
+    used
   }
 }

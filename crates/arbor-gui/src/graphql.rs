@@ -4,6 +4,7 @@ type DateTime = String;
 #[allow(clippy::upper_case_acronyms)]
 type URI = String;
 
+#[allow(dead_code)]
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/graphql/schema.graphql",

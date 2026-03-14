@@ -415,8 +415,21 @@ impl ArborWindow {
                         theme,
                         format!("theme {}", self.theme_kind.label()),
                     ))
+                    .when_some(self.github_rate_limit_remaining(), |this, remaining| {
+                        this.child(status_text(theme, "•")).child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.accent))
+                                .child(format!(
+                                    "GitHub rate limited: {}",
+                                    format_countdown(remaining)
+                                )),
+                        )
+                    })
                     .child(
-                        if self.worktree_stats_loading || self.worktree_prs_loading {
+                        if self.github_rate_limit_remaining().is_some() {
+                            status_text(theme, "waiting")
+                        } else if self.worktree_stats_loading || self.worktree_prs_loading {
                             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                             let frame_index = (SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)

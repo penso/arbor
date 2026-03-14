@@ -1275,18 +1275,13 @@ impl ArborWindow {
         let next_epoch = self.launcher_refresh_epoch.wrapping_add(1);
         self.launcher_refresh_epoch = next_epoch;
         self._launcher_refresh_task = Some(cx.spawn(async move |this, cx| {
-            let (ide_launchers, terminal_launchers) = cx
-                .background_spawn(async move {
-                    (detect_ide_launchers(), detect_terminal_launchers())
-                })
-                .await;
+            let ide_launchers = cx.background_spawn(async move { detect_ide_launchers() }).await;
 
             let _ = this.update(cx, |this, cx| {
                 if this.launcher_refresh_epoch != next_epoch {
                     return;
                 }
                 this.ide_launchers = ide_launchers;
-                this.terminal_launchers = terminal_launchers;
                 if this.top_bar_quick_actions_open {
                     cx.notify();
                 }
@@ -1358,7 +1353,6 @@ impl ArborWindow {
 
     fn run_worktree_external_launcher(
         &mut self,
-        submenu: QuickActionSubmenu,
         launcher_index: usize,
         cx: &mut Context<Self>,
     ) {
@@ -1369,10 +1363,7 @@ impl ArborWindow {
             return;
         };
 
-        let launcher = match submenu {
-            QuickActionSubmenu::Ide => self.ide_launchers.get(launcher_index).copied(),
-            QuickActionSubmenu::Terminal => self.terminal_launchers.get(launcher_index).copied(),
-        };
+        let launcher = self.ide_launchers.get(launcher_index).copied();
         let Some(launcher) = launcher else {
             self.notice = Some("launcher no longer available".to_owned());
             self.close_top_bar_worktree_quick_actions();

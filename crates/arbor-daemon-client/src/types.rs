@@ -1,7 +1,7 @@
 use {
     arbor_core::{SessionId, WorkspaceId, daemon::DaemonSessionRecord, process::ProcessInfo},
     schemars::JsonSchema,
-    serde::{Deserialize, Serialize},
+    serde::{Deserialize, Deserializer, Serialize},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -40,11 +40,41 @@ pub struct ChangedFileDto {
     pub deletions: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct AgentSessionDto {
+    pub session_id: String,
     pub cwd: String,
     pub state: String,
     pub updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgentSessionDtoWire {
+    session_id: Option<String>,
+    cwd: String,
+    state: String,
+    updated_at_unix_ms: u64,
+}
+
+fn legacy_agent_session_id(cwd: &str) -> String {
+    format!("legacy-cwd:{cwd}")
+}
+
+impl<'de> Deserialize<'de> for AgentSessionDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AgentSessionDtoWire::deserialize(deserializer)?;
+        Ok(Self {
+            session_id: wire
+                .session_id
+                .unwrap_or_else(|| legacy_agent_session_id(&wire.cwd)),
+            cwd: wire.cwd,
+            state: wire.state,
+            updated_at_unix_ms: wire.updated_at_unix_ms,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -124,4 +154,41 @@ pub struct GitActionResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiError {
     pub(crate) error: String,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use crate::AgentSessionDto;
+
+    #[test]
+    fn agent_session_dto_deserializes_legacy_payload_without_session_id() {
+        let dto: AgentSessionDto = serde_json::from_value(serde_json::json!({
+            "cwd": "/tmp/repo/worktree",
+            "state": "working",
+            "updated_at_unix_ms": 42_u64,
+        }))
+        .expect("legacy payload should deserialize");
+
+        assert_eq!(dto.session_id, "legacy-cwd:/tmp/repo/worktree");
+        assert_eq!(dto.cwd, "/tmp/repo/worktree");
+        assert_eq!(dto.state, "working");
+        assert_eq!(dto.updated_at_unix_ms, 42);
+    }
+
+    #[test]
+    fn agent_session_dto_preserves_explicit_session_id() {
+        let dto: AgentSessionDto = serde_json::from_value(serde_json::json!({
+            "session_id": "terminal:daemon-1",
+            "cwd": "/tmp/repo/worktree",
+            "state": "waiting",
+            "updated_at_unix_ms": 99_u64,
+        }))
+        .expect("payload with session_id should deserialize");
+
+        assert_eq!(dto.session_id, "terminal:daemon-1");
+        assert_eq!(dto.cwd, "/tmp/repo/worktree");
+        assert_eq!(dto.state, "waiting");
+        assert_eq!(dto.updated_at_unix_ms, 99);
+    }
 }

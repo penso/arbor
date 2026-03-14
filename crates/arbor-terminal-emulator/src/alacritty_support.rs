@@ -2,11 +2,12 @@ use {
     crate::{
         TERMINAL_ANSI_16, TERMINAL_ANSI_DIM_8, TERMINAL_BRIGHT_FG, TERMINAL_CURSOR,
         TERMINAL_DEFAULT_BG, TERMINAL_DEFAULT_FG, TERMINAL_DIM_FG, TERMINAL_SCROLLBACK,
-        TerminalCursor, TerminalModes, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+        TerminalCursor, TerminalModes, TerminalProcessReport, TerminalStyledCell,
+        TerminalStyledLine, TerminalStyledRun,
     },
     alacritty_terminal::{
         Term,
-        event::VoidListener,
+        event::{Event, EventListener},
         grid::Dimensions,
         index::{Column, Line, Point},
         term::{
@@ -23,8 +24,9 @@ use {
 };
 
 pub(crate) struct AlacrittyState {
-    pub(crate) term: Term<VoidListener>,
+    pub(crate) term: Term<AlacrittyEventListener>,
     pub(crate) processor: Processor<StdSyncHandler>,
+    pub(crate) event_listener: AlacrittyEventListener,
 }
 
 pub(crate) struct TerminalDimensions {
@@ -55,10 +57,12 @@ pub(crate) fn new_state(rows: u16, cols: u16) -> AlacrittyState {
         scrolling_history: TERMINAL_SCROLLBACK,
         ..Config::default()
     };
+    let event_listener = AlacrittyEventListener::default();
 
     AlacrittyState {
-        term: Term::new(config, &dimensions, VoidListener),
+        term: Term::new(config, &dimensions, event_listener.clone()),
         processor: Processor::<StdSyncHandler>::new(),
+        event_listener,
     }
 }
 
@@ -75,14 +79,35 @@ pub fn process_terminal_bytes(
     generation.fetch_add(1, Ordering::Relaxed);
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AlacrittyEventListener {
+    bell_count: Arc<AtomicU64>,
+}
+
+impl AlacrittyEventListener {
+    pub(crate) fn take_process_report(&self) -> TerminalProcessReport {
+        TerminalProcessReport {
+            bell_count: self.bell_count.swap(0, Ordering::Relaxed) as usize,
+        }
+    }
+}
+
+impl EventListener for AlacrittyEventListener {
+    fn send_event(&self, event: Event) {
+        if matches!(event, Event::Bell) {
+            self.bell_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg_attr(feature = "ghostty-vt-experimental", allow(dead_code))]
-pub(crate) fn snapshot_output(term: &Term<VoidListener>) -> String {
+pub(crate) fn snapshot_output(term: &Term<AlacrittyEventListener>) -> String {
     let start = Point::new(term.topmost_line(), Column(0));
     let end = Point::new(term.bottommost_line(), term.last_column());
     term.bounds_to_string(start, end)
 }
 
-pub(crate) fn snapshot_cursor(term: &Term<VoidListener>) -> Option<TerminalCursor> {
+pub(crate) fn snapshot_cursor(term: &Term<AlacrittyEventListener>) -> Option<TerminalCursor> {
     if !term.mode().contains(TermMode::SHOW_CURSOR) {
         return None;
     }
@@ -102,7 +127,7 @@ pub(crate) fn snapshot_cursor(term: &Term<VoidListener>) -> Option<TerminalCurso
 }
 
 #[cfg_attr(feature = "ghostty-vt-experimental", allow(dead_code))]
-pub(crate) fn snapshot_modes(term: &Term<VoidListener>) -> TerminalModes {
+pub(crate) fn snapshot_modes(term: &Term<AlacrittyEventListener>) -> TerminalModes {
     let mode = term.mode();
     TerminalModes {
         app_cursor: mode.contains(TermMode::APP_CURSOR),
@@ -110,7 +135,7 @@ pub(crate) fn snapshot_modes(term: &Term<VoidListener>) -> TerminalModes {
     }
 }
 
-pub(crate) fn collect_styled_lines(term: &Term<VoidListener>) -> Vec<TerminalStyledLine> {
+pub(crate) fn collect_styled_lines(term: &Term<AlacrittyEventListener>) -> Vec<TerminalStyledLine> {
     let grid = term.grid();
     let colors = term.colors();
     let top_line = grid.topmost_line().0;

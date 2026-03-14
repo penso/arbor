@@ -11,7 +11,6 @@ use {
         env,
         io::{Read, Write},
         path::Path,
-        process::{Command, Stdio},
         sync::{
             Arc, Mutex,
             atomic::{AtomicU64, Ordering},
@@ -26,21 +25,10 @@ pub const EMBEDDED_TERMINAL_DEFAULT_BG: u32 = TERMINAL_DEFAULT_BG;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalBackendKind {
     Embedded,
-    Alacritty,
-    Ghostty,
-}
-
-#[derive(Debug, Clone)]
-pub struct TerminalRunResult {
-    pub command: String,
-    pub output: String,
-    pub success: bool,
-    pub code: Option<i32>,
 }
 
 pub enum TerminalLaunch {
     Embedded(EmbeddedTerminal),
-    External(TerminalRunResult),
 }
 
 #[derive(Clone)]
@@ -68,8 +56,6 @@ pub fn launch_backend(
         TerminalBackendKind::Embedded => {
             EmbeddedTerminal::spawn(cwd, initial_rows, initial_cols).map(TerminalLaunch::Embedded)
         },
-        TerminalBackendKind::Alacritty => launch_alacritty(cwd).map(TerminalLaunch::External),
-        TerminalBackendKind::Ghostty => launch_ghostty(cwd).map(TerminalLaunch::External),
     }
 }
 
@@ -398,157 +384,6 @@ fn spawn_wait_thread(
 
 fn default_shell() -> String {
     arbor_core::daemon::default_shell()
-}
-
-fn launch_alacritty(cwd: &Path) -> Result<TerminalRunResult, String> {
-    let shell = default_shell();
-    let script = "printf 'Arbor external terminal session\\n'; exec $SHELL -l";
-    let cwd_display = cwd.display().to_string();
-
-    let direct_args = vec![
-        "--working-directory".to_owned(),
-        cwd_display.clone(),
-        "-e".to_owned(),
-        shell.clone(),
-        "-lc".to_owned(),
-        script.to_owned(),
-    ];
-
-    let launched_command = match run_detached("alacritty", &direct_args, cwd) {
-        Ok(()) => format!("alacritty {}", render_args(&direct_args)),
-        Err(direct_error) => {
-            #[cfg(target_os = "macos")]
-            {
-                let app_args = vec![
-                    "-na".to_owned(),
-                    "Alacritty.app".to_owned(),
-                    "--args".to_owned(),
-                    "--working-directory".to_owned(),
-                    cwd_display,
-                    "-e".to_owned(),
-                    shell,
-                    "-lc".to_owned(),
-                    script.to_owned(),
-                ];
-
-                match run_detached("open", &app_args, cwd) {
-                    Ok(()) => format!("open {}", render_args(&app_args)),
-                    Err(bundle_error) => {
-                        return Err(format!(
-                            "unable to launch Alacritty directly ({direct_error}) or via app bundle ({bundle_error})",
-                        ));
-                    },
-                }
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                return Err(format!("unable to launch Alacritty: {direct_error}"));
-            }
-        },
-    };
-
-    Ok(external_launch_result("Alacritty", launched_command))
-}
-
-fn launch_ghostty(cwd: &Path) -> Result<TerminalRunResult, String> {
-    let shell = default_shell();
-    let script = "printf 'Arbor external terminal session\\n'; exec $SHELL -l";
-    let cwd_flag = format!("--working-directory={}", cwd.display());
-
-    #[cfg(target_os = "macos")]
-    {
-        let app_args = vec![
-            "-na".to_owned(),
-            "Ghostty.app".to_owned(),
-            "--args".to_owned(),
-            cwd_flag,
-            "-e".to_owned(),
-            shell,
-            "-lc".to_owned(),
-            script.to_owned(),
-        ];
-
-        run_detached("open", &app_args, cwd).map_err(|error| {
-            format!(
-                "unable to launch Ghostty via app bundle. Install Ghostty.app in /Applications or adjust PATH: {error}",
-            )
-        })?;
-
-        Ok(external_launch_result(
-            "Ghostty",
-            format!("open {}", render_args(&app_args)),
-        ))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let args = vec![
-            cwd_flag,
-            "-e".to_owned(),
-            shell,
-            "-lc".to_owned(),
-            script.to_owned(),
-        ];
-        run_detached("ghostty", &args, cwd)
-            .map_err(|error| format!("unable to launch Ghostty: {error}"))?;
-
-        Ok(external_launch_result(
-            "Ghostty",
-            format!("ghostty {}", render_args(&args)),
-        ))
-    }
-}
-
-fn run_detached(program: &str, args: &[String], cwd: &Path) -> Result<(), String> {
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    command.spawn().map(|_| ()).map_err(|error| {
-        format!(
-            "failed to spawn `{program}` with args [{}]: {error}",
-            render_args(args),
-        )
-    })
-}
-
-fn render_args(args: &[String]) -> String {
-    args.iter()
-        .map(|arg| shell_escape(arg))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_escape(arg: &str) -> String {
-    if arg.is_empty() {
-        return "''".to_owned();
-    }
-
-    let needs_quotes = arg
-        .chars()
-        .any(|ch| ch.is_whitespace() || ch == '\'' || ch == '"');
-    if !needs_quotes {
-        return arg.to_owned();
-    }
-
-    let escaped = arg.replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-fn external_launch_result(backend_label: &str, command: String) -> TerminalRunResult {
-    TerminalRunResult {
-        command,
-        output: format!(
-            "{backend_label} opened in an external window.\nUse that window for interactive work.",
-        ),
-        success: true,
-        code: Some(0),
-    }
 }
 
 #[cfg(test)]

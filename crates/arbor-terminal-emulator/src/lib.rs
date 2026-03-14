@@ -31,6 +31,17 @@ pub struct TerminalSnapshot {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalProcessReport {
+    pub bell_count: usize,
+}
+
+impl TerminalProcessReport {
+    pub const fn bell_rang(self) -> bool {
+        self.bell_count > 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalCursor {
     pub line: usize,
@@ -68,9 +79,10 @@ pub use alacritty_support::process_terminal_bytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalEngineKind {
-    #[default]
+    #[cfg_attr(not(feature = "ghostty-vt-experimental"), default)]
     Alacritty,
     #[cfg(feature = "ghostty-vt-experimental")]
+    #[cfg_attr(feature = "ghostty-vt-experimental", default)]
     GhosttyVtExperimental,
 }
 
@@ -84,14 +96,26 @@ impl TerminalEngineKind {
     }
 }
 
-static DEFAULT_TERMINAL_ENGINE: AtomicU8 = AtomicU8::new(TerminalEngineKind::Alacritty as u8);
+static DEFAULT_TERMINAL_ENGINE: AtomicU8 = AtomicU8::new(default_terminal_engine_discriminant());
+
+const fn default_terminal_engine_discriminant() -> u8 {
+    #[cfg(feature = "ghostty-vt-experimental")]
+    {
+        1
+    }
+
+    #[cfg(not(feature = "ghostty-vt-experimental"))]
+    {
+        0
+    }
+}
 
 pub fn default_terminal_engine() -> TerminalEngineKind {
     match DEFAULT_TERMINAL_ENGINE.load(Ordering::Relaxed) {
         0 => TerminalEngineKind::Alacritty,
         #[cfg(feature = "ghostty-vt-experimental")]
         1 => TerminalEngineKind::GhosttyVtExperimental,
-        _ => TerminalEngineKind::Alacritty,
+        _ => TerminalEngineKind::default(),
     }
 }
 
@@ -184,10 +208,14 @@ impl TerminalEmulator {
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
+        let _ = self.process_and_report(bytes);
+    }
+
+    pub fn process_and_report(&mut self, bytes: &[u8]) -> TerminalProcessReport {
         match &mut self.inner {
-            TerminalEmulatorInner::Alacritty(emulator) => emulator.process(bytes),
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.process_and_report(bytes),
             #[cfg(feature = "ghostty-vt-experimental")]
-            TerminalEmulatorInner::Ghostty(emulator) => emulator.process(bytes),
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.process_and_report(bytes),
         }
     }
 
@@ -259,15 +287,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_terminal_engine_defaults_to_alacritty() {
-        assert_eq!(
-            parse_terminal_engine_kind(None),
-            Ok(TerminalEngineKind::Alacritty),
-        );
-        assert_eq!(
-            parse_terminal_engine_kind(Some("")),
-            Ok(TerminalEngineKind::Alacritty),
-        );
+    fn parse_terminal_engine_defaults_to_expected_engine() {
+        #[cfg(feature = "ghostty-vt-experimental")]
+        let expected = TerminalEngineKind::GhosttyVtExperimental;
+        #[cfg(not(feature = "ghostty-vt-experimental"))]
+        let expected = TerminalEngineKind::Alacritty;
+
+        assert_eq!(parse_terminal_engine_kind(None), Ok(expected),);
+        assert_eq!(parse_terminal_engine_kind(Some("")), Ok(expected),);
     }
 
     #[test]

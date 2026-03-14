@@ -3,10 +3,11 @@ use {
         github_service::GitHubPrService,
         process_manager::ProcessEvent,
         repository_store, task_scheduler,
-        terminal_daemon::{LocalTerminalDaemonError, SessionEvent},
+        terminal_daemon::{LocalTerminalDaemonError, SessionEvent, TerminalActivityEvent},
         types::*,
     },
     arbor_core::{
+        SessionId,
         agent::AgentState,
         changes,
         daemon::{
@@ -910,33 +911,71 @@ pub(crate) async fn agent_notify(
         },
     };
 
+    upsert_agent_session(
+        &state,
+        request.session_id.clone(),
+        request.cwd.clone(),
+        agent_state,
+        AgentSessionUpdateSource::Hook,
+    )
+    .await;
+
+    StatusCode::OK
+}
+
+pub(crate) async fn apply_terminal_activity_event(state: &AppState, event: TerminalActivityEvent) {
+    match event {
+        TerminalActivityEvent::Update {
+            session_id,
+            cwd,
+            state: agent_state,
+        } => {
+            upsert_agent_session(
+                state,
+                terminal_agent_session_key(&session_id),
+                cwd.display().to_string(),
+                agent_state,
+                AgentSessionUpdateSource::TerminalActivity,
+            )
+            .await;
+        },
+        TerminalActivityEvent::Clear { session_id } => {
+            remove_agent_session(state, &terminal_agent_session_key(&session_id)).await;
+        },
+    }
+}
+
+async fn upsert_agent_session(
+    state: &AppState,
+    session_id: String,
+    cwd: String,
+    agent_state: AgentState,
+    source: AgentSessionUpdateSource,
+) {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let session_id = request.session_id.clone();
-    let cwd_path = PathBuf::from(&request.cwd);
+    let cwd_path = PathBuf::from(&cwd);
 
     let (dto, previous_state) = {
         let mut sessions = state.agent_sessions.lock().await;
 
-        // Expire stale sessions
         let cutoff = now_ms.saturating_sub(AGENT_SESSION_EXPIRY_SECS * 1000);
         sessions.retain(|_, session| session.updated_at_unix_ms > cutoff);
 
-        let previous_state = sessions
-            .get(&request.session_id)
-            .map(|session| session.state);
+        let previous_state = sessions.get(&session_id).map(|session| session.state);
 
-        sessions.insert(request.session_id, AgentSession {
-            cwd: request.cwd.clone(),
+        sessions.insert(session_id.clone(), AgentSession {
+            cwd: cwd.clone(),
             state: agent_state,
             updated_at_unix_ms: now_ms,
         });
 
         (
             AgentSessionDto {
-                cwd: request.cwd,
+                session_id: session_id.clone(),
+                cwd: cwd.clone(),
                 state: agent_state_label(agent_state).to_owned(),
                 updated_at_unix_ms: now_ms,
             },
@@ -945,12 +984,13 @@ pub(crate) async fn agent_notify(
     };
 
     tracing::info!(
+        session_id = dto.session_id.as_str(),
         cwd = dto.cwd.as_str(),
         state = dto.state.as_str(),
         "agent session updated, broadcasting"
     );
     if let Some(event_name) =
-        notification_event_name_for_agent_transition(previous_state, agent_state)
+        notification_event_name_for_agent_transition(source, previous_state, agent_state)
         && let Ok(repo_root) = worktree::repo_root(&cwd_path)
     {
         let branch = git_branch_name_for_worktree(&cwd_path).ok();
@@ -973,8 +1013,31 @@ pub(crate) async fn agent_notify(
     let _ = state
         .agent_broadcast
         .send(AgentWsEvent::Update { session: dto });
+}
 
-    StatusCode::OK
+async fn remove_agent_session(state: &AppState, session_id: &str) {
+    let removed = {
+        let mut sessions = state.agent_sessions.lock().await;
+        sessions.remove(session_id).is_some()
+    };
+    if !removed {
+        return;
+    }
+
+    tracing::info!(session_id, "agent session cleared, broadcasting clear");
+    let _ = state.agent_broadcast.send(AgentWsEvent::Clear {
+        session_id: session_id.to_owned(),
+    });
+}
+
+fn terminal_agent_session_key(session_id: &SessionId) -> String {
+    format!("terminal:{session_id}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSessionUpdateSource {
+    Hook,
+    TerminalActivity,
 }
 
 pub(crate) async fn list_agent_activity(
@@ -1273,9 +1336,14 @@ fn notification_payload_field<'a>(payload: &'a serde_json::Value, key: &str) -> 
 }
 
 fn notification_event_name_for_agent_transition(
+    source: AgentSessionUpdateSource,
     previous_state: Option<AgentState>,
     current_state: AgentState,
 ) -> Option<&'static str> {
+    if source == AgentSessionUpdateSource::TerminalActivity {
+        return None;
+    }
+
     match (previous_state, current_state) {
         (Some(AgentState::Working), AgentState::Working)
         | (Some(AgentState::Waiting), AgentState::Waiting) => None,
@@ -1296,8 +1364,9 @@ fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<A
     sessions.retain(|_, session| session.updated_at_unix_ms > cutoff);
 
     let mut snapshot: Vec<AgentSessionDto> = sessions
-        .values()
-        .map(|session| AgentSessionDto {
+        .iter()
+        .map(|(session_id, session)| AgentSessionDto {
+            session_id: session_id.clone(),
             cwd: session.cwd.clone(),
             state: match session.state {
                 AgentState::Working => "working".to_owned(),
@@ -1306,7 +1375,11 @@ fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<A
             updated_at_unix_ms: session.updated_at_unix_ms,
         })
         .collect();
-    snapshot.sort_by(|left, right| left.cwd.cmp(&right.cwd));
+    snapshot.sort_by(|left, right| {
+        left.cwd
+            .cmp(&right.cwd)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
     snapshot
 }
 
@@ -2232,11 +2305,16 @@ mod tests {
     #[test]
     fn notification_event_name_tracks_agent_state_transitions() {
         assert_eq!(
-            notification_event_name_for_agent_transition(None, AgentState::Working),
+            notification_event_name_for_agent_transition(
+                AgentSessionUpdateSource::Hook,
+                None,
+                AgentState::Working,
+            ),
             Some("agent_started")
         );
         assert_eq!(
             notification_event_name_for_agent_transition(
+                AgentSessionUpdateSource::Hook,
                 Some(AgentState::Working),
                 AgentState::Waiting,
             ),
@@ -2244,10 +2322,47 @@ mod tests {
         );
         assert_eq!(
             notification_event_name_for_agent_transition(
+                AgentSessionUpdateSource::Hook,
                 Some(AgentState::Waiting),
                 AgentState::Waiting,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn terminal_activity_transitions_do_not_emit_notification_events() {
+        assert_eq!(
+            notification_event_name_for_agent_transition(
+                AgentSessionUpdateSource::TerminalActivity,
+                None,
+                AgentState::Waiting,
+            ),
+            None
+        );
+        assert_eq!(
+            notification_event_name_for_agent_transition(
+                AgentSessionUpdateSource::TerminalActivity,
+                Some(AgentState::Working),
+                AgentState::Waiting,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn agent_ws_clear_event_serializes_session_id() {
+        let json = serde_json::to_value(AgentWsEvent::Clear {
+            session_id: "terminal:daemon-1".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("clear event should serialize: {error}"));
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "clear",
+                "session_id": "terminal:daemon-1",
+            })
         );
     }
 

@@ -61,6 +61,13 @@ struct AgentTurnSnapshot {
     diff_summary: Option<changes::DiffLineSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentActivitySessionRecord {
+    cwd: String,
+    state: AgentState,
+    updated_at_unix_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 struct RepositorySummary {
     group_key: String,
@@ -1205,7 +1212,6 @@ enum WorktreeQuickAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuickActionSubmenu {
     Ide,
-    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1715,6 +1721,7 @@ struct ArborWindow {
     worktrees: Vec<WorktreeSummary>,
     worktree_stats_loading: bool,
     worktree_prs_loading: bool,
+    github_rate_limited_until: Option<SystemTime>,
     expanded_pr_checks_worktree: Option<PathBuf>,
     active_worktree_index: Option<usize>,
     worktree_selection_epoch: usize,
@@ -1766,6 +1773,7 @@ struct ArborWindow {
     show_about: bool,
     show_theme_picker: bool,
     theme_picker_selected_index: usize,
+    theme_picker_scroll_handle: ScrollHandle,
     settings_modal: Option<SettingsModal>,
     daemon_auth_modal: Option<DaemonAuthModal>,
     /// When set, a successful auth submission should retry fetching for this remote daemon index.
@@ -1794,7 +1802,6 @@ struct ArborWindow {
     top_bar_quick_actions_open: bool,
     top_bar_quick_actions_submenu: Option<QuickActionSubmenu>,
     ide_launchers: Vec<ExternalLauncher>,
-    terminal_launchers: Vec<ExternalLauncher>,
     last_persisted_ui_state: ui_state_store::UiState,
     pending_ui_state_save: Option<ui_state_store::UiState>,
     ui_state_save_in_flight: Option<ui_state_store::UiState>,
@@ -1802,6 +1809,7 @@ struct ArborWindow {
     last_ui_state_error: Option<String>,
     notification_service: Box<dyn notifications::NotificationService>,
     notifications_enabled: bool,
+    agent_activity_sessions: HashMap<String, AgentActivitySessionRecord>,
     last_agent_finished_notifications: HashMap<PathBuf, u64>,
     auto_checkpoint_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
     agent_activity_epochs: Arc<Mutex<HashMap<PathBuf, u64>>>,

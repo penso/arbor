@@ -3,7 +3,8 @@
 use {
     crate::{
         TERMINAL_COLS, TERMINAL_ROWS, TERMINAL_SCROLLBACK, TerminalCursor, TerminalModes,
-        TerminalSnapshot, TerminalStyledCell, TerminalStyledLine, alacritty_support,
+        TerminalProcessReport, TerminalSnapshot, TerminalStyledCell, TerminalStyledLine,
+        alacritty_support,
     },
     std::{cell::RefCell, ffi::c_void, ptr},
 };
@@ -56,7 +57,12 @@ struct CachedStyledSnapshot {
 unsafe extern "C" {
     fn arbor_ghostty_vt_new(rows: u16, cols: u16, scrollback: usize, out: *mut *mut c_void) -> i32;
     fn arbor_ghostty_vt_free(handle: *mut c_void);
-    fn arbor_ghostty_vt_process(handle: *mut c_void, bytes: *const u8, len: usize) -> i32;
+    fn arbor_ghostty_vt_process(
+        handle: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        bell_count: *mut usize,
+    ) -> i32;
     fn arbor_ghostty_vt_resize(handle: *mut c_void, rows: u16, cols: u16) -> i32;
     fn arbor_ghostty_vt_snapshot_plain(handle: *mut c_void, out: *mut GhosttyBuffer) -> i32;
     fn arbor_ghostty_vt_snapshot_styled(
@@ -110,13 +116,17 @@ impl TerminalEmulator {
         }
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
+    pub fn process_and_report(&mut self, bytes: &[u8]) -> TerminalProcessReport {
         if bytes.is_empty() {
-            return;
+            return TerminalProcessReport::default();
         }
-        let _ = unsafe { arbor_ghostty_vt_process(self.handle, bytes.as_ptr(), bytes.len()) };
+        let mut bell_count = 0;
+        let _ = unsafe {
+            arbor_ghostty_vt_process(self.handle, bytes.as_ptr(), bytes.len(), &mut bell_count)
+        };
         self.generation = self.generation.saturating_add(1);
         self.styled_snapshot_cache.get_mut().take();
+        TerminalProcessReport { bell_count }
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -349,7 +359,7 @@ mod tests {
 
         for line_index in 0..120 {
             let line = format!("line-{line_index:03}\r\n");
-            emulator.process(line.as_bytes());
+            let _ = emulator.process_and_report(line.as_bytes());
         }
 
         let styled_lines = emulator.collect_styled_lines();
@@ -378,7 +388,7 @@ mod tests {
 
         for line_index in 0..220 {
             let line = format!("output-{line_index:03}\r\n");
-            emulator.process(line.as_bytes());
+            let _ = emulator.process_and_report(line.as_bytes());
         }
 
         let snapshot = emulator.snapshot_output();
@@ -402,7 +412,7 @@ mod tests {
     #[test]
     fn styled_lines_skip_space_after_zero_width_sequence() {
         let mut emulator = TerminalEmulator::new();
-        emulator.process("A\u{2600}\u{fe0f}B\r\n".as_bytes());
+        let _ = emulator.process_and_report("A\u{2600}\u{fe0f}B\r\n".as_bytes());
 
         let styled_lines = emulator.collect_styled_lines();
         let rendered = styled_line_to_string(styled_lines.first());
@@ -415,10 +425,10 @@ mod tests {
         let mut emulator = TerminalEmulator::new();
         assert!(emulator.snapshot_cursor().is_some());
 
-        emulator.process("\u{1b}[?25l".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?25l".as_bytes());
         assert!(emulator.snapshot_cursor().is_none());
 
-        emulator.process("\u{1b}[?25h".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?25h".as_bytes());
         assert!(emulator.snapshot_cursor().is_some());
     }
 
@@ -428,10 +438,10 @@ mod tests {
 
         for line_index in 0..120 {
             let line = format!("line-{line_index:03}\r\n");
-            emulator.process(line.as_bytes());
+            let _ = emulator.process_and_report(line.as_bytes());
         }
 
-        emulator.process("prompt> ".as_bytes());
+        let _ = emulator.process_and_report("prompt> ".as_bytes());
 
         let Some(cursor) = emulator.snapshot_cursor() else {
             panic!("cursor should remain visible");
@@ -451,19 +461,19 @@ mod tests {
         let mut emulator = TerminalEmulator::new();
         assert_eq!(emulator.snapshot_modes(), TerminalModes::default());
 
-        emulator.process("\u{1b}[?1h".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?1h".as_bytes());
         assert_eq!(emulator.snapshot_modes(), TerminalModes {
             app_cursor: true,
             alt_screen: false,
         });
 
-        emulator.process("\u{1b}[?1049h".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?1049h".as_bytes());
         assert_eq!(emulator.snapshot_modes(), TerminalModes {
             app_cursor: true,
             alt_screen: true,
         });
 
-        emulator.process("\u{1b}[?1l\u{1b}[?1049l".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?1l\u{1b}[?1049l".as_bytes());
         assert_eq!(emulator.snapshot_modes(), TerminalModes::default());
     }
 
@@ -472,12 +482,27 @@ mod tests {
         let mut emulator = TerminalEmulator::new();
         let seq =
             "\x1b]1337;RemoteHost=penso@m4max\x07\x1b]1337;CurrentDir=/home\x07\x1b]133;C\x07";
-        emulator.process(seq.as_bytes());
+        let _ = emulator.process_and_report(seq.as_bytes());
         let rendered = styled_lines_to_string(&emulator.collect_styled_lines());
         assert!(
             !rendered.contains("1337"),
             "BEL-terminated OSC leaked: {rendered:?}",
         );
+    }
+
+    #[test]
+    fn process_report_counts_real_bell_only() {
+        let mut emulator = TerminalEmulator::new();
+
+        let report = emulator.process_and_report("hello\x07".as_bytes());
+        assert_eq!(report.bell_count, 1);
+        assert!(report.bell_rang());
+
+        let report = emulator.process_and_report(
+            "\x1b]1337;RemoteHost=penso@m4max\x07\x1b]1337;CurrentDir=/home\x07".as_bytes(),
+        );
+        assert_eq!(report.bell_count, 0);
+        assert!(!report.bell_rang());
     }
 
     fn styled_line_to_string(line: Option<&TerminalStyledLine>) -> String {

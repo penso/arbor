@@ -155,27 +155,3 @@ fn detect_ide_launchers() -> Vec<ExternalLauncher> {
     })
     .collect()
 }
-
-fn detect_terminal_launchers() -> Vec<ExternalLauncher> {
-    [
-        ("Terminal", "Tm", 0x7ecf95, Some("Terminal"), None),
-        ("iTerm", "iT", 0x8ad1ec, Some("iTerm"), Some("iterm2")),
-        ("iTerm2", "i2", 0x8ad1ec, Some("iTerm2"), Some("iterm2")),
-        ("Ghostty", "Gh", 0xbf8cf8, Some("Ghostty"), Some("ghostty")),
-        (
-            "Alacritty",
-            "Al",
-            0xf0a168,
-            Some("Alacritty"),
-            Some("alacritty"),
-        ),
-        ("Warp", "Wp", 0x6f8dff, Some("Warp"), Some("warp")),
-        ("WezTerm", "Wz", 0x6dc5ff, Some("WezTerm"), Some("wezterm")),
-        ("Kitty", "Kt", 0xc89fff, Some("kitty"), Some("kitty")),
-    ]
-    .into_iter()
-    .filter_map(|(label, icon, icon_color, mac_app, command)| {
-        detect_external_launcher(label, icon, icon_color, mac_app, command)
-    })
-    .collect()
-}

@@ -13,10 +13,9 @@ use {
 
 const CONFIG_RELATIVE_PATH: &str = ".config/arbor/config.toml";
 const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
-# terminal_backend = "embedded" # embedded (in-app) | alacritty (external) | ghostty (external)
-# embedded_terminal_engine = "alacritty" # alacritty | ghostty-vt-experimental
+# embedded_terminal_engine = "ghostty-vt-experimental" # default when built with ghostty support, or set to "alacritty"
 # embedded_shell = "/usr/bin/fish"  # shell for embedded terminal (defaults to $SHELL, then /bin/zsh)
-# theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark | dracula | solarized-light | everforest-dark | catppuccin | catppuccin-latte | ethereal | flexoki-light | hackerman | kanagawa | matte-black | miasma | nord | osaka-jade | ristretto | rose-pine | tokyo-night | vantablack | white | retrobox-classic | tokyonight-day | tokyonight-classic | zellner
+# theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark | dracula | solarized-light | everforest-dark | catppuccin | catppuccin-latte | ethereal | flexoki-light | hackerman | kanagawa | matte-black | miasma | nord | osaka-jade | ristretto | rose-pine | tokyo-night | vantablack | white | atom-one-light | github-light-default | github-light-high-contrast | github-light-colorblind | github-light | github-dark-default | github-dark-high-contrast | github-dark-colorblind | github-dark-dimmed | github-dark | retrobox-classic | tokyonight-day | tokyonight-classic | zellner
 # daemon_url = "http://127.0.0.1:8787" # arbor-httpd base URL
 # notifications = true
 #

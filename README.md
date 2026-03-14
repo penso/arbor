@@ -36,8 +36,8 @@ It gives you one place to manage repositories, parallel worktrees, embedded term
 ### Embedded Terminal
 - Built-in PTY terminal with truecolor and `xterm-256color` support
 - Multiple terminal tabs per worktree
-- Alternative backends: Alacritty, Ghostty
-- Experimental embedded `libghostty-vt` engine behind a compile-time feature flag
+- Embedded-only terminal model, no external terminal backends
+- Experimental embedded `libghostty-vt` engine behind a compile-time feature flag, used by default when available
 - Persistent daemon-based sessions (survive app restarts)
 - Session attach/detach and signals (interrupt/terminate/kill)
 
@@ -214,11 +214,11 @@ This is opt-in, disabled by default, and currently expects:
 - optionally, `ARBOR_GHOSTTY_SRC=/path/to/ghostty` to override the pinned submodule
 - optionally, `ARBOR_GHOSTTY_TARGET` / `ARBOR_GHOSTTY_CPU` to force a safer Zig target in CI
 
-With a build that includes `--features ghostty-vt-experimental`, you can pick
-the embedded engine in `~/.config/arbor/config.toml`:
+With a build that includes `--features ghostty-vt-experimental`, Arbor defaults
+to the embedded Ghostty engine. You can still choose the embedded engine in
+`~/.config/arbor/config.toml`:
 
 ```toml
-terminal_backend = "embedded"
 embedded_terminal_engine = "ghostty-vt-experimental"
 ```
 

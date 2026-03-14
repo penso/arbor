@@ -1,6 +1,6 @@
 use {
     crate::{
-        TerminalModes, TerminalSnapshot,
+        TerminalModes, TerminalProcessReport, TerminalSnapshot,
         alacritty_support::{
             self, collect_styled_lines, new_state, snapshot_cursor, snapshot_modes, snapshot_output,
         },
@@ -36,10 +36,16 @@ impl TerminalEmulator {
         }
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
+    pub fn process_and_report(&mut self, bytes: &[u8]) -> TerminalProcessReport {
+        if bytes.is_empty() {
+            return TerminalProcessReport::default();
+        }
+
         self.state.processor.advance(&mut self.state.term, bytes);
+        let report = self.state.event_listener.take_process_report();
         self.generation = self.generation.saturating_add(1);
         self.snapshot_cache.get_mut().take();
+        report
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -129,7 +135,7 @@ mod tests {
 
         for line_index in 0..120 {
             let line = format!("line-{line_index:03}\r\n");
-            emulator.process(line.as_bytes());
+            let _ = emulator.process_and_report(line.as_bytes());
         }
 
         let styled_lines = emulator.collect_styled_lines();
@@ -158,7 +164,7 @@ mod tests {
 
         for line_index in 0..220 {
             let line = format!("output-{line_index:03}\r\n");
-            emulator.process(line.as_bytes());
+            let _ = emulator.process_and_report(line.as_bytes());
         }
 
         let snapshot = emulator.snapshot_output();
@@ -182,7 +188,7 @@ mod tests {
     #[test]
     fn styled_lines_skip_space_after_zero_width_sequence() {
         let mut emulator = TerminalEmulator::new();
-        emulator.process("A\u{2600}\u{fe0f}B\r\n".as_bytes());
+        let _ = emulator.process_and_report("A\u{2600}\u{fe0f}B\r\n".as_bytes());
 
         let styled_lines = emulator.collect_styled_lines();
         let rendered = styled_line_to_string(styled_lines.first());
@@ -195,10 +201,10 @@ mod tests {
         let mut emulator = TerminalEmulator::new();
         assert!(emulator.snapshot_cursor().is_some());
 
-        emulator.process("\u{1b}[?25l".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?25l".as_bytes());
         assert!(emulator.snapshot_cursor().is_none());
 
-        emulator.process("\u{1b}[?25h".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?25h".as_bytes());
         assert!(emulator.snapshot_cursor().is_some());
     }
 
@@ -207,19 +213,19 @@ mod tests {
         let mut emulator = TerminalEmulator::new();
         assert_eq!(emulator.snapshot_modes(), TerminalModes::default());
 
-        emulator.process("\u{1b}[?1h".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?1h".as_bytes());
         assert_eq!(emulator.snapshot_modes(), TerminalModes {
             app_cursor: true,
             alt_screen: false,
         });
 
-        emulator.process("\u{1b}[?1049h".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?1049h".as_bytes());
         assert_eq!(emulator.snapshot_modes(), TerminalModes {
             app_cursor: true,
             alt_screen: true,
         });
 
-        emulator.process("\u{1b}[?1l\u{1b}[?1049l".as_bytes());
+        let _ = emulator.process_and_report("\u{1b}[?1l\u{1b}[?1049l".as_bytes());
         assert_eq!(emulator.snapshot_modes(), TerminalModes::default());
     }
 
@@ -228,12 +234,27 @@ mod tests {
         let mut emulator = TerminalEmulator::new();
         let seq =
             "\x1b]1337;RemoteHost=penso@m4max\x07\x1b]1337;CurrentDir=/home\x07\x1b]133;C\x07";
-        emulator.process(seq.as_bytes());
+        let _ = emulator.process_and_report(seq.as_bytes());
         let rendered = styled_lines_to_string(&emulator.collect_styled_lines());
         assert!(
             !rendered.contains("1337"),
             "BEL-terminated OSC leaked: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn process_report_counts_real_bell_only() {
+        let mut emulator = TerminalEmulator::new();
+
+        let report = emulator.process_and_report("hello\x07".as_bytes());
+        assert_eq!(report.bell_count, 1);
+        assert!(report.bell_rang());
+
+        let report = emulator.process_and_report(
+            "\x1b]1337;RemoteHost=penso@m4max\x07\x1b]1337;CurrentDir=/home\x07".as_bytes(),
+        );
+        assert_eq!(report.bell_count, 0);
+        assert!(!report.bell_rang());
     }
 
     fn styled_line_to_string(line: Option<&crate::TerminalStyledLine>) -> String {

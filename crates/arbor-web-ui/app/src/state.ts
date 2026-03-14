@@ -78,7 +78,10 @@ export async function refresh(): Promise<void> {
 
     // Auto-select first repo on initial load
     if (selectedRepoRoot === null && repositories.length > 0) {
-      selectedRepoRoot = repositories[0].root;
+      const firstRepository = repositories[0];
+      if (firstRepository !== undefined) {
+        selectedRepoRoot = firstRepository.root;
+      }
     }
 
     let selectedWorktreePath =
@@ -207,11 +210,14 @@ const AGENT_RECONNECT_MAX_MS = 30000;
 function parseAgentSession(item: unknown): AgentSession | null {
   if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
   const rec = item as Record<string, unknown>;
+  const sessionId = typeof rec["session_id"] === "string" ? rec["session_id"] : null;
   const cwd = typeof rec["cwd"] === "string" ? rec["cwd"] : null;
   const s = typeof rec["state"] === "string" ? rec["state"] : null;
   const ts = typeof rec["updated_at_unix_ms"] === "number" ? rec["updated_at_unix_ms"] : null;
-  if (cwd === null || (s !== "working" && s !== "waiting") || ts === null) return null;
-  return { cwd, state: s, updated_at_unix_ms: ts };
+  if (sessionId === null || cwd === null || (s !== "working" && s !== "waiting") || ts === null) {
+    return null;
+  }
+  return { session_id: sessionId, cwd, state: s, updated_at_unix_ms: ts };
 }
 
 function parseAgentWsEvent(data: string): AgentActivityWsEvent | null {
@@ -233,16 +239,26 @@ function parseAgentWsEvent(data: string): AgentActivityWsEvent | null {
     const session = parseAgentSession(rec["session"]);
     if (session !== null) return { type: "update", session };
   }
+  if (eventType === "clear" && typeof rec["session_id"] === "string") {
+    return { type: "clear", session_id: rec["session_id"] };
+  }
   return null;
 }
 
 function applyAgentEvent(event: AgentActivityWsEvent): void {
   if (event.type === "snapshot") {
     updateState({ agentSessions: event.sessions });
-  } else {
-    // Upsert by cwd
-    const existing = state.agentSessions.filter((s) => s.cwd !== event.session.cwd);
+  } else if (event.type === "update") {
+    const existing = state.agentSessions.filter(
+      (s) => s.session_id !== event.session.session_id,
+    );
     updateState({ agentSessions: [...existing, event.session] });
+  } else {
+    updateState({
+      agentSessions: state.agentSessions.filter(
+        (s) => s.session_id !== event.session_id,
+      ),
+    });
   }
 }
 
@@ -283,13 +299,18 @@ export function startAgentActivityWs(): void {
  */
 export function agentStateForWorktree(worktreePath: string): "working" | "waiting" | null {
   let bestState: "working" | "waiting" | null = null;
-  let bestLen = 0;
 
   for (const session of state.agentSessions) {
-    if (session.cwd.startsWith(worktreePath) && worktreePath.length > bestLen) {
-      bestState = session.state;
-      bestLen = worktreePath.length;
-    }
+    if (!session.cwd.startsWith(worktreePath)) continue;
+    bestState = mergeAgentState(bestState, session.state);
   }
   return bestState;
+}
+
+function mergeAgentState(
+  current: "working" | "waiting" | null,
+  next: "working" | "waiting",
+): "working" | "waiting" {
+  if (current === "working" || next === "working") return "working";
+  return "waiting";
 }

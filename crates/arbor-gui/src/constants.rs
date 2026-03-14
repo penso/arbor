@@ -12,6 +12,13 @@ pub(crate) const APP_VERSION: &str = match option_env!("ARBOR_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };
+pub(crate) const APP_NAME: &str = "Arbor";
+// Provided by the build environment. The repo's `just` GUI/build recipes set
+// this automatically so the title can include the branch without a build script.
+pub(crate) const APP_BUILD_BRANCH: Option<&str> = match option_env!("ARBOR_BUILD_BRANCH") {
+    Some(branch) if !branch.is_empty() => Some(branch),
+    _ => None,
+};
 
 pub(crate) const FONT_UI: &str = ".ZedSans";
 pub(crate) const FONT_MONO: &str = "CaskaydiaMono Nerd Font Mono";
@@ -119,6 +126,24 @@ pub(crate) const BUNDLED_FONT_FILES: &[&str] = &[
     "Lilex-Bold.ttf",
 ];
 
+pub(crate) fn app_window_title(connected_daemon_label: Option<&str>) -> String {
+    format_app_window_title(APP_BUILD_BRANCH, connected_daemon_label)
+}
+
+fn format_app_window_title(branch: Option<&str>, connected_daemon_label: Option<&str>) -> String {
+    let mut title = match branch.filter(|value| !value.trim().is_empty()) {
+        Some(branch) => format!("{APP_NAME} [{branch}]"),
+        None => APP_NAME.to_owned(),
+    };
+
+    if let Some(label) = connected_daemon_label.filter(|value| !value.trim().is_empty()) {
+        title.push_str(" — ");
+        title.push_str(label);
+    }
+
+    title
+}
+
 /// Load bundled fonts from disk and register them with the text system.
 ///
 /// In a macOS `.app` bundle the fonts live under `Contents/Resources/fonts/`.
@@ -211,4 +236,31 @@ pub(crate) fn terminal_mono_font(cx: &App) -> gpui::Font {
     fallback.features = FontFeatures::disable_ligatures();
     fallback.fallbacks = Some(fallbacks);
     fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_app_window_title;
+
+    #[test]
+    fn app_window_title_omits_empty_parts() {
+        assert_eq!(format_app_window_title(None, None), "Arbor");
+        assert_eq!(format_app_window_title(Some(""), Some("")), "Arbor");
+    }
+
+    #[test]
+    fn app_window_title_includes_compile_time_branch() {
+        assert_eq!(
+            format_app_window_title(Some("feature/demo"), None),
+            "Arbor [feature/demo]"
+        );
+    }
+
+    #[test]
+    fn app_window_title_keeps_daemon_label() {
+        assert_eq!(
+            format_app_window_title(Some("feature/demo"), Some("local daemon")),
+            "Arbor [feature/demo] — local daemon"
+        );
+    }
 }

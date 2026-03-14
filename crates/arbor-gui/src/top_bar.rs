@@ -352,10 +352,8 @@ impl ArborWindow {
         }
 
         let ide_has_launchers = !self.ide_launchers.is_empty();
-        let terminal_has_launchers = !self.terminal_launchers.is_empty();
         let submenu = self.top_bar_quick_actions_submenu;
         let ide_row_active = submenu == Some(QuickActionSubmenu::Ide);
-        let terminal_row_active = submenu == Some(QuickActionSubmenu::Terminal);
 
         let mut overlay = div()
             .absolute()
@@ -454,54 +452,6 @@ impl ArborWindow {
                                     .child("\u{f054}"),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("quick-action-open-terminal-submenu")
-                            .h(px(24.))
-                            .mx(px(4.))
-                            .px(px(8.))
-                            .rounded_sm()
-                            .text_color(rgb(if terminal_has_launchers {
-                                theme.text_primary
-                            } else {
-                                theme.text_disabled
-                            }))
-                            .when(terminal_has_launchers, |this| {
-                                this.cursor_pointer()
-                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_top_bar_worktree_quick_actions_submenu(
-                                            QuickActionSubmenu::Terminal,
-                                            cx,
-                                        );
-                                    }))
-                            })
-                            .when(terminal_row_active, |this| {
-                                this.bg(rgb(theme.panel_active_bg))
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(terminal_quick_action_icon_element(0x68c38d, 12.0))
-                                    .child(div().text_size(px(11.)).child("Terminal")),
-                            )
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(px(10.))
-                                    .text_color(rgb(if terminal_has_launchers {
-                                        theme.text_muted
-                                    } else {
-                                        theme.text_disabled
-                                    }))
-                                    .child("\u{f054}"),
-                            ),
-                    )
                     .child(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(rgb(theme.border)))
                     .child(
                         div()
@@ -537,14 +487,12 @@ impl ArborWindow {
         if let Some(submenu) = submenu {
             let launchers: &[ExternalLauncher] = match submenu {
                 QuickActionSubmenu::Ide => &self.ide_launchers,
-                QuickActionSubmenu::Terminal => &self.terminal_launchers,
             };
             if launchers.is_empty() {
                 return overlay;
             }
             let submenu_top = match submenu {
                 QuickActionSubmenu::Ide => px(28.),
-                QuickActionSubmenu::Terminal => px(52.),
             };
 
             overlay = overlay.child(
@@ -579,7 +527,7 @@ impl ArborWindow {
                             .items_center()
                             .gap(px(8.))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_worktree_external_launcher(submenu, index, cx);
+                                this.run_worktree_external_launcher(index, cx);
                             }))
                             .child(
                                 div()
@@ -713,8 +661,4 @@ fn top_bar_icon_element(
                 .child(fallback_glyph)
                 .into_any_element(),
         })
-}
-
-fn terminal_quick_action_icon_element(fallback_color: u32, size_px: f32) -> Div {
-    themed_ui_svg_icon("icons/ui/terminal-accent.svg", fallback_color, size_px, "\u{f120}")
 }

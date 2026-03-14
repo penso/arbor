@@ -6,6 +6,7 @@ mod connection_history;
 mod constants;
 mod github_auth_store;
 mod github_service;
+mod graphql;
 mod log_layer;
 mod mdns_browser;
 mod notifications;
@@ -53,10 +54,7 @@ use {
         net::TcpListener,
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
-        sync::{
-            Arc, Mutex, OnceLock,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::{Arc, Mutex, OnceLock, atomic::Ordering},
         time::{Duration, Instant, SystemTime},
     },
     syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet},
@@ -229,6 +227,7 @@ impl ArborWindow {
                     worktrees: Vec::new(),
                     worktree_stats_loading: false,
                     worktree_prs_loading: false,
+                    github_rate_limited_until: None,
                     expanded_pr_checks_worktree: None,
                     active_worktree_index: None,
                     worktree_selection_epoch: 0,
@@ -286,6 +285,7 @@ impl ArborWindow {
                     show_about: false,
                     show_theme_picker: false,
                     theme_picker_selected_index: theme_picker_index_for_kind(theme_kind),
+                    theme_picker_scroll_handle: ScrollHandle::new(),
                     settings_modal: None,
                     daemon_auth_modal: None,
                     pending_remote_daemon_auth: None,
@@ -315,7 +315,6 @@ impl ArborWindow {
                     top_bar_quick_actions_open: false,
                     top_bar_quick_actions_submenu: None,
                     ide_launchers: Vec::new(),
-                    terminal_launchers: Vec::new(),
                     last_persisted_ui_state: startup_ui_state,
                     pending_ui_state_save: None,
                     ui_state_save_in_flight: None,
@@ -323,6 +322,7 @@ impl ArborWindow {
                     last_ui_state_error: None,
                     notification_service,
                     notifications_enabled,
+                    agent_activity_sessions: HashMap::new(),
                     last_agent_finished_notifications: HashMap::new(),
                     auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
                     agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
@@ -606,6 +606,7 @@ impl ArborWindow {
             worktrees: Vec::new(),
             worktree_stats_loading: false,
             worktree_prs_loading: false,
+            github_rate_limited_until: None,
             expanded_pr_checks_worktree: None,
             active_worktree_index: None,
             worktree_selection_epoch: 0,
@@ -661,6 +662,7 @@ impl ArborWindow {
             show_about: false,
             show_theme_picker: false,
             theme_picker_selected_index: theme_picker_index_for_kind(theme_kind),
+            theme_picker_scroll_handle: ScrollHandle::new(),
             settings_modal: None,
             daemon_auth_modal: None,
             pending_remote_daemon_auth: None,
@@ -690,7 +692,6 @@ impl ArborWindow {
             top_bar_quick_actions_open: false,
             top_bar_quick_actions_submenu: None,
             ide_launchers: Vec::new(),
-            terminal_launchers: Vec::new(),
             left_pane_visible: startup_ui_state.left_pane_visible.unwrap_or(true),
             collapsed_repositories: HashSet::new(),
             repository_context_menu: None,
@@ -729,6 +730,7 @@ impl ArborWindow {
             last_ui_state_error: None,
             notification_service,
             notifications_enabled,
+            agent_activity_sessions: HashMap::new(),
             last_agent_finished_notifications: HashMap::new(),
             auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
             agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
@@ -781,6 +783,7 @@ impl ArborWindow {
         app.start_log_poller(cx);
         app.start_worktree_auto_refresh(cx);
         app.start_github_pr_auto_refresh(cx);
+        app.start_github_rate_limit_poller(cx);
         app.start_config_auto_refresh(cx);
         app.start_agent_activity_ws(cx);
         app.start_daemon_log_ws(cx);
@@ -900,6 +903,36 @@ impl ArborWindow {
                 .await;
 
                 let updated = this.update(cx, |this, cx| this.refresh_worktree_pull_requests(cx));
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn start_github_rate_limit_poller(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async move {
+                    std::thread::sleep(Duration::from_secs(1));
+                })
+                .await;
+
+                let updated = this.update(cx, |this, cx| {
+                    if this.github_rate_limited_until.is_none() {
+                        return;
+                    }
+
+                    if this.clear_expired_github_rate_limit() {
+                        cx.notify();
+                        return;
+                    }
+
+                    if this.github_rate_limit_remaining().is_some() {
+                        cx.notify();
+                    }
+                });
                 if updated.is_err() {
                     break;
                 }
@@ -2093,6 +2126,7 @@ impl ArborWindow {
 
                     let rows_changed = worktree_rows_changed(&this.worktrees, &next_worktrees);
                     this.worktrees = next_worktrees;
+                    reconcile_worktree_agent_activity(this, false, cx);
                     this.worktree_stats_loading = this
                         .worktrees
                         .iter()
@@ -2513,6 +2547,8 @@ impl ArborWindow {
             return;
         }
 
+        self.clear_expired_github_rate_limit();
+
         let repository_slug_by_group_key: HashMap<String, String> = self
             .repositories
             .iter()
@@ -2544,69 +2580,70 @@ impl ArborWindow {
             .collect();
         let github_token = self.github_access_token();
         let github_service = self.github_service.clone();
-
-        if tracked_branches.is_empty() {
-            let mut changed = false;
-            for worktree in &mut self.worktrees {
-                if worktree.pr_number.take().is_some()
-                    || worktree.pr_url.take().is_some()
-                    || worktree.pr_details.take().is_some()
-                {
-                    changed = true;
-                }
-            }
-            if changed {
-                cx.notify();
-            }
-            return;
-        }
-
-        self.worktree_prs_loading = true;
-        let mut cleared_untracked = false;
-        for worktree in &mut self.worktrees {
-            if tracked_paths.contains(&worktree.path) {
-                continue;
-            }
-            if worktree.pr_number.take().is_some()
-                || worktree.pr_url.take().is_some()
-                || worktree.pr_details.take().is_some()
-            {
-                cleared_untracked = true;
-            }
-        }
+        let cleared_untracked =
+            clear_pull_request_data_for_untracked_worktrees(&mut self.worktrees, &tracked_paths);
         if cleared_untracked {
             cx.notify();
         }
 
-        let pending_results = Arc::new(AtomicUsize::new(tracked_branches.len()));
-        for (path, branch, repo_slug) in tracked_branches {
-            let github_service = github_service.clone();
-            let github_token = github_token.clone();
-            let pending_results = pending_results.clone();
+        if tracked_branches.is_empty() {
+            return;
+        }
 
-            cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_spawn(async move {
-                        Self::lookup_worktree_pull_request(
+        if let Some(remaining) = self.github_rate_limit_remaining() {
+            tracing::info!(
+                remaining_seconds = remaining.as_secs(),
+                tracked_worktrees = tracked_branches.len(),
+                "skipping GitHub PR refresh because GitHub is rate limited"
+            );
+            return;
+        }
+
+        tracing::info!(
+            tracked_worktrees = tracked_branches.len(),
+            refresh_interval_seconds = GITHUB_PR_REFRESH_INTERVAL.as_secs(),
+            "refreshing GitHub PR details"
+        );
+
+        self.worktree_prs_loading = true;
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_spawn(async move {
+                    let mut results = Vec::with_capacity(tracked_branches.len());
+
+                    for (path, branch, repo_slug) in tracked_branches {
+                        let result = Self::lookup_worktree_pull_request(
                             github_service.as_ref(),
                             github_token.as_deref(),
                             path,
                             branch,
                             repo_slug,
-                        )
-                    })
-                    .await;
+                        );
+                        let stop_due_to_rate_limit = result.4.is_some();
+                        results.push(result);
+                        if stop_due_to_rate_limit {
+                            break;
+                        }
+                    }
 
-                let is_last_result = pending_results.fetch_sub(1, Ordering::SeqCst) == 1;
+                    results
+                })
+                .await;
 
-                let _ = this.update(cx, |this, cx| {
-                    let (path, next_num, next_url, next_details) = result;
-                    let mut changed = false;
+            let _ = this.update(cx, |this, cx| {
+                for (path, next_num, next_url, next_details, rate_limited_until) in results {
+                    let preserve_cached_pr_data = should_preserve_cached_pr_data_on_rate_limit(
+                        next_num,
+                        next_url.as_deref(),
+                        next_details.as_ref(),
+                        rate_limited_until,
+                    );
 
                     if let Some(worktree) = this
                         .worktrees
                         .iter_mut()
                         .find(|worktree| worktree.path == path)
+                        && !preserve_cached_pr_data
                         && (worktree.pr_number != next_num
                             || worktree.pr_url != next_url
                             || worktree.pr_details != next_details)
@@ -2614,21 +2651,16 @@ impl ArborWindow {
                         worktree.pr_number = next_num;
                         worktree.pr_url = next_url;
                         worktree.pr_details = next_details;
-                        changed = true;
                     }
 
-                    if is_last_result {
-                        this.worktree_prs_loading = false;
-                        changed = true;
-                    }
+                    this.extend_github_rate_limit(rate_limited_until);
+                }
 
-                    if changed {
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
+                this.worktree_prs_loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn lookup_worktree_pull_request(
@@ -2642,13 +2674,18 @@ impl ArborWindow {
         Option<u64>,
         Option<String>,
         Option<github_service::PrDetails>,
+        Option<SystemTime>,
     ) {
-        let details = repo_slug
+        let (details, rate_limited_until) = repo_slug
             .as_ref()
-            .and_then(|slug| github_service::pull_request_details(slug, &branch));
+            .map(|slug| github_service::pull_request_details(slug, &branch, github_token))
+            .map(|outcome| (outcome.details, outcome.rate_limited_until))
+            .unwrap_or((None, None));
 
         let (pr_number, pr_url) = if let Some(ref details) = details {
             (Some(details.number), Some(details.url.clone()))
+        } else if rate_limited_until.is_some() {
+            (None, None)
         } else {
             let pr_number = repo_slug.as_ref().and_then(|_| {
                 github_pr_number_for_worktree(github_service, &path, &branch, github_token)
@@ -2658,21 +2695,42 @@ impl ArborWindow {
             (pr_number, pr_url)
         };
 
-        (path, pr_number, pr_url, details)
+        (path, pr_number, pr_url, details, rate_limited_until)
     }
 
-    fn switch_terminal_backend(
-        &mut self,
-        backend_kind: TerminalBackendKind,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_backend_kind == backend_kind {
-            return;
+    fn github_rate_limit_remaining(&self) -> Option<Duration> {
+        self.github_rate_limited_until?
+            .duration_since(SystemTime::now())
+            .ok()
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    fn clear_expired_github_rate_limit(&mut self) -> bool {
+        if self.github_rate_limited_until.is_some() && self.github_rate_limit_remaining().is_none()
+        {
+            self.github_rate_limited_until = None;
+            return true;
+        }
+        false
+    }
+
+    fn extend_github_rate_limit(&mut self, rate_limited_until: Option<SystemTime>) -> bool {
+        let Some(rate_limited_until) = rate_limited_until else {
+            return false;
+        };
+        if rate_limited_until <= SystemTime::now() {
+            return false;
         }
 
-        self.active_backend_kind = backend_kind;
-        self.notice = None;
-        cx.notify();
+        let next = match self.github_rate_limited_until {
+            Some(current) if current >= rate_limited_until => current,
+            _ => rate_limited_until,
+        };
+        if self.github_rate_limited_until == Some(next) {
+            return false;
+        }
+        self.github_rate_limited_until = Some(next);
+        true
     }
 
     fn switch_theme(&mut self, theme_kind: ThemeKind, cx: &mut Context<Self>) {
@@ -2899,11 +2957,17 @@ impl ArborWindow {
                     cx.stop_propagation();
                 },
                 "up" => {
-                    self.move_theme_picker_selection(-(theme_picker_columns() as isize), cx);
+                    self.move_theme_picker_selection(
+                        -(theme_picker_columns(ThemeKind::ALL.len()) as isize),
+                        cx,
+                    );
                     cx.stop_propagation();
                 },
                 "down" => {
-                    self.move_theme_picker_selection(theme_picker_columns() as isize, cx);
+                    self.move_theme_picker_selection(
+                        theme_picker_columns(ThemeKind::ALL.len()) as isize,
+                        cx,
+                    );
                     cx.stop_propagation();
                 },
                 "enter" | "return" => {
@@ -3442,33 +3506,6 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn action_use_embedded_backend(
-        &mut self,
-        _: &UseEmbeddedBackend,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_terminal_backend(TerminalBackendKind::Embedded, cx);
-    }
-
-    fn action_use_alacritty_backend(
-        &mut self,
-        _: &UseAlacrittyBackend,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_terminal_backend(TerminalBackendKind::Alacritty, cx);
-    }
-
-    fn action_use_ghostty_backend(
-        &mut self,
-        _: &UseGhosttyBackend,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.switch_terminal_backend(TerminalBackendKind::Ghostty, cx);
-    }
-
     fn action_toggle_left_pane(
         &mut self,
         _: &ToggleLeftPane,
@@ -3671,9 +3708,7 @@ impl ArborWindow {
             runtime: None,
         });
 
-        let daemon = (backend_kind == TerminalBackendKind::Embedded)
-            .then(|| self.terminal_daemon.clone())
-            .flatten();
+        let daemon = self.terminal_daemon.clone();
         let shell = self.embedded_shell();
         let target_grid_size = self.last_terminal_grid_size.unwrap_or((0, 0));
         let poll_tx = self.terminal_poll_tx.clone();
@@ -3687,11 +3722,6 @@ impl ArborWindow {
                 },
                 Embedded {
                     runtime: EmbeddedTerminal,
-                    notice: Option<String>,
-                    clear_global_daemon: bool,
-                },
-                External {
-                    result: terminal_backend::TerminalRunResult,
                     notice: Option<String>,
                     clear_global_daemon: bool,
                 },
@@ -3751,11 +3781,6 @@ impl ArborWindow {
                     ) {
                         Ok(TerminalLaunch::Embedded(runtime)) => SpawnTerminalOutcome::Embedded {
                             runtime,
-                            notice: fallback_notice,
-                            clear_global_daemon,
-                        },
-                        Ok(TerminalLaunch::External(result)) => SpawnTerminalOutcome::External {
-                            result,
                             notice: fallback_notice,
                             clear_global_daemon,
                         },
@@ -3845,35 +3870,6 @@ impl ArborWindow {
                         session.cursor = None;
                         session.exit_code = None;
                         session.updated_at_unix_ms = current_unix_timestamp_millis();
-                    },
-                    SpawnTerminalOutcome::External {
-                        result,
-                        notice,
-                        clear_global_daemon,
-                    } => {
-                        if clear_global_daemon {
-                            this.terminal_daemon = None;
-                        }
-                        if let Some(notice) = notice {
-                            this.notice = Some(notice);
-                        }
-                        session.command = result.command;
-                        session.output = trim_to_last_lines(result.output, 120);
-                        session.styled_output.clear();
-                        session.cursor = None;
-                        session.state = if result.success {
-                            TerminalState::Completed
-                        } else {
-                            TerminalState::Failed
-                        };
-                        session.exit_code = result.code;
-                        session.updated_at_unix_ms = current_unix_timestamp_millis();
-                        if !result.success {
-                            this.notice = Some(format!(
-                                "terminal backend launch failed with code {:?}",
-                                result.code,
-                            ));
-                        }
                     },
                     SpawnTerminalOutcome::Failed {
                         error,
@@ -4670,10 +4666,7 @@ impl EntityInputHandler for ArborWindow {
 impl Render for ArborWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Update window title to reflect connected daemon
-        let title = match &self.connected_daemon_label {
-            Some(label) => format!("Arbor \u{2014} {label}"),
-            None => "Arbor".to_owned(),
-        };
+        let title = app_window_title(self.connected_daemon_label.as_deref());
         window.set_window_title(&title);
 
         self.window_is_active = window.is_window_active();
@@ -4704,9 +4697,6 @@ impl Render for ArborWindow {
             .on_action(cx.listener(Self::action_refresh_changes))
             .on_action(cx.listener(Self::action_open_add_repository))
             .on_action(cx.listener(Self::action_open_create_worktree))
-            .on_action(cx.listener(Self::action_use_embedded_backend))
-            .on_action(cx.listener(Self::action_use_alacritty_backend))
-            .on_action(cx.listener(Self::action_use_ghostty_backend))
             .on_action(cx.listener(Self::action_toggle_left_pane))
             .on_action(cx.listener(Self::action_navigate_worktree_back))
             .on_action(cx.listener(Self::action_navigate_worktree_forward))
@@ -4883,6 +4873,45 @@ impl Render for ArborWindow {
     }
 }
 
+#[derive(Clone)]
+struct AgentWsSessionEntry {
+    session_id: String,
+    cwd: String,
+    state: AgentState,
+    updated_at_unix_ms: Option<u64>,
+}
+
+fn legacy_agent_ws_session_id(cwd: &str) -> String {
+    format!("legacy-cwd:{cwd}")
+}
+
+fn parse_agent_ws_session_entry(value: &serde_json::Value) -> Option<AgentWsSessionEntry> {
+    let cwd = value.get("cwd")?.as_str()?;
+    let session_id = match value.get("session_id").and_then(|v| v.as_str()) {
+        Some(session_id) => session_id.to_owned(),
+        None => {
+            tracing::info!(
+                cwd,
+                "agent WS entry missing session_id, using legacy cwd fallback"
+            );
+            legacy_agent_ws_session_id(cwd)
+        },
+    };
+    let state_str = value.get("state")?.as_str()?;
+    let state = match state_str {
+        "working" => AgentState::Working,
+        "waiting" => AgentState::Waiting,
+        _ => return None,
+    };
+    let updated_at = value.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+    Some(AgentWsSessionEntry {
+        session_id,
+        cwd: cwd.to_owned(),
+        state,
+        updated_at_unix_ms: updated_at,
+    })
+}
+
 fn process_agent_ws_message(
     this: &gpui::WeakEntity<ArborWindow>,
     cx: &mut gpui::AsyncApp,
@@ -4902,23 +4931,18 @@ fn process_agent_ws_message(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let entries: Vec<(String, AgentState, Option<u64>)> = sessions
+            let entries: Vec<AgentWsSessionEntry> = sessions
                 .iter()
-                .filter_map(|s| {
-                    let cwd = s.get("cwd")?.as_str()?;
-                    let state_str = s.get("state")?.as_str()?;
-                    let state = match state_str {
-                        "working" => AgentState::Working,
-                        "waiting" => AgentState::Waiting,
-                        _ => return None,
-                    };
-                    let updated_at = s.get("updated_at_unix_ms").and_then(|v| v.as_u64());
-                    Some((cwd.to_owned(), state, updated_at))
-                })
+                .filter_map(parse_agent_ws_session_entry)
                 .collect();
             tracing::info!(count = entries.len(), "agent WS snapshot received");
-            for (cwd, state, _) in &entries {
-                tracing::info!(cwd = cwd.as_str(), ?state, "  snapshot entry");
+            for entry in &entries {
+                tracing::info!(
+                    session_id = entry.session_id.as_str(),
+                    cwd = entry.cwd.as_str(),
+                    state = ?entry.state,
+                    "  snapshot entry"
+                );
             }
             let _ = this.update(cx, |this, cx| {
                 apply_agent_ws_snapshot(this, &entries, cx);
@@ -4926,23 +4950,30 @@ fn process_agent_ws_message(
             });
         },
         Some("update") => {
-            if let Some(session) = value.get("session") {
-                let cwd = session.get("cwd").and_then(|v| v.as_str());
-                let state_str = session.get("state").and_then(|v| v.as_str());
-                if let (Some(cwd), Some(state_str)) = (cwd, state_str) {
-                    tracing::info!(cwd, state = state_str, "agent WS update received");
-                    let state = match state_str {
-                        "working" => AgentState::Working,
-                        "waiting" => AgentState::Waiting,
-                        _ => return,
-                    };
-                    let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
-                    let entries = vec![(cwd.to_owned(), state, updated_at)];
-                    let _ = this.update(cx, |this, cx| {
-                        apply_agent_ws_update(this, &entries, cx);
-                        cx.notify();
-                    });
-                }
+            if let Some(session) = value.get("session")
+                && let Some(entry) = parse_agent_ws_session_entry(session)
+            {
+                tracing::info!(
+                    session_id = entry.session_id.as_str(),
+                    cwd = entry.cwd.as_str(),
+                    state = ?entry.state,
+                    "agent WS update received"
+                );
+                let entries = vec![entry];
+                let _ = this.update(cx, |this, cx| {
+                    apply_agent_ws_update(this, &entries, cx);
+                    cx.notify();
+                });
+            }
+        },
+        Some("clear") => {
+            if let Some(session_id) = value.get("session_id").and_then(|v| v.as_str()) {
+                tracing::info!(session_id, "agent WS clear received");
+                let session_id = session_id.to_owned();
+                let _ = this.update(cx, |this, cx| {
+                    apply_agent_ws_clear(this, &session_id, cx);
+                    cx.notify();
+                });
             }
         },
         _ => {},
@@ -4951,85 +4982,163 @@ fn process_agent_ws_message(
 
 fn apply_agent_ws_snapshot(
     app: &mut ArborWindow,
-    entries: &[(String, AgentState, Option<u64>)],
+    entries: &[AgentWsSessionEntry],
     cx: &mut Context<ArborWindow>,
 ) {
-    tracing::info!(
-        count = entries.len(),
-        "agent WS snapshot: resetting all worktree states"
-    );
-    invalidate_agent_activity_epochs(
-        app.agent_activity_epochs.as_ref(),
-        app.worktrees.iter().map(|worktree| worktree.path.as_path()),
-    );
-    for worktree in &mut app.worktrees {
-        worktree.agent_state = None;
-    }
-    apply_agent_ws_update(app, entries, cx);
+    tracing::info!(count = entries.len(), "agent WS snapshot received");
+    app.agent_activity_sessions = entries
+        .iter()
+        .map(|entry| {
+            (entry.session_id.clone(), AgentActivitySessionRecord {
+                cwd: entry.cwd.clone(),
+                state: entry.state,
+                updated_at_unix_ms: entry.updated_at_unix_ms,
+            })
+        })
+        .collect();
+    reconcile_worktree_agent_activity(app, false, cx);
 }
 
 fn apply_agent_ws_update(
     app: &mut ArborWindow,
-    entries: &[(String, AgentState, Option<u64>)],
+    entries: &[AgentWsSessionEntry],
+    cx: &mut Context<ArborWindow>,
+) {
+    for entry in entries {
+        app.agent_activity_sessions
+            .insert(entry.session_id.clone(), AgentActivitySessionRecord {
+                cwd: entry.cwd.clone(),
+                state: entry.state,
+                updated_at_unix_ms: entry.updated_at_unix_ms,
+            });
+    }
+    reconcile_worktree_agent_activity(app, true, cx);
+}
+
+fn apply_agent_ws_clear(app: &mut ArborWindow, session_id: &str, cx: &mut Context<ArborWindow>) {
+    remove_agent_activity_session(&mut app.agent_activity_sessions, session_id);
+    reconcile_worktree_agent_activity(app, false, cx);
+}
+
+fn reconcile_worktree_agent_activity(
+    app: &mut ArborWindow,
+    allow_waiting_transitions: bool,
     cx: &mut Context<ArborWindow>,
 ) {
     let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
     let allow_auto_checkpoint = app.active_outpost_index.is_none();
+    let mut derived_states = HashMap::<PathBuf, (AgentState, Option<u64>)>::new();
 
-    for (cwd, state, updated_at) in entries {
-        let cwd_path = Path::new(cwd);
-        // Find the most specific (longest) worktree path that is a prefix of this cwd.
+    for (session_id, session) in &app.agent_activity_sessions {
+        let cwd_path = Path::new(&session.cwd);
         let best_match = worktree_paths
             .iter()
             .filter(|wt_path| cwd_path.starts_with(wt_path))
             .max_by_key(|wt_path| wt_path.as_os_str().len());
 
-        if let Some(matched_path) = best_match {
-            let transition_epoch =
-                advance_agent_activity_epoch(app.agent_activity_epochs.as_ref(), matched_path);
-            let waiting_transition = if let Some(worktree) = app
-                .worktrees
-                .iter_mut()
-                .find(|worktree| &worktree.path == matched_path)
-            {
-                let previous_state = worktree.agent_state;
-                tracing::info!(
-                    cwd = %cwd,
-                    worktree = %worktree.path.display(),
-                    ?state,
-                    "agent activity matched to worktree"
-                );
-                worktree.agent_state = Some(*state);
-                if let Some(ts) = updated_at {
-                    worktree.last_activity_unix_ms =
-                        Some(worktree.last_activity_unix_ms.unwrap_or(0).max(*ts));
-                }
-                if previous_state == Some(AgentState::Working) && *state == AgentState::Waiting {
-                    Some(AgentWaitingTransitionRequest {
-                        path: worktree.path.clone(),
-                        repo_root: worktree.repo_root.clone(),
-                        agent_task: worktree.agent_task.clone(),
-                        updated_at: *updated_at,
-                        epoch: transition_epoch,
-                        allow_auto_checkpoint,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some(request) = waiting_transition {
-                app.spawn_agent_waiting_transition(request, cx);
-            }
-        } else {
+        let Some(matched_path) = best_match else {
             tracing::warn!(
-                cwd = %cwd,
-                ?state,
+                session_id = session_id.as_str(),
+                cwd = session.cwd.as_str(),
+                state = ?session.state,
                 "agent activity did not match any worktree"
             );
+            continue;
+        };
+
+        tracing::info!(
+            session_id = session_id.as_str(),
+            cwd = session.cwd.as_str(),
+            worktree = %matched_path.display(),
+            state = ?session.state,
+            "agent activity matched to worktree"
+        );
+
+        let entry = derived_states
+            .entry(matched_path.clone())
+            .or_insert((session.state, session.updated_at_unix_ms));
+        merge_agent_activity_state(entry, session.state, session.updated_at_unix_ms);
+    }
+
+    let mut waiting_transitions = Vec::new();
+    for worktree in &mut app.worktrees {
+        let previous_state = worktree.agent_state;
+        let (next_state, updated_at) = derived_states
+            .remove(&worktree.path)
+            .map(|(state, updated_at)| (Some(state), updated_at))
+            .unwrap_or((None, None));
+
+        let transition_epoch = if previous_state != next_state {
+            Some(advance_agent_activity_epoch(
+                app.agent_activity_epochs.as_ref(),
+                &worktree.path,
+            ))
+        } else {
+            None
+        };
+
+        worktree.agent_state = next_state;
+        if let Some(ts) = updated_at {
+            worktree.last_activity_unix_ms =
+                Some(worktree.last_activity_unix_ms.unwrap_or(0).max(ts));
+        }
+
+        if allow_waiting_transitions
+            && agent_waiting_transition_detected(previous_state, next_state)
+            && let Some(epoch) = transition_epoch
+        {
+            waiting_transitions.push(AgentWaitingTransitionRequest {
+                path: worktree.path.clone(),
+                repo_root: worktree.repo_root.clone(),
+                agent_task: worktree.agent_task.clone(),
+                updated_at,
+                epoch,
+                allow_auto_checkpoint,
+            });
         }
     }
+
+    for request in waiting_transitions {
+        app.spawn_agent_waiting_transition(request, cx);
+    }
+}
+
+fn agent_waiting_transition_detected(
+    previous_state: Option<AgentState>,
+    next_state: Option<AgentState>,
+) -> bool {
+    previous_state == Some(AgentState::Working) && next_state == Some(AgentState::Waiting)
+}
+
+fn merge_agent_activity_state(
+    entry: &mut (AgentState, Option<u64>),
+    state: AgentState,
+    updated_at_unix_ms: Option<u64>,
+) {
+    entry.0 = merge_agent_activity_status(entry.0, state);
+    entry.1 = merge_agent_activity_timestamp(entry.1, updated_at_unix_ms);
+}
+
+fn merge_agent_activity_status(current: AgentState, next: AgentState) -> AgentState {
+    if current == AgentState::Working || next == AgentState::Working {
+        AgentState::Working
+    } else {
+        AgentState::Waiting
+    }
+}
+
+fn merge_agent_activity_timestamp(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (current, next) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+fn remove_agent_activity_session(
+    sessions: &mut HashMap<String, AgentActivitySessionRecord>,
+    session_id: &str,
+) {
+    sessions.remove(session_id);
 }
 
 #[derive(Clone)]
@@ -5186,15 +5295,6 @@ fn advance_agent_activity_epoch(epochs: &Mutex<HashMap<PathBuf, u64>>, path: &Pa
     let next = epochs.get(path).copied().unwrap_or(0).saturating_add(1);
     epochs.insert(path.to_path_buf(), next);
     next
-}
-
-fn invalidate_agent_activity_epochs<'a>(
-    epochs: &Mutex<HashMap<PathBuf, u64>>,
-    paths: impl Iterator<Item = &'a Path>,
-) {
-    for path in paths {
-        let _ = advance_agent_activity_epoch(epochs, path);
-    }
 }
 
 fn agent_activity_epoch_is_current(
@@ -6677,6 +6777,54 @@ fn status_text(theme: ThemePalette, text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
+fn format_countdown(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes:02}mn {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}mn {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn should_preserve_cached_pr_data_on_rate_limit(
+    next_num: Option<u64>,
+    next_url: Option<&str>,
+    next_details: Option<&github_service::PrDetails>,
+    rate_limited_until: Option<SystemTime>,
+) -> bool {
+    rate_limited_until.is_some()
+        && next_num.is_none()
+        && next_url.is_none()
+        && next_details.is_none()
+}
+
+fn clear_pull_request_data_for_untracked_worktrees(
+    worktrees: &mut [WorktreeSummary],
+    tracked_paths: &HashSet<PathBuf>,
+) -> bool {
+    let mut cleared = false;
+
+    for worktree in worktrees {
+        if tracked_paths.contains(&worktree.path) {
+            continue;
+        }
+        let had_pr_number = worktree.pr_number.take().is_some();
+        let had_pr_url = worktree.pr_url.take().is_some();
+        let had_pr_details = worktree.pr_details.take().is_some();
+        if had_pr_number || had_pr_url || had_pr_details {
+            cleared = true;
+        }
+    }
+
+    cleared
+}
+
 fn is_gui_editor(editor: &str) -> bool {
     let basename = Path::new(editor)
         .file_name()
@@ -8068,10 +8216,11 @@ fn parse_terminal_backend_kind(
 
     match value.to_ascii_lowercase().as_str() {
         "embedded" => Ok(TerminalBackendKind::Embedded),
-        "alacritty" => Ok(TerminalBackendKind::Alacritty),
-        "ghostty" => Ok(TerminalBackendKind::Ghostty),
+        "alacritty" | "ghostty" => Err(format!(
+            "terminal_backend `{value}` is no longer supported; Arbor terminals are embedded-only. Using the embedded terminal instead. Configure `embedded_terminal_engine` to choose `alacritty` or `ghostty-vt-experimental`."
+        )),
         _ => Err(format!(
-            "invalid terminal_backend `{value}` in config, expected embedded/alacritty/ghostty"
+            "invalid terminal_backend `{value}` in config, expected `embedded`"
         )),
     }
 }
@@ -8103,12 +8252,26 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
         "tokyo-night" | "tokyonight" => Ok(ThemeKind::TokyoNight),
         "vantablack" => Ok(ThemeKind::Vantablack),
         "white" => Ok(ThemeKind::White),
+        "atom-one-light" | "atomonelight" => Ok(ThemeKind::AtomOneLight),
+        "github-light-default" | "githublightdefault" => Ok(ThemeKind::GitHubLightDefault),
+        "github-light-high-contrast" | "githublighthighcontrast" => {
+            Ok(ThemeKind::GitHubLightHighContrast)
+        },
+        "github-light-colorblind" | "githublightcolorblind" => Ok(ThemeKind::GitHubLightColorblind),
+        "github-light" | "githublight" => Ok(ThemeKind::GitHubLight),
+        "github-dark-default" | "githubdarkdefault" => Ok(ThemeKind::GitHubDarkDefault),
+        "github-dark-high-contrast" | "githubdarkhighcontrast" => {
+            Ok(ThemeKind::GitHubDarkHighContrast)
+        },
+        "github-dark-colorblind" | "githubdarkcolorblind" => Ok(ThemeKind::GitHubDarkColorblind),
+        "github-dark-dimmed" | "githubdarkdimmed" => Ok(ThemeKind::GitHubDarkDimmed),
+        "github-dark" | "githubdark" => Ok(ThemeKind::GitHubDark),
         "retrobox-classic" | "retrobox" => Ok(ThemeKind::RetroboxClassic),
         "tokyonight-day" | "tokionight-day" => Ok(ThemeKind::TokyoNightDay),
         "tokyonight-classic" | "tokionight-classic" => Ok(ThemeKind::TokyoNightClassic),
         "zellner" => Ok(ThemeKind::Zellner),
         _ => Err(format!(
-            "invalid theme `{value}` in config, expected one-dark/ayu-dark/gruvbox-dark/dracula/solarized-light/everforest-dark/catppuccin/catppuccin-latte/ethereal/flexoki-light/hackerman/kanagawa/matte-black/miasma/nord/osaka-jade/ristretto/rose-pine/tokyo-night/vantablack/white/retrobox-classic/tokyonight-day/tokyonight-classic/zellner"
+            "invalid theme `{value}` in config, expected one-dark/ayu-dark/gruvbox-dark/dracula/solarized-light/everforest-dark/catppuccin/catppuccin-latte/ethereal/flexoki-light/hackerman/kanagawa/matte-black/miasma/nord/osaka-jade/ristretto/rose-pine/tokyo-night/vantablack/white/atom-one-light/github-light-default/github-light-high-contrast/github-light-colorblind/github-light/github-dark-default/github-dark-high-contrast/github-dark-colorblind/github-dark-dimmed/github-dark/retrobox-classic/tokyonight-day/tokyonight-classic/zellner"
         )),
     }
 }
@@ -8124,11 +8287,11 @@ mod tests {
             auto_commit_subject, build_side_by_side_diff_lines,
             checkout::CheckoutKind,
             estimated_worktree_hover_popover_card_height, extract_first_url,
-            prioritized_pr_checks_for_display, resolve_github_access_token_from_sources,
-            styled_lines_for_session,
+            parse_terminal_backend_kind, prioritized_pr_checks_for_display,
+            resolve_github_access_token_from_sources, styled_lines_for_session,
             terminal_backend::{
-                TerminalCursor, TerminalModes, TerminalStyledCell, TerminalStyledLine,
-                TerminalStyledRun,
+                TerminalBackendKind, TerminalCursor, TerminalModes, TerminalStyledCell,
+                TerminalStyledLine, TerminalStyledRun,
             },
             terminal_daemon_http::{HttpTerminalDaemon, WebsocketConnectConfig},
             theme::ThemeKind,
@@ -8145,7 +8308,7 @@ mod tests {
         gpui::{Keystroke, point, px},
         std::{
             cell::Cell,
-            collections::HashMap,
+            collections::{HashMap, HashSet},
             env, fs,
             path::{Path, PathBuf},
             sync::{Arc, Mutex},
@@ -8230,6 +8393,27 @@ mod tests {
             agent_task: Some("Investigating hover".to_owned()),
             last_activity_unix_ms: None,
         }
+    }
+
+    #[test]
+    fn parse_terminal_backend_defaults_to_embedded() {
+        assert_eq!(
+            parse_terminal_backend_kind(None),
+            Ok(TerminalBackendKind::Embedded),
+        );
+        assert_eq!(
+            parse_terminal_backend_kind(Some("")),
+            Ok(TerminalBackendKind::Embedded),
+        );
+    }
+
+    #[test]
+    fn parse_terminal_backend_rejects_external_backends() {
+        let alacritty = parse_terminal_backend_kind(Some("alacritty"));
+        let ghostty = parse_terminal_backend_kind(Some("ghostty"));
+
+        assert!(alacritty.is_err());
+        assert!(ghostty.is_err());
     }
 
     fn daemon_runtime_for_test() -> DaemonTerminalRuntime {
@@ -8331,6 +8515,98 @@ mod tests {
 
         let attention = crate::worktree_attention_indicator(&worktree);
         assert_eq!(attention.label, "Stuck");
+    }
+
+    #[test]
+    fn agent_waiting_transition_requires_prior_working_state() {
+        assert!(crate::agent_waiting_transition_detected(
+            Some(AgentState::Working),
+            Some(AgentState::Waiting),
+        ));
+        assert!(!crate::agent_waiting_transition_detected(
+            None,
+            Some(AgentState::Waiting),
+        ));
+        assert!(!crate::agent_waiting_transition_detected(
+            Some(AgentState::Waiting),
+            Some(AgentState::Waiting),
+        ));
+    }
+
+    #[test]
+    fn merge_agent_activity_state_keeps_working_and_latest_timestamp() {
+        let mut merged = (AgentState::Working, Some(200));
+        crate::merge_agent_activity_state(&mut merged, AgentState::Waiting, Some(100));
+        assert_eq!(merged, (AgentState::Working, Some(200)));
+
+        let mut merged = (AgentState::Waiting, Some(100));
+        crate::merge_agent_activity_state(&mut merged, AgentState::Working, Some(200));
+        assert_eq!(merged, (AgentState::Working, Some(200)));
+    }
+
+    #[test]
+    fn merge_agent_activity_state_waiting_only_when_no_session_is_working() {
+        let mut merged = (AgentState::Waiting, Some(100));
+        crate::merge_agent_activity_state(&mut merged, AgentState::Waiting, Some(200));
+        assert_eq!(merged, (AgentState::Waiting, Some(200)));
+    }
+
+    #[test]
+    fn parse_agent_ws_session_entry_uses_legacy_cwd_id_when_missing() {
+        let entry = crate::parse_agent_ws_session_entry(&serde_json::json!({
+            "cwd": "/tmp/repo/worktree",
+            "state": "working",
+            "updated_at_unix_ms": 42_u64,
+        }))
+        .expect("expected agent ws entry");
+
+        assert_eq!(entry.session_id, "legacy-cwd:/tmp/repo/worktree");
+        assert_eq!(entry.cwd, "/tmp/repo/worktree");
+        assert_eq!(entry.state, AgentState::Working);
+        assert_eq!(entry.updated_at_unix_ms, Some(42));
+    }
+
+    #[test]
+    fn parse_agent_ws_session_entry_preserves_explicit_session_id() {
+        let entry = crate::parse_agent_ws_session_entry(&serde_json::json!({
+            "session_id": "terminal:daemon-1",
+            "cwd": "/tmp/repo/worktree",
+            "state": "waiting",
+            "updated_at_unix_ms": 99_u64,
+        }))
+        .expect("expected agent ws entry");
+
+        assert_eq!(entry.session_id, "terminal:daemon-1");
+        assert_eq!(entry.cwd, "/tmp/repo/worktree");
+        assert_eq!(entry.state, AgentState::Waiting);
+        assert_eq!(entry.updated_at_unix_ms, Some(99));
+    }
+
+    #[test]
+    fn apply_agent_ws_clear_removes_matching_session() {
+        let mut sessions = HashMap::from([
+            (
+                "terminal:daemon-1".to_owned(),
+                crate::AgentActivitySessionRecord {
+                    cwd: "/tmp/repo/worktree".to_owned(),
+                    state: AgentState::Waiting,
+                    updated_at_unix_ms: Some(42),
+                },
+            ),
+            (
+                "terminal:daemon-2".to_owned(),
+                crate::AgentActivitySessionRecord {
+                    cwd: "/tmp/repo/worktree".to_owned(),
+                    state: AgentState::Working,
+                    updated_at_unix_ms: Some(99),
+                },
+            ),
+        ]);
+
+        crate::remove_agent_activity_session(&mut sessions, "terminal:daemon-1");
+
+        assert!(!sessions.contains_key("terminal:daemon-1"));
+        assert!(sessions.contains_key("terminal:daemon-2"));
     }
 
     #[test]
@@ -8941,6 +9217,46 @@ mod tests {
             Some(ThemeKind::White)
         );
         assert_eq!(
+            crate::parse_theme_kind(Some("atom-one-light")).ok(),
+            Some(ThemeKind::AtomOneLight)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light-default")).ok(),
+            Some(ThemeKind::GitHubLightDefault)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light-high-contrast")).ok(),
+            Some(ThemeKind::GitHubLightHighContrast)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light-colorblind")).ok(),
+            Some(ThemeKind::GitHubLightColorblind)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light")).ok(),
+            Some(ThemeKind::GitHubLight)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-default")).ok(),
+            Some(ThemeKind::GitHubDarkDefault)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-high-contrast")).ok(),
+            Some(ThemeKind::GitHubDarkHighContrast)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-colorblind")).ok(),
+            Some(ThemeKind::GitHubDarkColorblind)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-dimmed")).ok(),
+            Some(ThemeKind::GitHubDarkDimmed)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark")).ok(),
+            Some(ThemeKind::GitHubDark)
+        );
+        assert_eq!(
             crate::parse_theme_kind(Some("retrobox-classic")).ok(),
             Some(ThemeKind::RetroboxClassic)
         );
@@ -9258,6 +9574,116 @@ mod tests {
     fn github_token_resolution_falls_back_to_environment_token() {
         let token = resolve_github_access_token_from_sources(Some(""), Some(" env-token "));
         assert_eq!(token.as_deref(), Some("env-token"));
+    }
+
+    #[test]
+    fn format_countdown_uses_minute_suffix_requested_by_ui() {
+        assert_eq!(
+            crate::format_countdown(std::time::Duration::from_secs(3 * 60)),
+            "3mn 00s"
+        );
+        assert_eq!(
+            crate::format_countdown(std::time::Duration::from_secs(95)),
+            "1mn 35s"
+        );
+    }
+
+    #[test]
+    fn format_countdown_keeps_hour_component() {
+        assert_eq!(
+            crate::format_countdown(std::time::Duration::from_secs(3723)),
+            "1h 02mn 03s"
+        );
+    }
+
+    #[test]
+    fn preserve_cached_pr_data_only_when_rate_limited_without_fresh_pr_data() {
+        let pr = crate::github_service::PrDetails {
+            number: 42,
+            title: "Keep the old PR metadata".to_owned(),
+            url: "https://github.com/penso/arbor/pull/42".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 0,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: Vec::new(),
+        };
+
+        assert!(crate::should_preserve_cached_pr_data_on_rate_limit(
+            None,
+            None,
+            None,
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60)),
+        ));
+        assert!(!crate::should_preserve_cached_pr_data_on_rate_limit(
+            Some(pr.number),
+            Some(pr.url.as_str()),
+            Some(&pr),
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60)),
+        ));
+        assert!(!crate::should_preserve_cached_pr_data_on_rate_limit(
+            None, None, None, None,
+        ));
+    }
+
+    #[test]
+    fn clear_pull_request_data_for_untracked_worktrees_only_clears_stale_rows() {
+        let mut tracked = sample_worktree_summary();
+        tracked.pr_number = Some(7);
+        tracked.pr_url = Some("https://github.com/penso/arbor/pull/7".to_owned());
+        tracked.pr_details = Some(crate::github_service::PrDetails {
+            number: 7,
+            title: "Tracked".to_owned(),
+            url: "https://github.com/penso/arbor/pull/7".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 0,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: Vec::new(),
+        });
+
+        let mut stale = sample_worktree_summary();
+        stale.path = "/tmp/repo/wt-stale".into();
+        stale.label = "wt-stale".to_owned();
+        stale.branch = "main".to_owned();
+        stale.pr_number = Some(8);
+        stale.pr_url = Some("https://github.com/penso/arbor/pull/8".to_owned());
+        stale.pr_details = Some(crate::github_service::PrDetails {
+            number: 8,
+            title: "Stale".to_owned(),
+            url: "https://github.com/penso/arbor/pull/8".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 0,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: Vec::new(),
+        });
+
+        let tracked_path = tracked.path.clone();
+        let mut worktrees = vec![tracked, stale];
+        let tracked_paths = HashSet::from([tracked_path]);
+
+        assert!(crate::clear_pull_request_data_for_untracked_worktrees(
+            &mut worktrees,
+            &tracked_paths,
+        ));
+        assert_eq!(worktrees[0].pr_number, Some(7));
+        assert!(worktrees[0].pr_details.is_some());
+        assert_eq!(worktrees[1].pr_number, None);
+        assert_eq!(worktrees[1].pr_url, None);
+        assert_eq!(worktrees[1].pr_details, None);
     }
 
     #[test]

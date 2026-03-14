@@ -4,10 +4,42 @@ const lib = @import("ghostty-vt");
 const Allocator = std.mem.Allocator;
 const page_allocator = std.heap.page_allocator;
 
+const CountingReadonlyStream = lib.Stream(CountingReadonlyHandler);
+
+const CountingReadonlyHandler = struct {
+    readonly: lib.ReadonlyHandler,
+    bell_count: usize = 0,
+
+    pub fn init(terminal: *lib.Terminal) CountingReadonlyHandler {
+        return .{
+            .readonly = lib.ReadonlyHandler.init(terminal),
+        };
+    }
+
+    pub fn deinit(self: *CountingReadonlyHandler) void {
+        self.readonly.deinit();
+    }
+
+    pub fn vt(
+        self: *CountingReadonlyHandler,
+        comptime action: lib.StreamAction.Tag,
+        value: lib.StreamAction.Value(action),
+    ) !void {
+        if (action == .bell) self.bell_count += 1;
+        try self.readonly.vt(action, value);
+    }
+
+    fn takeBellCount(self: *CountingReadonlyHandler) usize {
+        const count = self.bell_count;
+        self.bell_count = 0;
+        return count;
+    }
+};
+
 const State = struct {
     alloc: Allocator,
     terminal: lib.Terminal,
-    stream: lib.ReadonlyStream,
+    stream: CountingReadonlyStream,
 };
 
 pub const ArborGhosttyBuffer = extern struct {
@@ -87,7 +119,7 @@ pub export fn arbor_ghostty_vt_new(
     }) catch return 2;
     errdefer state.terminal.deinit(alloc);
 
-    state.stream = state.terminal.vtStream();
+    state.stream = .initAlloc(alloc, CountingReadonlyHandler.init(&state.terminal));
     out.* = @ptrCast(state);
     return 0;
 }
@@ -103,10 +135,13 @@ pub export fn arbor_ghostty_vt_process(
     handle: ?*anyopaque,
     bytes: [*]const u8,
     len: usize,
+    bell_count: *usize,
 ) i32 {
     const state = ptrFromHandle(handle) orelse return 1;
+    bell_count.* = 0;
     if (len == 0) return 0;
     state.stream.nextSlice(bytes[0..len]) catch return 2;
+    bell_count.* = state.stream.handler.takeBellCount();
     return 0;
 }
 

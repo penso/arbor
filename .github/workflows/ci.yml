@@ -30,6 +30,20 @@ jobs:
           advanced-security: false
           online-audits: false
 
+  binary-names:
+    name: Binary Name Collisions
+    needs: [zizmor]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Check for case-insensitive binary name collisions
+        run: ./scripts/ci/check-binary-names.sh --cargo
+
   fmt:
     name: Format
     needs: [zizmor]
@@ -262,6 +276,22 @@ jobs:
         run: |
           mkdir -p dist
           ./scripts/ci/package-macos.sh "ci" "${{ matrix.target }}" "target/${{ matrix.target }}/release/Arbor" "dist"
+      - name: Verify macOS deployment target
+        if: startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin')
+        shell: bash
+        run: |
+          bin="dist/Arbor.app/Contents/MacOS/Arbor"
+          minos=$(vtool -show-build "$bin" 2>/dev/null | grep -m1 'minos' | awk '{print $2}')
+          echo "$bin: minos=$minos"
+          if [[ -z "$minos" ]]; then
+            echo "::error::Could not determine minos for $bin"
+            exit 1
+          fi
+          # Fail if the binary requires macOS newer than 11.0
+          if ! python3 -c "import sys; sys.exit(0 if tuple(int(x) for x in '$minos'.split('.')) <= (11,0) else 1)"; then
+            echo "::error::$bin requires macOS $minos, expected <= 11.0"
+            exit 1
+          fi
       - name: Import signing certificate
         if: (startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin')) && env.MACOS_CERTIFICATE != ''
         env:

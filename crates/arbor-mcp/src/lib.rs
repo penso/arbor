@@ -575,6 +575,7 @@ mod tests {
 
         fn list_agent_activity(&self) -> Result<Vec<AgentSessionDto>, DaemonClientError> {
             Ok(vec![AgentSessionDto {
+                session_id: "session-1".to_owned(),
                 cwd: "/tmp/repo".to_owned(),
                 state: "working".to_owned(),
                 updated_at_unix_ms: 1,
