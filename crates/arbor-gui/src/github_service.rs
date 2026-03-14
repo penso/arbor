@@ -157,6 +157,8 @@ static GITHUB_GRAPHQL_REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
 struct GitHubGraphqlResponse<T> {
     data: Option<T>,
     #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
     errors: Vec<GitHubGraphqlError>,
 }
 
@@ -387,11 +389,7 @@ pub fn pull_request_details(
         .data
         .as_ref()
         .and_then(|data| data.rate_limit.as_ref());
-    let error_messages = response_body
-        .errors
-        .iter()
-        .map(|error| error.message.as_str())
-        .collect::<Vec<_>>();
+    let error_messages = collect_graphql_error_messages(&response_body);
     let rate_limited_until = detect_rate_limited_until(
         status_code,
         &rate_limit_headers,
@@ -464,6 +462,20 @@ fn github_graphql_http_agent() -> ureq::Agent {
         .http_status_as_error(false)
         .build();
     ureq::Agent::new_with_config(config)
+}
+
+fn collect_graphql_error_messages<T>(response_body: &GitHubGraphqlResponse<T>) -> Vec<&str> {
+    let mut error_messages = Vec::new();
+    if let Some(message) = response_body.message.as_deref() {
+        error_messages.push(message);
+    }
+    for error in &response_body.errors {
+        let message = error.message.as_str();
+        if !error_messages.contains(&message) {
+            error_messages.push(message);
+        }
+    }
+    error_messages
 }
 
 fn parse_rate_limit_headers(headers: &ureq::http::HeaderMap) -> GitHubRateLimitHeaders {
@@ -878,13 +890,13 @@ pub(crate) fn parse_pull_request_number(reference: &str) -> Option<u64> {
 mod tests {
     use {
         super::{
-            CheckStatus, GitHubRateLimitHeaders, MergeStateStatus, MergeableState,
-            PullRequestDetailsGraphqlCommit, PullRequestDetailsGraphqlCommitConnection,
-            PullRequestDetailsGraphqlCommitNode, PullRequestDetailsGraphqlPullRequest,
-            PullRequestDetailsGraphqlStatusCheckRollup,
+            CheckStatus, GitHubGraphqlResponse, GitHubRateLimitHeaders, MergeStateStatus,
+            MergeableState, PullRequestDetailsGraphqlCommit,
+            PullRequestDetailsGraphqlCommitConnection, PullRequestDetailsGraphqlCommitNode,
+            PullRequestDetailsGraphqlPullRequest, PullRequestDetailsGraphqlStatusCheckRollup,
             PullRequestDetailsGraphqlStatusContextConnection,
-            PullRequestDetailsGraphqlStatusContextNode, detect_rate_limited_until,
-            parse_graphql_pr_details, parse_pull_request_number,
+            PullRequestDetailsGraphqlStatusContextNode, collect_graphql_error_messages,
+            detect_rate_limited_until, parse_graphql_pr_details, parse_pull_request_number,
         },
         std::time::{Duration, UNIX_EPOCH},
     };
@@ -1051,6 +1063,25 @@ mod tests {
             &GitHubRateLimitHeaders::default(),
             None,
             &["You have exceeded a secondary rate limit"],
+            now,
+        );
+
+        assert_eq!(until, Some(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn top_level_graphql_message_triggers_rate_limit_detection() {
+        let response: GitHubGraphqlResponse<serde_json::Value> =
+            serde_json::from_str(r#"{"message":"You have exceeded a secondary rate limit"}"#)
+                .unwrap_or_else(|error| panic!("failed to deserialize response: {error}"));
+        let error_messages = collect_graphql_error_messages(&response);
+
+        let now = UNIX_EPOCH + Duration::from_secs(100);
+        let until = detect_rate_limited_until(
+            403,
+            &GitHubRateLimitHeaders::default(),
+            None,
+            &error_messages,
             now,
         );
 
