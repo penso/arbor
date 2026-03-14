@@ -5604,6 +5604,10 @@ fn managed_process_id_from_title(worktree_path: &Path, title: &str) -> Option<St
         .map(|(source, name)| managed_process_id(source, worktree_path, name))
 }
 
+fn managed_process_session_is_active(session: &TerminalSession) -> bool {
+    session.is_initializing || session.state == TerminalState::Running
+}
+
 fn next_active_worktree_index(
     previous_local_selection: Option<&Path>,
     active_repository_group_key: Option<&str>,
@@ -9677,5 +9681,21 @@ Review the current branch and summarize the highest-risk changes.
         if let Err(error) = fs::remove_dir_all(&repo_root) {
             panic!("temp repo root should be removed: {error}");
         }
+    }
+
+    #[test]
+    fn completed_managed_process_sessions_are_not_active() {
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.managed_process_id = Some("procfile:/tmp/worktree:web".to_owned());
+        session.is_initializing = false;
+        session.state = TerminalState::Completed;
+        assert!(!crate::managed_process_session_is_active(&session));
+
+        session.state = TerminalState::Running;
+        assert!(crate::managed_process_session_is_active(&session));
+
+        session.is_initializing = true;
+        session.state = TerminalState::Completed;
+        assert!(crate::managed_process_session_is_active(&session));
     }
 }

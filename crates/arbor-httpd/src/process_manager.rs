@@ -134,23 +134,35 @@ impl ProcessManager {
     }
 
     pub fn sync_definitions(&mut self, definitions: &[ProcessDefinition]) {
-        let definition_ids: HashSet<&str> = definitions
+        let definitions_by_id: HashMap<&str, &ProcessDefinition> = definitions
             .iter()
-            .map(|definition| definition.id.as_str())
+            .map(|definition| (definition.id.as_str(), definition))
             .collect();
+        let mut updates = Vec::new();
 
         self.processes.retain(|id, process| {
-            if definition_ids.contains(id.as_str()) {
+            if definitions_by_id.contains_key(id.as_str()) {
                 return true;
             }
 
             !matches!(process.status, ProcessStatus::Stopped)
         });
 
-        for definition in definitions {
-            if let Some(process) = self.processes.get_mut(&definition.id) {
+        for (process_id, process) in &mut self.processes {
+            if let Some(definition) = definitions_by_id.get(process_id.as_str()) {
                 process.update_definition(definition);
+                continue;
             }
+
+            process.definition.auto_restart = false;
+            if process.status == ProcessStatus::Restarting {
+                process.status = ProcessStatus::Crashed;
+                updates.push(process.info());
+            }
+        }
+
+        for process in updates {
+            let _ = self.broadcast.send(ProcessEvent::Update { process });
         }
     }
 
@@ -238,11 +250,14 @@ impl ProcessManager {
         D: TerminalDaemon,
         D::Error: ToString,
     {
-        let definition = self
+        let process = self
             .processes
             .get(process_id)
-            .map(|process| process.definition.clone())
             .ok_or_else(|| format!("process `{process_id}` is not tracked"))?;
+        if process.status != ProcessStatus::Restarting || !process.definition.auto_restart {
+            return Ok(process.info());
+        }
+        let definition = process.definition.clone();
 
         self.start_definition(definition, daemon)
     }
@@ -1070,5 +1085,50 @@ mod tests {
                 &arbor_toml_definition.name,
             )),
         ]);
+    }
+
+    #[test]
+    fn removed_definitions_disable_auto_restart_for_retained_processes() {
+        let repo_root = PathBuf::from("/tmp/repo");
+        let workspace_path = PathBuf::from("/tmp/repo");
+        let definition = build_process_definition(
+            ProcessSource::ArborToml,
+            &repo_root,
+            &workspace_path,
+            "worker".to_owned(),
+            "cargo run -- worker".to_owned(),
+            workspace_path.clone(),
+            false,
+            true,
+        );
+        let mut manager = ProcessManager::new();
+        manager
+            .processes
+            .insert(definition.id.clone(), ManagedProcess {
+                definition: definition.clone(),
+                status: ProcessStatus::Restarting,
+                session_id: None,
+                exit_code: Some(1),
+                restart_count: 1,
+                last_start: None,
+                current_backoff_secs: 2,
+            });
+
+        manager.sync_definitions(&[]);
+
+        let retained = match manager.processes.get(&definition.id) {
+            Some(process) => process,
+            None => panic!("removed restarting process should still be retained"),
+        };
+        assert!(!retained.definition.auto_restart);
+        assert_eq!(retained.status, ProcessStatus::Crashed);
+
+        let mut daemon = TestTerminalDaemon::default();
+        let result = match manager.restart_tracked_process(&definition.id, &mut daemon) {
+            Ok(process) => process,
+            Err(error) => panic!("removed process should not try to restart: {error}"),
+        };
+        assert_eq!(result.status, ProcessStatus::Crashed);
+        assert!(daemon.create_requests.is_empty());
     }
 }

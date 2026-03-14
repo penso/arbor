@@ -93,10 +93,17 @@ impl ArborWindow {
             return;
         };
 
-        let session_id = self
+        let existing_session = self
             .managed_process_session(&worktree_path, &process.id)
-            .map(|session| session.id)
-            .unwrap_or_else(|| self.spawn_managed_process_session(worktree_path, process, cx));
+            .map(|session| (session.id, managed_process_session_is_active(session)));
+        let session_id = match existing_session {
+            Some((session_id, true)) => session_id,
+            Some((session_id, false)) => {
+                let _ = self.close_terminal_session_by_id(session_id);
+                self.spawn_managed_process_session(worktree_path, process, cx)
+            },
+            None => self.spawn_managed_process_session(worktree_path, process, cx),
+        };
 
         self.select_terminal(session_id, window, cx);
         self.sync_daemon_session_store(cx);

@@ -583,9 +583,7 @@ impl ArborWindow {
             .iter()
             .filter(|process| {
                 self.managed_process_session(&worktree.path, &process.id)
-                    .is_some_and(|session| {
-                        session.is_initializing || session.state == TerminalState::Running
-                    })
+                    .is_some_and(managed_process_session_is_active)
             })
             .count();
         let mut meta = Vec::new();
@@ -673,8 +671,7 @@ impl ArborWindow {
     ) -> Stateful<Div> {
         let session = self.managed_process_session(worktree_path, &process.id);
         let session_id = session.map(|session| session.id);
-        let can_stop = session
-            .is_some_and(|session| session.is_initializing || session.state == TerminalState::Running);
+        let can_stop = session.is_some_and(managed_process_session_is_active);
         let (status_label, status_color) = match session {
             Some(session) if session.is_initializing => ("Starting", 0xe5c07b_u32),
             Some(session) if session.state == TerminalState::Running => ("Running", 0x72d69c_u32),
