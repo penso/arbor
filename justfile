@@ -42,7 +42,7 @@ test-ghostty-vt: ghostty-vt-bridge
     RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} test -p arbor-terminal-emulator --features ghostty-vt-experimental
 
 check-ghostty-vt-gui: ghostty-vt-bridge
-    RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} check -p arbor-gui --features ghostty-vt-experimental
+    ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)" RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} check -p arbor-gui --features ghostty-vt-experimental
 
 check-ghostty-vt-httpd: ghostty-vt-bridge
     RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}" cargo +{{nightly_toolchain}} check -p arbor-httpd --features ghostty-vt-experimental
@@ -75,6 +75,7 @@ run-configured-embedded-engine port="": web-ui-build-if-needed ghostty-vt-bridge
     echo "daemon port: $DAEMON_PORT"
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
     export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
+    export ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)"
     export RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}"
     cargo +{{nightly_toolchain}} run -p arbor-httpd --features ghostty-vt-experimental &
     HTTPD_PID=$!
@@ -94,6 +95,7 @@ run-ghostty-vt port="": web-ui-build-if-needed ghostty-vt-bridge
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
     export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
     export ARBOR_TERMINAL_ENGINE="ghostty-vt-experimental"
+    export ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)"
     export RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}"
     cargo +{{nightly_toolchain}} run -p arbor-httpd --features ghostty-vt-experimental &
     HTTPD_PID=$!
@@ -112,6 +114,7 @@ run port="": web-ui-build-if-needed
     echo "daemon port: $DAEMON_PORT"
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
     export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
+    export ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)"
     cargo +{{nightly_toolchain}} run -p arbor-httpd &
     HTTPD_PID=$!
     trap "kill $HTTPD_PID 2>/dev/null" EXIT
@@ -129,7 +132,7 @@ web-ui-build-if-needed:
     fi
 
 build-release: web-ui-build-if-needed
-    cargo +{{nightly_toolchain}} build --release -p arbor-gui -p arbor-httpd
+    ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)" cargo +{{nightly_toolchain}} build --release -p arbor-gui -p arbor-httpd
 
 run-httpd: web-ui-build-if-needed
     cargo +{{nightly_toolchain}} run -p arbor-httpd

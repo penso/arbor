@@ -6,7 +6,7 @@ fn open_arbor_window(cx: &mut App) {
             window_min_size: Some(size(px(1180.), px(760.))),
             app_id: Some("so.pen.arbor".to_owned()),
             titlebar: Some(TitlebarOptions {
-                title: Some("Arbor".into()),
+                title: Some(app_window_title(None).into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(9.), px(9.))),
             }),
@@ -488,7 +488,7 @@ fn main() {
                 window_min_size: Some(size(px(1180.), px(760.))),
                 app_id: Some("so.pen.arbor".to_owned()),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Arbor".into()),
+                    title: Some(app_window_title(None).into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(9.), px(9.))),
                 }),

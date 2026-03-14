@@ -4664,10 +4664,7 @@ impl EntityInputHandler for ArborWindow {
 impl Render for ArborWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Update window title to reflect connected daemon
-        let title = match &self.connected_daemon_label {
-            Some(label) => format!("Arbor \u{2014} {label}"),
-            None => "Arbor".to_owned(),
-        };
+        let title = app_window_title(self.connected_daemon_label.as_deref());
         window.set_window_title(&title);
 
         self.window_is_active = window.is_window_active();
