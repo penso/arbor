@@ -384,16 +384,16 @@ impl LiveSession {
     }
 
     fn note_waiting_for_input(&self) {
+        let mut activity_state = lock_or_recover(&self.activity_state);
+        if *activity_state == Some(AgentState::Waiting) {
+            return;
+        }
         if *lock_or_recover(&self.state) != TerminalSessionState::Running {
             return;
         }
 
-        let mut state = lock_or_recover(&self.activity_state);
-        if *state == Some(AgentState::Waiting) {
-            return;
-        }
-        *state = Some(AgentState::Waiting);
-        drop(state);
+        *activity_state = Some(AgentState::Waiting);
+        drop(activity_state);
 
         if let Some(sender) = self.activity_tx.as_ref() {
             let _ = sender.send(TerminalActivityEvent::Update {
@@ -1066,6 +1066,30 @@ mod tests {
                 session_id: "daemon-test-1".into(),
             })
         );
+        assert!(activity_rx.try_recv().is_err());
+        assert_eq!(*lock_or_recover(&session.activity_state), None);
+        assert_eq!(
+            *lock_or_recover(&session.state),
+            TerminalSessionState::Completed
+        );
+    }
+
+    #[test]
+    fn note_waiting_for_input_rechecks_exit_state_after_waiting_lock_contention() {
+        let (session, mut activity_rx) = test_live_session();
+        let blocked_session = session.clone();
+        let activity_guard = lock_or_recover(&session.activity_state);
+
+        let waiter = thread::spawn(move || {
+            blocked_session.note_waiting_for_input();
+        });
+
+        session.set_exit_state(Some(0), TerminalSessionState::Completed);
+        drop(activity_guard);
+        waiter
+            .join()
+            .unwrap_or_else(|_| panic!("waiting thread should not panic"));
+
         assert!(activity_rx.try_recv().is_err());
         assert_eq!(*lock_or_recover(&session.activity_state), None);
         assert_eq!(
