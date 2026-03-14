@@ -15,14 +15,11 @@ export function createChangesPanel(): HTMLElement {
 
   function render(): void {
     panel.replaceChildren();
-    panel.append(renderRightPaneTabs());
+    const worktree = state.selectedWorktreePath === null
+      ? undefined
+      : state.worktrees.find((entry) => entry.path === state.selectedWorktreePath);
+    panel.append(renderRightPaneTabs(worktree));
 
-    if (state.selectedWorktreePath === null) {
-      panel.append(el("div", "changes-empty", "Select a worktree"));
-      return;
-    }
-
-    const worktree = state.worktrees.find((entry) => entry.path === state.selectedWorktreePath);
     if (worktree === undefined) {
       panel.append(el("div", "changes-empty", "Select a worktree"));
       return;
@@ -41,21 +38,32 @@ export function createChangesPanel(): HTMLElement {
   return panel;
 }
 
-function renderRightPaneTabs(): HTMLElement {
+function renderRightPaneTabs(worktree?: Worktree): HTMLElement {
   const tabs = el("div", "changes-tabs");
   tabs.append(
     renderTabButton("Changes", "changes"),
-    renderTabButton("Procfile", "procfile"),
+    renderTabButton("Procfile", "procfile", worktree?.processes.length),
   );
   return tabs;
 }
 
-function renderTabButton(label: string, tab: "changes" | "procfile"): HTMLButtonElement {
+function renderTabButton(
+  label: string,
+  tab: "changes" | "procfile",
+  count?: number,
+): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = "changes-tab-button";
   button.type = "button";
   if (state.rightPaneTab === tab) button.classList.add("active");
-  button.textContent = label;
+
+  const content = el("span", "changes-tab-content");
+  content.append(el("span", "changes-tab-label", label));
+  if (count !== undefined) {
+    content.append(el("span", "changes-tab-count", String(count)));
+  }
+
+  button.append(content);
   button.addEventListener("click", () => setRightPaneTab(tab));
   return button;
 }

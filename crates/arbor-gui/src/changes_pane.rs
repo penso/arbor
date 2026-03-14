@@ -96,8 +96,11 @@ impl ArborWindow {
     fn render_right_pane_tabs(&self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let active_tab = self.right_pane_tab;
+        let procfile_count = self
+            .active_worktree()
+            .map(|worktree| worktree.managed_processes.len());
 
-        let tab_button = |label: &'static str, tab: RightPaneTab| {
+        let tab_button = |label: &'static str, tab: RightPaneTab, count: Option<usize>| {
             let is_active = active_tab == tab;
             div()
                 .id(ElementId::Name(
@@ -136,7 +139,26 @@ impl ArborWindow {
                         this.set_right_pane_tab(tab, cx);
                     }),
                 )
-                .child(label)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(label)
+                        .when_some(count, |this, count| {
+                            this.child(
+                                div()
+                                    .px_1()
+                                    .py(px(0.5))
+                                    .rounded_full()
+                                    .bg(rgb(theme.border))
+                                    .text_size(px(10.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme.text_disabled))
+                                    .child(count.to_string()),
+                            )
+                        }),
+                )
         };
 
         div()
@@ -145,10 +167,10 @@ impl ArborWindow {
             .flex_row()
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(tab_button("Changes", RightPaneTab::Changes))
-            .child(tab_button("Files", RightPaneTab::FileTree))
-            .child(tab_button("Procfile", RightPaneTab::Procfile))
-            .child(tab_button("Notes", RightPaneTab::Notes))
+            .child(tab_button("Changes", RightPaneTab::Changes, None))
+            .child(tab_button("Files", RightPaneTab::FileTree, None))
+            .child(tab_button("Procfile", RightPaneTab::Procfile, procfile_count))
+            .child(tab_button("Notes", RightPaneTab::Notes, None))
     }
 
     fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {

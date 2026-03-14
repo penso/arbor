@@ -273,22 +273,3 @@
   text-overflow: ellipsis;
   min-width: 0;
 }
-
-.wt-procfile-badge {
-  flex-shrink: 0;
-  font: inherit;
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
-}
-
-.wt-procfile-badge:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-}

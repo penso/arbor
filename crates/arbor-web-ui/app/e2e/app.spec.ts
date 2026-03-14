@@ -222,9 +222,8 @@ test.describe("Arbor Web UI", () => {
     await expect(sidebar.locator(".repo-wt-count").getByText("2")).toBeVisible();
     await expect(sidebar.locator(".repo-wt-count").getByText("1")).toBeVisible();
 
-    // Procfile badges surface worktree commands without expanding the sidebar card
-    await expect(sidebar.getByRole("button", { name: "Procfile 2", exact: true })).toBeVisible();
-    await expect(sidebar.getByRole("button", { name: "Procfile", exact: true })).toBeVisible();
+    // Procfile commands are no longer surfaced directly from the worktree list
+    await expect(sidebar.locator(".wt-procfile-badge")).toHaveCount(0);
 
     await page.screenshot({
       path: "e2e/screenshots/sidebar-details.png",
@@ -262,12 +261,12 @@ test.describe("Arbor Web UI", () => {
   });
 
   test("right pane shows Procfile processes in a dedicated tab", async ({ page }) => {
-    const sidebar = page.getByTestId("sidebar");
     const changesPanel = page.getByTestId("changes-panel");
 
-    await sidebar.locator(".wt-procfile-badge").first().click();
+    await expect(changesPanel.getByRole("button", { name: "Procfile 2" })).toBeVisible();
+    await changesPanel.getByRole("button", { name: "Procfile 2" }).click();
 
-    await expect(changesPanel.getByRole("button", { name: "Procfile" })).toHaveClass(/active/);
+    await expect(changesPanel.getByRole("button", { name: "Procfile 2" })).toHaveClass(/active/);
     await expect(changesPanel.locator(".changes-title").getByText("Procfile")).toBeVisible();
     await expect(changesPanel.locator(".procfile-name").getByText("web")).toBeVisible();
     await expect(changesPanel.locator(".procfile-command").getByText("cargo watch -x run")).toBeVisible();

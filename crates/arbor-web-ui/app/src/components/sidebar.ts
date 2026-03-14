@@ -6,7 +6,6 @@ import {
   notify,
   selectWorktree,
   agentStateForWorktree,
-  setRightPaneTab,
 } from "../state";
 
 /** Track which repo groups are collapsed (by repo root). */
@@ -174,22 +173,6 @@ function renderWorktreeCard(wt: Worktree): HTMLElement {
 
   const line2 = el("div", "wt-line2");
   line2.append(el("span", "wt-path", shortPath(wt.path)));
-
-  if (wt.processes.length > 0) {
-    const procfileBadge = document.createElement("button");
-    procfileBadge.className = "wt-procfile-badge";
-    procfileBadge.type = "button";
-    procfileBadge.textContent =
-      wt.processes.length === 1 ? "Procfile" : `Procfile ${wt.processes.length}`;
-    procfileBadge.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (state.selectedWorktreePath !== wt.path) {
-        selectWorktree(wt.path);
-      }
-      setRightPaneTab("procfile");
-    });
-    line2.append(procfileBadge);
-  }
 
   info.append(line1, line2);
   main.append(leadingIcon, info);

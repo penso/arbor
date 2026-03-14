@@ -29,6 +29,23 @@
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 
+.changes-tab-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.changes-tab-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 55%, var(--bg-surface));
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
 .changes-tab-button:hover {
   background: var(--bg-hover);
   color: var(--text);
@@ -38,6 +55,11 @@
   color: var(--text);
   border-bottom-color: var(--accent);
   background: color-mix(in srgb, var(--accent-subtle, var(--bg-hover)) 70%, transparent);
+}
+
+.changes-tab-button.active .changes-tab-count {
+  background: color-mix(in srgb, var(--border) 80%, var(--bg-surface));
+  color: var(--text-muted);
 }
 
 .changes-pane-body {

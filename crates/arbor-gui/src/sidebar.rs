@@ -497,7 +497,6 @@ impl ArborWindow {
                                                 let attention = worktree_attention_indicator(&worktree);
                                                 let activity_sparkline = worktree_activity_sparkline(&worktree);
                                                 let detected_ports = worktree.detected_ports.clone();
-                                                let managed_process_count = worktree.managed_processes.len();
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
@@ -920,43 +919,6 @@ impl ArborWindow {
                                                                                                     )),
                                                                                             )
                                                                                         })
-                                                                                    })
-                                                                                    .when(managed_process_count > 0, |this| {
-                                                                                        this.child(
-                                                                                            div()
-                                                                                                .id(("worktree-procfile-tab", index))
-                                                                                                .cursor_pointer()
-                                                                                                .flex_none()
-                                                                                                .rounded_sm()
-                                                                                                .border_1()
-                                                                                                .border_color(rgb(theme.border))
-                                                                                                .px_1()
-                                                                                                .text_xs()
-                                                                                                .text_color(rgb(theme.text_muted))
-                                                                                                .hover(|this| {
-                                                                                                    this.bg(rgb(theme.panel_active_bg))
-                                                                                                        .text_color(rgb(theme.text_primary))
-                                                                                                })
-                                                                                                .child(if managed_process_count == 1 {
-                                                                                                    "Procfile".to_owned()
-                                                                                                } else {
-                                                                                                    format!("Procfile {managed_process_count}")
-                                                                                                })
-                                                                                                .on_click(cx.listener(
-                                                                                                    move |this, _, window, cx| {
-                                                                                                        this.select_worktree(
-                                                                                                            index,
-                                                                                                            window,
-                                                                                                            cx,
-                                                                                                        );
-                                                                                                        this.set_right_pane_tab(
-                                                                                                            RightPaneTab::Procfile,
-                                                                                                            cx,
-                                                                                                        );
-                                                                                                        cx.stop_propagation();
-                                                                                                    },
-                                                                                                )),
-                                                                                        )
                                                                                     }),
                                                                             )),
                                                                     ),

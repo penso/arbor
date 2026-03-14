@@ -1,1 +1,1 @@
-run: cargo run
+run: cargo run --bin Arbor
