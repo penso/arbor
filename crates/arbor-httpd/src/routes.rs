@@ -2279,16 +2279,14 @@ pub(crate) fn current_unix_timestamp_millis() -> u64 {
 }
 
 fn github_repo_slug_for_path(repo_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let repo = gix::open(repo_root).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    let url = remote.url(gix::remote::Direction::Fetch)?;
+    let url_str = url.to_bstring().to_string();
+    if url_str.is_empty() {
         return None;
     }
-    let url = String::from_utf8_lossy(&output.stdout);
-    github_repo_slug_from_remote_url(url.trim())
+    github_repo_slug_from_remote_url(url_str.trim())
 }
 
 fn github_repo_slug_cached(

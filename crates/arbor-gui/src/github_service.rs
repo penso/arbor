@@ -75,13 +75,6 @@ pub(crate) struct ReviewPullRequest {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhReviewPrResponse {
-    number: u64,
-    title: String,
-}
-
-#[derive(Deserialize)]
 struct GhCheckContext {
     name: Option<String>,
     context: Option<String>,
@@ -780,50 +773,66 @@ pub(crate) fn resolve_pull_request_for_review(
         return Err("pull request reference is required".to_owned());
     }
 
-    if let Some(pull_request) = resolve_pull_request_for_review_via_gh(repo_slug, reference) {
-        return Ok(pull_request);
+    let token = crate::resolve_github_access_token(github_token).ok_or_else(|| {
+        "no GitHub token available; set GITHUB_TOKEN or authenticate with `gh auth login`"
+            .to_owned()
+    })?;
+
+    if let Some(pr_number) = parse_pull_request_number(reference) {
+        return resolve_pull_request_for_review_via_api(repo_slug, pr_number, &token);
     }
 
-    let pull_request_number = parse_pull_request_number(reference).ok_or_else(|| {
-        "failed to resolve pull request with gh; use a PR number or GitHub pull request URL"
-            .to_owned()
-    })?;
-    let token = crate::resolve_github_access_token(github_token).ok_or_else(|| {
-        "failed to resolve pull request with gh and no GitHub token is available for API fallback"
-            .to_owned()
-    })?;
-
-    resolve_pull_request_for_review_via_api(repo_slug, pull_request_number, &token)
+    // Treat the reference as a branch name and look up the associated PR.
+    resolve_pull_request_for_review_by_branch(repo_slug, reference, &token)
 }
 
-fn resolve_pull_request_for_review_via_gh(
+fn resolve_pull_request_for_review_by_branch(
     repo_slug: &str,
-    reference: &str,
-) -> Option<ReviewPullRequest> {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            "--repo",
-            repo_slug,
-            "--json",
-            "number,title",
-            reference,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    branch: &str,
+    token: &str,
+) -> Result<ReviewPullRequest, String> {
+    let (owner, repo_name) = repo_slug
+        .split_once('/')
+        .ok_or_else(|| format!("invalid repository slug: {repo_slug}"))?;
 
-    if !output.status.success() {
-        return None;
-    }
+    let owner = owner.to_owned();
+    let repo_name = repo_name.to_owned();
+    let branch = branch.to_owned();
+    let token = token.to_owned();
 
-    let response: GhReviewPrResponse = serde_json::from_slice(&output.stdout).ok()?;
-    Some(ReviewPullRequest {
-        number: response.number,
-        title: response.title,
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| format!("failed to create runtime: {error}"))?;
+
+    runtime.block_on(async move {
+        let octocrab = octocrab::Octocrab::builder()
+            .personal_token(token)
+            .build()
+            .map_err(|error| format!("failed to create GitHub client: {error}"))?;
+
+        let page = octocrab
+            .pulls(&owner, &repo_name)
+            .list()
+            .head(&branch)
+            .state(octocrab::params::State::Open)
+            .per_page(1)
+            .send()
+            .await
+            .map_err(|error| {
+                format!("failed to look up pull request for branch '{branch}': {error}")
+            })?;
+
+        let pr = page
+            .items
+            .first()
+            .ok_or_else(|| format!("no open pull request found for branch '{branch}'"))?;
+
+        Ok(ReviewPullRequest {
+            number: pr.number,
+            title: pr
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("PR {}", pr.number)),
+        })
     })
 }
 
