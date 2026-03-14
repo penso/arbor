@@ -6,6 +6,7 @@ pub mod id;
 pub mod outpost;
 pub mod outpost_store;
 pub mod process;
+pub mod procfile;
 pub mod remote;
 pub mod repo_config;
 pub mod session;

@@ -366,7 +366,7 @@ mod tests {
         super::*,
         arbor_core::{
             daemon::{DaemonSessionRecord, TerminalSessionState, TerminalSnapshot},
-            process::{ProcessInfo, ProcessStatus},
+            process::{ProcessInfo, ProcessSource, ProcessStatus},
         },
     };
 
@@ -404,6 +404,7 @@ mod tests {
                 diff_deletions: None,
                 pr_number: None,
                 pr_url: None,
+                processes: vec![],
             }])
         }
 
@@ -582,11 +583,16 @@ mod tests {
 
         fn list_processes(&self) -> Result<Vec<ProcessInfo>, DaemonClientError> {
             Ok(vec![ProcessInfo {
+                id: "procfile:/tmp/repo:web".to_owned(),
                 name: "web".to_owned(),
                 command: "cargo run".to_owned(),
+                repo_root: "/tmp/repo".to_owned(),
+                workspace_id: "/tmp/repo".to_owned(),
+                source: ProcessSource::Procfile,
                 status: ProcessStatus::Running,
                 exit_code: None,
                 restart_count: 0,
+                memory_bytes: Some(134_217_728),
                 session_id: Some("process-web".to_owned()),
             }])
         }
@@ -605,11 +611,16 @@ mod tests {
                 .into_iter()
                 .next()
                 .unwrap_or(ProcessInfo {
+                    id: "procfile:/tmp/repo:web".to_owned(),
                     name: "web".to_owned(),
                     command: "cargo run".to_owned(),
+                    repo_root: "/tmp/repo".to_owned(),
+                    workspace_id: "/tmp/repo".to_owned(),
+                    source: ProcessSource::Procfile,
                     status: ProcessStatus::Running,
                     exit_code: None,
                     restart_count: 0,
+                    memory_bytes: Some(134_217_728),
                     session_id: Some("process-web".to_owned()),
                 }))
         }

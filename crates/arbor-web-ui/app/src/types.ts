@@ -15,7 +15,10 @@ export type Worktree = {
   diff_deletions: number | null;
   pr_number: number | null;
   pr_url: string | null;
+  processes: ProcessInfo[];
 };
+
+export type RightPaneTab = "changes" | "procfile";
 
 export type TerminalState = "running" | "completed" | "failed";
 
@@ -52,13 +55,19 @@ export type ChangeKind =
   | "intent-to-add";
 
 export type ProcessStatus = "running" | "restarting" | "crashed" | "stopped";
+export type ProcessSource = "arbor-toml" | "procfile";
 
 export type ProcessInfo = {
+  id: string;
   name: string;
   command: string;
+  repo_root: string;
+  workspace_id: string;
+  source: ProcessSource;
   status: ProcessStatus;
   exit_code: number | null;
   restart_count: number;
+  memory_bytes: number | null;
   session_id: string | null;
 };
 

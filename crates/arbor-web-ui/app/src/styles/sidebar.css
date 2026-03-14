@@ -145,7 +145,8 @@
 
 .wt-card {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
@@ -163,6 +164,13 @@
 .wt-card.active {
   border-color: var(--accent);
   background: var(--accent-subtle);
+}
+
+.wt-card-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .wt-branch-icon {
@@ -266,152 +274,21 @@
   min-width: 0;
 }
 
-/* ── Stack (managed processes) ── */
-
-.stack-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-  margin-top: 4px;
-}
-
-.stack-header {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 32px;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  padding: 0 4px;
-  transition: background 0.12s;
-}
-
-.stack-header:hover {
-  background: var(--bg-hover);
-}
-
-.stack-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.stack-actions {
-  display: flex;
-  gap: 4px;
+.wt-procfile-badge {
   flex-shrink: 0;
-}
-
-.stack-btn {
+  font: inherit;
   font-size: 10px;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
   border: 1px solid var(--border);
-  cursor: pointer;
-  background: var(--bg-surface2);
-  color: var(--text-muted);
-  transition: background 0.12s;
-}
-
-.stack-btn:hover {
-  background: var(--bg-hover);
-}
-
-.stack-btn-start {
-  color: var(--green);
-  border-color: var(--green);
-}
-
-.stack-btn-stop {
-  color: var(--red);
-  border-color: var(--red);
-}
-
-.stack-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-left: 4px;
-}
-
-.process-card {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-surface2);
-  font-family: var(--font-mono);
-}
-
-.process-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.dot-green { background: var(--green); }
-.dot-yellow { background: var(--yellow, #e5c07b); }
-.dot-red { background: var(--red); }
-.dot-gray { background: var(--text-faint); }
-
-.process-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.process-line1 {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.process-name {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.process-restarts {
-  font-size: 10px;
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
   color: var(--text-faint);
-}
-
-.process-line2 {
-  display: flex;
-}
-
-.process-command {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.process-action-btn {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 2px 6px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
   cursor: pointer;
-  background: var(--bg-surface);
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: background 0.12s;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 
-.process-action-btn:hover {
+.wt-procfile-badge:hover {
   background: var(--bg-hover);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }

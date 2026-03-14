@@ -1,13 +1,13 @@
 import { el, formatAge, shortPath } from "../utils";
-import type { Repository, Worktree, ProcessInfo } from "../types";
+import type { Repository, Worktree } from "../types";
 import {
   state,
   subscribe,
   notify,
   selectWorktree,
   agentStateForWorktree,
+  setRightPaneTab,
 } from "../state";
-import { startAllProcesses, stopAllProcesses, startProcess, stopProcess, restartProcess } from "../api";
 
 /** Track which repo groups are collapsed (by repo root). */
 const collapsedRepos = new Set<string>();
@@ -38,15 +38,8 @@ export function createSidebar(): HTMLElement {
     }
 
     for (const repo of state.repositories) {
-      const repoWorktrees = state.worktrees.filter(
-        (w) => w.repo_root === repo.root,
-      );
+      const repoWorktrees = state.worktrees.filter((w) => w.repo_root === repo.root);
       scroll.append(renderRepoGroup(repo, repoWorktrees));
-    }
-
-    // Stack section (managed processes)
-    if (state.processes.length > 0) {
-      scroll.append(renderStackSection(state.processes));
     }
 
     sidebar.append(scroll);
@@ -61,7 +54,6 @@ function renderRepoGroup(repo: Repository, worktrees: Worktree[]): HTMLElement {
   const isCollapsed = collapsedRepos.has(repo.root);
   const group = el("div", "repo-group");
 
-  // Repository header row
   const header = el("div", "repo-header");
 
   const chevron = el("span", "repo-chevron", isCollapsed ? "\u25B8" : "\u25BE");
@@ -75,17 +67,13 @@ function renderRepoGroup(repo: Repository, worktrees: Worktree[]): HTMLElement {
     notify();
   });
 
-  // GitHub avatar or letter icon
   const icon = renderRepoIcon(repo);
-
   const name = el("span", "repo-name", repo.label);
-
   const count = el("span", "repo-wt-count", String(worktrees.length));
 
   header.append(chevron, icon, name, count);
   group.append(header);
 
-  // Worktree cards (when not collapsed)
   if (!isCollapsed) {
     const wtList = el("div", "wt-list");
     const sorted = [...worktrees].sort((a, b) => {
@@ -95,7 +83,7 @@ function renderRepoGroup(repo: Repository, worktrees: Worktree[]): HTMLElement {
       return 0;
     });
     for (const wt of sorted) {
-      wtList.append(renderWorktreeCard(wt, repo));
+      wtList.append(renderWorktreeCard(wt));
     }
     group.append(wtList);
   }
@@ -111,7 +99,6 @@ function renderRepoIcon(repo: Repository): HTMLElement {
     img.alt = repo.label;
     img.width = 20;
     img.height = 20;
-    // Fallback to letter on load error
     img.addEventListener("error", () => {
       const fallback = el("span", "repo-icon", repo.label.charAt(0).toUpperCase());
       img.replaceWith(fallback);
@@ -120,7 +107,6 @@ function renderRepoIcon(repo: Repository): HTMLElement {
   }
 
   if (repo.github_repo_slug !== null) {
-    // GitHub SVG icon
     const icon = el("span", "repo-icon repo-icon-github");
     icon.innerHTML = GITHUB_SVG;
     return icon;
@@ -129,14 +115,15 @@ function renderRepoIcon(repo: Repository): HTMLElement {
   return el("span", "repo-icon", repo.label.charAt(0).toUpperCase());
 }
 
-function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
+function renderWorktreeCard(wt: Worktree): HTMLElement {
   const isActive = state.selectedWorktreePath === wt.path;
   const card = el("div", "wt-card");
   if (isActive) card.classList.add("active");
 
   card.addEventListener("click", () => selectWorktree(wt.path));
 
-  // Agent status dot or git branch icon
+  const main = el("div", "wt-card-main");
+
   const agentState = agentStateForWorktree(wt.path);
   let leadingIcon: HTMLElement;
   if (agentState !== null) {
@@ -147,15 +134,11 @@ function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
     leadingIcon.innerHTML = GIT_BRANCH_SVG;
   }
 
-  // Text column
   const info = el("div", "wt-info");
 
-  // Line 1: branch name + diff stats + age
   const line1 = el("div", "wt-line1");
-  const branchName = el("span", "wt-branch", wt.branch);
-  line1.append(branchName);
+  line1.append(el("span", "wt-branch", wt.branch));
 
-  // Diff stats (+N -N)
   const hasAdditions = wt.diff_additions !== null && wt.diff_additions > 0;
   const hasDeletions = wt.diff_deletions !== null && wt.diff_deletions > 0;
   if (hasAdditions || hasDeletions) {
@@ -169,7 +152,6 @@ function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
     line1.append(stats);
   }
 
-  // PR number
   if (wt.pr_number !== null) {
     const prBadge = el("span", "wt-pr");
     if (wt.pr_url !== null) {
@@ -190,127 +172,30 @@ function renderWorktreeCard(wt: Worktree, repo: Repository): HTMLElement {
     line1.append(el("span", "wt-age", formatAge(wt.last_activity_unix_ms)));
   }
 
-  // Line 2: path
   const line2 = el("div", "wt-line2");
   line2.append(el("span", "wt-path", shortPath(wt.path)));
 
-  info.append(line1, line2);
-  card.append(leadingIcon, info);
-
-  return card;
-}
-
-// ── Stack section (managed processes) ────────────────────────────────
-
-let stackCollapsed = false;
-
-function renderStackSection(processes: ProcessInfo[]): HTMLElement {
-  const section = el("div", "stack-section");
-
-  const header = el("div", "stack-header");
-
-  const chevron = el("span", "repo-chevron", stackCollapsed ? "\u25B8" : "\u25BE");
-  chevron.addEventListener("click", (e) => {
-    e.stopPropagation();
-    stackCollapsed = !stackCollapsed;
-    notify();
-  });
-
-  const title = el("span", "stack-title", "Stack");
-  const count = el("span", "repo-wt-count", String(processes.length));
-
-  header.append(chevron, title, count);
-
-  // Start/Stop all buttons
-  const actions = el("span", "stack-actions");
-  const hasRunning = processes.some((p) => p.status === "running");
-
-  if (hasRunning) {
-    const stopBtn = el("button", "stack-btn stack-btn-stop", "Stop");
-    stopBtn.addEventListener("click", (e) => {
+  if (wt.processes.length > 0) {
+    const procfileBadge = document.createElement("button");
+    procfileBadge.className = "wt-procfile-badge";
+    procfileBadge.type = "button";
+    procfileBadge.textContent =
+      wt.processes.length === 1 ? "Procfile" : `Procfile ${wt.processes.length}`;
+    procfileBadge.addEventListener("click", (e) => {
       e.stopPropagation();
-      stopAllProcesses().then(() => { import("../state").then((m) => m.refresh()); });
+      if (state.selectedWorktreePath !== wt.path) {
+        selectWorktree(wt.path);
+      }
+      setRightPaneTab("procfile");
     });
-    actions.append(stopBtn);
-  } else {
-    const startBtn = el("button", "stack-btn stack-btn-start", "Start");
-    startBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      startAllProcesses().then(() => { import("../state").then((m) => m.refresh()); });
-    });
-    actions.append(startBtn);
+    line2.append(procfileBadge);
   }
-
-  header.append(actions);
-  section.append(header);
-
-  if (!stackCollapsed) {
-    const list = el("div", "stack-list");
-    for (const proc of processes) {
-      list.append(renderProcessCard(proc));
-    }
-    section.append(list);
-  }
-
-  return section;
-}
-
-function renderProcessCard(proc: ProcessInfo): HTMLElement {
-  const card = el("div", "process-card");
-
-  // Status dot
-  const dotClass = statusDotClass(proc.status);
-  const dot = el("span", `process-dot ${dotClass}`);
-  card.append(dot);
-
-  // Info column
-  const info = el("div", "process-info");
-  const line1 = el("div", "process-line1");
-  line1.append(el("span", "process-name", proc.name));
-
-  if (proc.restart_count > 0) {
-    line1.append(el("span", "process-restarts", `x${proc.restart_count}`));
-  }
-
-  const line2 = el("div", "process-line2");
-  line2.append(el("span", "process-command", proc.command));
 
   info.append(line1, line2);
-  card.append(info);
+  main.append(leadingIcon, info);
+  card.append(main);
 
-  // Action button
-  const actionBtn = el("button", "process-action-btn");
-  if (proc.status === "running") {
-    actionBtn.textContent = "Stop";
-    actionBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      stopProcess(proc.name).then(() => { import("../state").then((m) => m.refresh()); });
-    });
-  } else if (proc.status === "restarting") {
-    actionBtn.textContent = "Stop";
-    actionBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      stopProcess(proc.name).then(() => { import("../state").then((m) => m.refresh()); });
-    });
-  } else {
-    actionBtn.textContent = "Start";
-    actionBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      startProcess(proc.name).then(() => { import("../state").then((m) => m.refresh()); });
-    });
-  }
-
-  card.append(actionBtn);
   return card;
-}
-
-function statusDotClass(status: string): string {
-  switch (status) {
-    case "running": return "dot-green";
-    case "restarting": return "dot-yellow";
-    case "crashed": return "dot-red";
-    default: return "dot-gray";
-  }
 }
 
 const GITHUB_SVG = `<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;

@@ -160,6 +160,7 @@ impl ArborWindow {
                 id: session_id,
                 daemon_session_id: session_id.to_string(),
                 worktree_path: cwd.clone(),
+                managed_process_id: None,
                 title: format!("term-{session_id}"),
                 last_command: None,
                 pending_command: String::new(),

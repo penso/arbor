@@ -202,9 +202,11 @@ pub(crate) async fn list_worktrees(
         diff_additions: Option<usize>,
         diff_deletions: Option<usize>,
         repo_slug: Option<String>,
+        process_definitions: Vec<crate::process_manager::ProcessDefinition>,
     }
 
     let mut entries_data: Vec<WorktreeData> = Vec::new();
+    let mut all_process_definitions = Vec::new();
 
     {
         let mut repo_cache = state.repo_cache.lock().await;
@@ -228,6 +230,12 @@ pub(crate) async fn list_worktrees(
                             .map(short_branch)
                             .unwrap_or_else(|| "-".to_owned());
                         let is_primary = entry.path.as_path() == repository_root.as_path();
+                        let process_definitions =
+                            crate::process_manager::discover_process_definitions_for_worktree(
+                                repository_root,
+                                &entry.path,
+                            );
+                        all_process_definitions.extend(process_definitions.iter().cloned());
                         entries_data.push(WorktreeData {
                             repo_root: repository_root.display().to_string(),
                             path: entry.path.display().to_string(),
@@ -237,6 +245,7 @@ pub(crate) async fn list_worktrees(
                             diff_additions: diff_summary.as_ref().map(|d| d.additions),
                             diff_deletions: diff_summary.as_ref().map(|d| d.deletions),
                             repo_slug: repo_slug.clone(),
+                            process_definitions,
                         });
                     }
                 },
@@ -268,19 +277,28 @@ pub(crate) async fn list_worktrees(
     let pr_results = futures_util::future::join_all(pr_futures).await;
 
     // Phase 3: assemble DTOs
+    let session_memory_bytes = collect_process_memory_bytes(&state).await;
+    let mut process_manager = state.process_manager.lock().await;
+    process_manager.sync_definitions(&all_process_definitions);
     let mut worktrees: Vec<WorktreeDto> = entries_data
         .into_iter()
         .zip(pr_results)
-        .map(|(wd, (pr_number, pr_url))| WorktreeDto {
-            repo_root: wd.repo_root,
-            path: wd.path,
-            branch: wd.branch,
-            is_primary_checkout: wd.is_primary,
-            last_activity_unix_ms: wd.last_activity_unix_ms,
-            diff_additions: wd.diff_additions,
-            diff_deletions: wd.diff_deletions,
-            pr_number,
-            pr_url,
+        .map(|(wd, (pr_number, pr_url))| {
+            let mut processes = process_manager
+                .list_processes_for_workspace(Path::new(&wd.path), &wd.process_definitions);
+            apply_process_memory(&mut processes, &session_memory_bytes);
+            WorktreeDto {
+                repo_root: wd.repo_root,
+                path: wd.path,
+                branch: wd.branch,
+                is_primary_checkout: wd.is_primary,
+                last_activity_unix_ms: wd.last_activity_unix_ms,
+                diff_additions: wd.diff_additions,
+                diff_deletions: wd.diff_deletions,
+                pr_number,
+                pr_url,
+                processes,
+            }
         })
         .collect();
 
@@ -1295,33 +1313,46 @@ fn agent_session_snapshot(sessions: &mut HashMap<String, AgentSession>) -> Vec<A
 // ── Process management handlers ──────────────────────────────────────
 
 pub(crate) async fn list_processes(State(state): State<AppState>) -> ApiResult<Vec<ProcessInfo>> {
-    let pm = state.process_manager.lock().await;
-    Ok(Json(pm.list_processes()))
+    let definitions = discover_process_definitions(&state).map_err(internal_error)?;
+    let session_memory_bytes = collect_process_memory_bytes(&state).await;
+    let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
+    let mut infos = pm.list_processes(&definitions);
+    apply_process_memory(&mut infos, &session_memory_bytes);
+    Ok(Json(infos))
 }
 
 pub(crate) async fn start_all_processes(
     State(state): State<AppState>,
 ) -> ApiResult<Vec<ProcessInfo>> {
+    let definitions = discover_process_definitions(&state).map_err(internal_error)?;
     let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
     let mut daemon = state.daemon.lock().await;
-    let results = pm.start_all(&mut *daemon);
-    let infos: Vec<ProcessInfo> = results
+    let results = pm.start_all(&definitions, &mut *daemon);
+    let mut infos: Vec<ProcessInfo> = results
         .into_iter()
         .filter_map(|(_, result)| result.ok())
         .collect();
+    let session_memory_bytes = process_memory_bytes(&*daemon);
+    apply_process_memory(&mut infos, &session_memory_bytes);
     Ok(Json(infos))
 }
 
 pub(crate) async fn stop_all_processes(
     State(state): State<AppState>,
 ) -> ApiResult<Vec<ProcessInfo>> {
+    let definitions = discover_process_definitions(&state).map_err(internal_error)?;
     let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
     let mut daemon = state.daemon.lock().await;
     let results = pm.stop_all(&mut *daemon);
-    let infos: Vec<ProcessInfo> = results
+    let mut infos: Vec<ProcessInfo> = results
         .into_iter()
         .filter_map(|(_, result)| result.ok())
         .collect();
+    let session_memory_bytes = process_memory_bytes(&*daemon);
+    apply_process_memory(&mut infos, &session_memory_bytes);
     Ok(Json(infos))
 }
 
@@ -1329,11 +1360,15 @@ pub(crate) async fn start_process(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> ApiResult<ProcessInfo> {
+    let definitions = discover_process_definitions(&state).map_err(internal_error)?;
     let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
     let mut daemon = state.daemon.lock().await;
-    let info = pm
-        .start_process(&name, &mut *daemon)
+    let mut info = pm
+        .start_process(&name, &definitions, &mut *daemon)
         .map_err(internal_error)?;
+    let session_memory_bytes = process_memory_bytes(&*daemon);
+    apply_process_memory(std::slice::from_mut(&mut info), &session_memory_bytes);
     Ok(Json(info))
 }
 
@@ -1341,11 +1376,15 @@ pub(crate) async fn stop_process(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> ApiResult<ProcessInfo> {
+    let definitions = discover_process_definitions(&state).map_err(internal_error)?;
     let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
     let mut daemon = state.daemon.lock().await;
-    let info = pm
-        .stop_process(&name, &mut *daemon)
+    let mut info = pm
+        .stop_process(&name, &definitions, &mut *daemon)
         .map_err(internal_error)?;
+    let session_memory_bytes = process_memory_bytes(&*daemon);
+    apply_process_memory(std::slice::from_mut(&mut info), &session_memory_bytes);
     Ok(Json(info))
 }
 
@@ -1353,11 +1392,15 @@ pub(crate) async fn restart_process(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> ApiResult<ProcessInfo> {
+    let definitions = discover_process_definitions(&state).map_err(internal_error)?;
     let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
     let mut daemon = state.daemon.lock().await;
-    let info = pm
-        .restart_process(&name, &mut *daemon)
+    let mut info = pm
+        .restart_process(&name, &definitions, &mut *daemon)
         .map_err(internal_error)?;
+    let session_memory_bytes = process_memory_bytes(&*daemon);
+    apply_process_memory(std::slice::from_mut(&mut info), &session_memory_bytes);
     Ok(Json(info))
 }
 
@@ -1378,7 +1421,8 @@ async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
 
     loop {
         match rx.recv().await {
-            Ok(event) => {
+            Ok(mut event) => {
+                enrich_process_event_memory(&state, &mut event).await;
                 if send_ws_json(&mut socket, &event).await.is_err() {
                     break;
                 }
@@ -1398,8 +1442,72 @@ async fn handle_process_status_ws(state: AppState, mut socket: WebSocket) {
 async fn process_status_snapshot_and_subscription(
     state: &AppState,
 ) -> (ProcessEvent, tokio::sync::broadcast::Receiver<ProcessEvent>) {
-    let pm = state.process_manager.lock().await;
-    (pm.snapshot_event(), pm.subscribe())
+    let definitions = discover_process_definitions(state).unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to discover process definitions for process WebSocket");
+        Vec::new()
+    });
+    let session_memory_bytes = collect_process_memory_bytes(state).await;
+    let mut pm = state.process_manager.lock().await;
+    pm.sync_definitions(&definitions);
+    let mut snapshot = pm.snapshot_event(&definitions);
+    apply_process_memory_to_event(&mut snapshot, &session_memory_bytes);
+    (snapshot, pm.subscribe())
+}
+
+fn discover_process_definitions(
+    state: &AppState,
+) -> Result<Vec<crate::process_manager::ProcessDefinition>, String> {
+    let roots = state
+        .repository_store
+        .load_roots()
+        .map_err(|error| format!("failed to load repository roots: {error}"))?;
+    let resolved = repository_store::resolve_repository_roots(roots);
+    Ok(crate::process_manager::discover_process_definitions_for_roots(&resolved))
+}
+
+async fn collect_process_memory_bytes(state: &AppState) -> HashMap<String, u64> {
+    let daemon = state.daemon.lock().await;
+    process_memory_bytes(&*daemon)
+}
+
+fn process_memory_bytes<D>(daemon: &D) -> HashMap<String, u64>
+where
+    D: TerminalDaemon,
+    D::Error: ToString,
+{
+    match crate::process_metrics::collect_session_memory_bytes(daemon) {
+        Ok(session_memory_bytes) => session_memory_bytes,
+        Err(error) => {
+            tracing::warn!(%error, "failed to collect process memory");
+            HashMap::new()
+        },
+    }
+}
+
+fn apply_process_memory(
+    processes: &mut [ProcessInfo],
+    session_memory_bytes: &HashMap<String, u64>,
+) {
+    crate::process_metrics::attach_process_memory(processes, session_memory_bytes);
+}
+
+async fn enrich_process_event_memory(state: &AppState, event: &mut ProcessEvent) {
+    let session_memory_bytes = collect_process_memory_bytes(state).await;
+    apply_process_memory_to_event(event, &session_memory_bytes);
+}
+
+fn apply_process_memory_to_event(
+    event: &mut ProcessEvent,
+    session_memory_bytes: &HashMap<String, u64>,
+) {
+    match event {
+        ProcessEvent::Snapshot { processes } => {
+            apply_process_memory(processes, session_memory_bytes);
+        },
+        ProcessEvent::Update { process } => {
+            apply_process_memory(std::slice::from_mut(process), session_memory_bytes);
+        },
+    }
 }
 
 // ── Log streaming ────────────────────────────────────────────────────

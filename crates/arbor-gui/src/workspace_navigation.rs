@@ -58,6 +58,367 @@ impl ArborWindow {
             })
     }
 
+    fn managed_process_session(
+        &self,
+        worktree_path: &Path,
+        process_id: &str,
+    ) -> Option<&TerminalSession> {
+        self.terminals.iter().find(|session| {
+            session.worktree_path.as_path() == worktree_path
+                && session.managed_process_id.as_deref() == Some(process_id)
+        })
+    }
+
+    fn start_managed_process_for_worktree(
+        &mut self,
+        worktree_index: usize,
+        process_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((worktree_path, process)) = self
+            .worktrees
+            .get(worktree_index)
+            .and_then(|worktree| {
+                worktree
+                    .managed_processes
+                    .iter()
+                    .find(|process| process.id == process_id)
+                    .cloned()
+                    .map(|process| (worktree.path.clone(), process))
+            })
+        else {
+            self.notice = Some(format!("managed process `{process_id}` not found"));
+            cx.notify();
+            return;
+        };
+
+        let session_id = self
+            .managed_process_session(&worktree_path, &process.id)
+            .map(|session| session.id)
+            .unwrap_or_else(|| self.spawn_managed_process_session(worktree_path, process, cx));
+
+        self.select_terminal(session_id, window, cx);
+        self.sync_daemon_session_store(cx);
+        cx.notify();
+    }
+
+    fn restart_managed_process_for_worktree(
+        &mut self,
+        worktree_index: usize,
+        process_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((worktree_path, process)) = self
+            .worktrees
+            .get(worktree_index)
+            .and_then(|worktree| {
+                worktree
+                    .managed_processes
+                    .iter()
+                    .find(|process| process.id == process_id)
+                    .cloned()
+                    .map(|process| (worktree.path.clone(), process))
+            })
+        else {
+            self.notice = Some(format!("managed process `{process_id}` not found"));
+            cx.notify();
+            return;
+        };
+
+        if let Some(session_id) = self
+            .managed_process_session(&worktree_path, &process.id)
+            .map(|session| session.id)
+        {
+            self.close_terminal_session_by_id(session_id);
+        }
+
+        let session_id = self.spawn_managed_process_session(worktree_path, process, cx);
+        self.select_terminal(session_id, window, cx);
+        self.sync_daemon_session_store(cx);
+        cx.notify();
+    }
+
+    fn stop_managed_process_for_worktree(
+        &mut self,
+        worktree_index: usize,
+        process_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree_path) = self
+            .worktrees
+            .get(worktree_index)
+            .map(|worktree| worktree.path.clone())
+        else {
+            return;
+        };
+
+        let Some(session_id) = self
+            .managed_process_session(&worktree_path, process_id)
+            .map(|session| session.id)
+        else {
+            return;
+        };
+
+        if self.close_terminal_session_by_id(session_id) {
+            self.sync_daemon_session_store(cx);
+            cx.notify();
+        }
+    }
+
+    fn spawn_managed_process_session(
+        &mut self,
+        worktree_path: PathBuf,
+        process: ManagedWorktreeProcess,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let session_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+        self.active_terminal_by_worktree
+            .insert(worktree_path.clone(), session_id);
+
+        let title = managed_process_title(&process.name);
+        let process_id = process.id.clone();
+        let process_name_for_spawn = process.name.clone();
+        let process_name_for_update = process.name.clone();
+        let process_command_for_spawn = process.command.clone();
+        let process_command_for_update = process.command.clone();
+        self.terminals.push(TerminalSession {
+            id: session_id,
+            daemon_session_id: session_id.to_string(),
+            worktree_path: worktree_path.clone(),
+            managed_process_id: Some(process_id),
+            title: title.clone(),
+            last_command: None,
+            pending_command: String::new(),
+            command: process_command_for_update.clone(),
+            agent_preset: None,
+            execution_mode: None,
+            state: TerminalState::Running,
+            exit_code: None,
+            updated_at_unix_ms: current_unix_timestamp_millis(),
+            root_pid: None,
+            cols: 120,
+            rows: 35,
+            generation: 0,
+            output: String::new(),
+            styled_output: Vec::new(),
+            cursor: None,
+            modes: TerminalModes::default(),
+            last_runtime_sync_at: None,
+            queued_input: Vec::new(),
+            is_initializing: true,
+            runtime: None,
+        });
+
+        let daemon = self.terminal_daemon.clone();
+        let shell = self.embedded_shell();
+        let poll_tx = self.terminal_poll_tx.clone();
+        cx.spawn(async move |this, cx| {
+            enum SpawnManagedProcessOutcome {
+                Daemon {
+                    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+                    record: DaemonSessionRecord,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
+                },
+                Embedded {
+                    runtime: EmbeddedTerminal,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
+                },
+                Failed {
+                    error: String,
+                    notice: Option<String>,
+                    clear_global_daemon: bool,
+                },
+            }
+
+            let outcome = cx
+                .background_spawn(async move {
+                    let mut fallback_notice = None;
+                    let mut clear_global_daemon = false;
+
+                    if let Some(daemon) = daemon {
+                        match daemon.create_or_attach(CreateOrAttachRequest {
+                            session_id: String::new().into(),
+                            workspace_id: worktree_path.display().to_string().into(),
+                            cwd: worktree_path.clone(),
+                            shell,
+                            cols: 120,
+                            rows: 35,
+                            title: Some(title.clone()),
+                            command: Some(process_command_for_spawn.clone()),
+                        }) {
+                            Ok(response) => {
+                                return SpawnManagedProcessOutcome::Daemon {
+                                    daemon,
+                                    record: response.session,
+                                    notice: None,
+                                    clear_global_daemon: false,
+                                };
+                            },
+                            Err(error) => {
+                                let error_text = error.to_string();
+                                tracing::warn!(
+                                    %error,
+                                    process = %process_name_for_spawn,
+                                    worktree = %worktree_path.display(),
+                                    "failed to create daemon-managed process session, falling back to embedded",
+                                );
+                                clear_global_daemon =
+                                    daemon_error_is_connection_refused(&error_text);
+                                if !clear_global_daemon {
+                                    fallback_notice = Some(format!(
+                                        "failed to create managed process in daemon (falling back to embedded): {error}",
+                                    ));
+                                }
+                            },
+                        }
+                    }
+
+                    match EmbeddedTerminal::spawn_command(
+                        &worktree_path,
+                        &process_command_for_spawn,
+                        35,
+                        120,
+                    )
+                    {
+                        Ok(runtime) => SpawnManagedProcessOutcome::Embedded {
+                            runtime,
+                            notice: fallback_notice,
+                            clear_global_daemon,
+                        },
+                        Err(error) => SpawnManagedProcessOutcome::Failed {
+                            error,
+                            notice: fallback_notice,
+                            clear_global_daemon,
+                        },
+                    }
+                })
+                .await;
+
+            let orphaned_daemon_session = match &outcome {
+                SpawnManagedProcessOutcome::Daemon { daemon, record, .. } => {
+                    Some((daemon.clone(), record.clone()))
+                },
+                _ => None,
+            };
+            let orphaned_daemon_session_for_update = orphaned_daemon_session.clone();
+
+            let updated = this.update(cx, |this, cx| {
+                let Some(session) = this
+                    .terminals
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    if let Some((daemon, record)) = orphaned_daemon_session_for_update {
+                        schedule_orphaned_daemon_session_cleanup(cx, daemon, record);
+                    }
+                    return;
+                };
+
+                match outcome {
+                    SpawnManagedProcessOutcome::Daemon {
+                        daemon,
+                        record,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.daemon_session_id = record.session_id.to_string();
+                        session.title = record
+                            .title
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| session.title.clone());
+                        session.command = process_command_for_update.clone();
+                        session.output = record.output_tail.clone().unwrap_or_default();
+                        session.state = terminal_state_from_daemon_record(&record);
+                        session.exit_code = record.exit_code;
+                        session.updated_at_unix_ms = record.updated_at_unix_ms;
+                        session.root_pid = record.root_pid;
+                        session.cols = record.cols.max(2);
+                        session.rows = record.rows.max(1);
+                        session.runtime = Some(local_daemon_runtime(
+                            daemon,
+                            record.session_id.to_string(),
+                            session.rows,
+                            session.cols,
+                            Some(poll_tx.clone()),
+                        ));
+                    },
+                    SpawnManagedProcessOutcome::Embedded {
+                        runtime,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.root_pid = runtime.root_pid();
+                        runtime.set_notify(poll_tx.clone());
+                        session.command = process_command_for_update.clone();
+                        session.generation = runtime.generation();
+                        session.runtime = Some(local_embedded_runtime(runtime));
+                        session.output.clear();
+                        session.styled_output.clear();
+                        session.cursor = None;
+                        session.exit_code = None;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                    },
+                    SpawnManagedProcessOutcome::Failed {
+                        error,
+                        notice,
+                        clear_global_daemon,
+                    } => {
+                        if clear_global_daemon {
+                            this.terminal_daemon = None;
+                        }
+                        if let Some(notice) = notice {
+                            this.notice = Some(notice);
+                        }
+                        session.command = process_command_for_update.clone();
+                        session.output = error.clone();
+                        session.styled_output.clear();
+                        session.cursor = None;
+                        session.state = TerminalState::Failed;
+                        session.updated_at_unix_ms = current_unix_timestamp_millis();
+                        this.notice = Some(format!(
+                            "managed process `{}` failed to start: {error}",
+                            process_name_for_update
+                        ));
+                    },
+                }
+
+                session.is_initializing = false;
+                if let Err(error) = this.flush_queued_input_for_terminal(session_id) {
+                    this.notice = Some(format!("failed to write queued terminal input: {error}"));
+                }
+                this.sync_daemon_session_store(cx);
+                cx.notify();
+            });
+
+            if updated.is_err()
+                && let Some((daemon, record)) = orphaned_daemon_session
+            {
+                schedule_orphaned_daemon_session_cleanup(cx, daemon, record);
+            }
+        })
+        .detach();
+
+        session_id
+    }
+
     fn active_terminal_id_for_selected_worktree(&self) -> Option<u64> {
         let worktree_path = self.selected_worktree_path()?;
         let is_outpost = self.active_outpost_index.is_some();

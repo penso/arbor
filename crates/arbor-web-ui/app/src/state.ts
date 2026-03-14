@@ -1,17 +1,17 @@
-import type { Repository, Worktree, TerminalSession, ChangedFile, ProcessInfo, AgentSession, AgentActivityWsEvent } from "./types";
-import { fetchRepositories, fetchWorktrees, fetchTerminals, fetchChangedFiles, fetchProcesses } from "./api";
+import type { Repository, Worktree, TerminalSession, ChangedFile, AgentSession, AgentActivityWsEvent, RightPaneTab } from "./types";
+import { fetchRepositories, fetchWorktrees, fetchTerminals, fetchChangedFiles } from "./api";
 
 export type AppState = {
   repositories: Repository[];
   worktrees: Worktree[];
   sessions: TerminalSession[];
   changedFiles: ChangedFile[];
-  processes: ProcessInfo[];
   agentSessions: AgentSession[];
 
   selectedRepoRoot: string | null;
   selectedWorktreePath: string | null;
   activeSessionId: string | null;
+  rightPaneTab: RightPaneTab;
 
   loading: boolean;
   error: string | null;
@@ -23,11 +23,11 @@ export function createInitialState(): AppState {
     worktrees: [],
     sessions: [],
     changedFiles: [],
-    processes: [],
     agentSessions: [],
     selectedRepoRoot: null,
     selectedWorktreePath: null,
     activeSessionId: null,
+    rightPaneTab: "changes",
     loading: true,
     error: null,
   };
@@ -63,11 +63,10 @@ export async function refresh(): Promise<void> {
   updateState({ loading: true, error: null });
 
   try {
-    const [repositories, worktrees, sessions, processes] = await Promise.all([
+    const [repositories, worktrees, sessions] = await Promise.all([
       fetchRepositories(),
       fetchWorktrees(),
       fetchTerminals(),
-      fetchProcesses().catch(() => [] as ProcessInfo[]),
     ]);
 
     // Validate selections still exist, auto-select on first load
@@ -129,7 +128,6 @@ export async function refresh(): Promise<void> {
       repositories,
       worktrees,
       sessions,
-      processes,
       selectedRepoRoot,
       selectedWorktreePath,
       activeSessionId,
@@ -186,6 +184,10 @@ export function selectWorktree(path: string | null): void {
 
 export function setActiveSession(sessionId: string | null): void {
   updateState({ activeSessionId: sessionId });
+}
+
+export function setRightPaneTab(tab: RightPaneTab): void {
+  updateState({ rightPaneTab: tab });
 }
 
 export function filteredSessions(): TerminalSession[] {

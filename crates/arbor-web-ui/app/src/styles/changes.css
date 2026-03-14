@@ -10,6 +10,43 @@
   flex-shrink: 0;
 }
 
+.changes-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface2);
+}
+
+.changes-tab-button {
+  flex: 1;
+  height: 30px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.changes-tab-button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.changes-tab-button.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-subtle, var(--bg-hover)) 70%, transparent);
+}
+
+.changes-pane-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .changes-header {
   display: flex;
   align-items: center;
@@ -41,6 +78,148 @@
   color: var(--text-faint);
   font-style: italic;
   text-align: center;
+}
+
+.procfile-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-family: var(--font-mono);
+}
+
+.procfile-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-surface2);
+}
+
+.procfile-card.is-openable {
+  cursor: pointer;
+}
+
+.procfile-card.is-openable:hover {
+  background: var(--bg-hover);
+}
+
+.procfile-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.process-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-green { background: var(--green); }
+.dot-yellow { background: var(--yellow, #e5c07b); }
+.dot-red { background: var(--red); }
+.dot-gray { background: var(--text-faint); }
+
+.procfile-card-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.procfile-line1 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.procfile-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.procfile-status,
+.procfile-source,
+.process-memory,
+.procfile-session {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+}
+
+.procfile-status-running {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 55%, var(--border));
+}
+
+.procfile-status-restarting {
+  color: var(--yellow, #e5c07b);
+  border-color: color-mix(in srgb, var(--yellow, #e5c07b) 55%, var(--border));
+}
+
+.procfile-status-crashed {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+}
+
+.procfile-line2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.procfile-command {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.process-restarts {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.procfile-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.process-action-btn {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  transition: background 0.12s;
+}
+
+.process-action-btn:hover {
+  background: var(--bg-hover);
 }
 
 .changes-list {

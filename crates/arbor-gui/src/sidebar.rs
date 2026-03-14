@@ -497,6 +497,7 @@ impl ArborWindow {
                                                 let attention = worktree_attention_indicator(&worktree);
                                                 let activity_sparkline = worktree_activity_sparkline(&worktree);
                                                 let detected_ports = worktree.detected_ports.clone();
+                                                let managed_process_count = worktree.managed_processes.len();
                                                 let agent_dot_color = match worktree.agent_state {
                                                     Some(AgentState::Working) => Some(0xe5c07b_u32),
                                                     Some(AgentState::Waiting) => Some(0x61afef_u32),
@@ -547,384 +548,421 @@ impl ArborWindow {
                                                         }
                                                     }))
                                                     // Bordered cell
-                                                    .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .rounded_sm()
-                                                        .border_1()
-                                                        .border_color(rgb(if is_active {
-                                                            theme.accent
-                                                        } else {
-                                                            theme.border
-                                                        }))
-                                                        .bg(rgb(theme.panel_bg))
-                                                        .px_2()
-                                                        .py(px(if compact_sidebar { 4. } else { 6. }))
-                                                        .flex()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap(px(4.))
-                                                        .hover(|this| {
-                                                            this.bg(rgb(theme.panel_active_bg))
-                                                        })
-                                                        .when(is_active, |this| {
-                                                            this.bg(rgb(theme.panel_active_bg))
-                                                                .border_color(rgb(theme.accent))
-                                                        })
-                                                        .when(is_merged_pr && !is_active, |this| {
-                                                            this.opacity(0.72)
-                                                        })
-                                                    // Git branch icon — vertically centered
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .w(px(18.))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .text_size(px(16.))
-                                                            .text_color(rgb(theme.text_muted))
-                                                            .child(worktree.checkout_kind.icon()),
-                                                    )
-                                                    // Two-line text column
-                                                    .child(
+                                                    .child({
                                                         div()
                                                             .flex_1()
                                                             .min_w_0()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(rgb(if is_active {
+                                                                theme.accent
+                                                            } else {
+                                                                theme.border
+                                                            }))
+                                                            .bg(rgb(theme.panel_bg))
+                                                            .px_2()
+                                                            .py(px(if compact_sidebar { 4. } else { 6. }))
                                                             .flex()
                                                             .flex_col()
-                                                            .gap(px(1.))
-                                                    // Line 1: [spinner] [name] ... [+- lines] [time ago]
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap(px(2.))
-                                                            // Activity spinner dot
-                                                            .when_some(agent_dot_color, |this, color| {
-                                                                this.child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .size(px(6.))
-                                                                        .rounded_full()
-                                                                        .bg(rgb(color)),
-                                                                )
+                                                            .gap(px(6.))
+                                                            .hover(|this| {
+                                                                this.bg(rgb(theme.panel_active_bg))
                                                             })
-                                                            .when(is_stuck, |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .text_xs()
-                                                                        .text_color(rgb(0xeb6f92))
-                                                                        .child("\u{f071}"),
-                                                                )
+                                                            .when(is_active, |this| {
+                                                                this.bg(rgb(theme.panel_active_bg))
+                                                                    .border_color(rgb(theme.accent))
                                                             })
-                                                            // Name/label
+                                                            .when(is_merged_pr && !is_active, |this| {
+                                                                this.opacity(0.72)
+                                                            })
                                                             .child(
                                                                 div()
-                                                                    .min_w_0()
-                                                                    .flex_1()
-                                                                    .overflow_hidden()
-                                                                    .whitespace_nowrap()
-                                                                    .text_ellipsis()
-                                                                    .text_xs()
-                                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                                    .text_color(rgb(theme.text_primary))
-                                                                    .child(if compact_sidebar {
-                                                                        format!(
-                                                                            "{} · {}",
-                                                                            worktree.label,
-                                                                            worktree.branch
-                                                                        )
-                                                                    } else {
-                                                                        worktree.branch.clone()
-                                                                    }),
-                                                            )
-                                                            // Right side: [+- lines] [time ago]
-                                                            .child({
-                                                                let summary =
-                                                                    diff_summary.unwrap_or_default();
-                                                                let show_diff_summary =
-                                                                    summary.additions > 0
-                                                                        || summary.deletions > 0;
-                                                                let mut right = div()
-                                                                    .flex_none()
                                                                     .flex()
+                                                                    .flex_row()
                                                                     .items_center()
-                                                                    .gap_1();
-
-                                                                if compact_sidebar {
-                                                                    right = right.child(
+                                                                    .gap(px(4.))
+                                                                    .child(
                                                                         div()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(attention.color))
-                                                                            .child(attention.short_label),
-                                                                    );
-                                                                }
-
-                                                                if self.worktree_stats_loading
-                                                                    && diff_summary.is_none()
-                                                                    && !compact_sidebar
-                                                                {
-                                                                    right = right.child(
+                                                                            .flex_none()
+                                                                            .w(px(18.))
+                                                                            .flex()
+                                                                            .items_center()
+                                                                            .justify_center()
+                                                                            .text_size(px(16.))
+                                                                            .text_color(rgb(theme.text_muted))
+                                                                            .child(worktree.checkout_kind.icon()),
+                                                                    )
+                                                                    .child(
                                                                         div()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(
-                                                                                theme.text_muted,
-                                                                            ))
-                                                                            .child("..."),
-                                                                    );
-                                                                } else if show_diff_summary
-                                                                    && !compact_sidebar
-                                                                {
-                                                                    if summary.additions > 0 {
-                                                                        right = right.child(
-                                                                            div()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    0x72d69c,
-                                                                                ))
-                                                                                .child(format!(
-                                                                                    "+{}",
-                                                                                    summary
-                                                                                        .additions
-                                                                                )),
-                                                                        );
-                                                                    }
-                                                                    if summary.deletions > 0 {
-                                                                        right = right.child(
-                                                                            div()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    0xeb6f92,
-                                                                                ))
-                                                                                .child(format!(
-                                                                                    "-{}",
-                                                                                    summary
-                                                                                        .deletions
-                                                                                )),
-                                                                        );
-                                                                    }
-                                                                }
+                                                                            .flex_1()
+                                                                            .min_w_0()
+                                                                            .flex()
+                                                                            .flex_col()
+                                                                            .gap(px(1.))
+                                                                            .child(
+                                                                                div()
+                                                                                    .flex()
+                                                                                    .items_center()
+                                                                                    .gap(px(2.))
+                                                                                    .when_some(agent_dot_color, |this, color| {
+                                                                                        this.child(
+                                                                                            div()
+                                                                                                .flex_none()
+                                                                                                .size(px(6.))
+                                                                                                .rounded_full()
+                                                                                                .bg(rgb(color)),
+                                                                                        )
+                                                                                    })
+                                                                                    .when(is_stuck, |this| {
+                                                                                        this.child(
+                                                                                            div()
+                                                                                                .flex_none()
+                                                                                                .text_xs()
+                                                                                                .text_color(rgb(0xeb6f92))
+                                                                                                .child("\u{f071}"),
+                                                                                        )
+                                                                                    })
+                                                                                    .child(
+                                                                                        div()
+                                                                                            .min_w_0()
+                                                                                            .flex_1()
+                                                                                            .overflow_hidden()
+                                                                                            .whitespace_nowrap()
+                                                                                            .text_ellipsis()
+                                                                                            .text_xs()
+                                                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                                                            .text_color(rgb(theme.text_primary))
+                                                                                            .child(if compact_sidebar {
+                                                                                                format!(
+                                                                                                    "{} · {}",
+                                                                                                    worktree.label,
+                                                                                                    worktree.branch
+                                                                                                )
+                                                                                            } else {
+                                                                                                worktree.branch.clone()
+                                                                                            }),
+                                                                                    )
+                                                                                    .child({
+                                                                                        let summary =
+                                                                                            diff_summary.unwrap_or_default();
+                                                                                        let show_diff_summary =
+                                                                                            summary.additions > 0
+                                                                                                || summary.deletions > 0;
+                                                                                        let mut right = div()
+                                                                                            .flex_none()
+                                                                                            .flex()
+                                                                                            .items_center()
+                                                                                            .gap_1();
 
-                                                                if let Some(activity_ms) = worktree.last_activity_unix_ms {
-                                                                    right = right.child(
-                                                                        div()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(
-                                                                                theme.text_disabled,
-                                                                            ))
-                                                                            .child(format_relative_time(activity_ms)),
-                                                                    );
-                                                                }
+                                                                                        if compact_sidebar {
+                                                                                            right = right.child(
+                                                                                                div()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(attention.color))
+                                                                                                    .child(attention.short_label),
+                                                                                            );
+                                                                                        }
 
-                                                                if let Some(divergence) = branch_divergence
-                                                                    && !compact_sidebar
-                                                                {
-                                                                    if divergence.ahead > 0 {
-                                                                        right = right.child(
-                                                                            div()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(0x72d69c))
-                                                                                .child(format!(
-                                                                                    "\u{2191}{}",
-                                                                                    divergence.ahead
-                                                                                )),
-                                                                        );
-                                                                    }
-                                                                    if divergence.behind > 0 {
-                                                                        right = right.child(
-                                                                            div()
-                                                                                .text_xs()
-                                                                                .text_color(rgb(0xe5c07b))
-                                                                                .child(format!(
-                                                                                    "\u{2193}{}",
-                                                                                    divergence.behind
-                                                                                )),
-                                                                        );
-                                                                    }
-                                                                }
-                                                                right
-                                                            }),
-                                                    )
-                                                    // Line 2: [agent task or dir name] ... [PR number]
-                                                    .when(!compact_sidebar, |this| this.child(
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .flex_1()
-                                                                    .overflow_hidden()
-                                                                    .whitespace_nowrap()
-                                                                    .text_ellipsis()
-                                                                    .text_xs()
-                                                                    .text_color(rgb(theme.text_disabled))
-                                                                    .child({
-                                                                        let task_or_label = worktree
-                                                                            .agent_task
-                                                                            .clone()
-                                                                            .unwrap_or_else(|| worktree.label.clone());
-                                                                        if activity_sparkline.is_empty() {
-                                                                            format!(
-                                                                                "{} · {}",
-                                                                                attention.label,
-                                                                                task_or_label
+                                                                                        if self.worktree_stats_loading
+                                                                                            && diff_summary.is_none()
+                                                                                            && !compact_sidebar
+                                                                                        {
+                                                                                            right = right.child(
+                                                                                                div()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(
+                                                                                                        theme.text_muted,
+                                                                                                    ))
+                                                                                                    .child("..."),
+                                                                                            );
+                                                                                        } else if show_diff_summary
+                                                                                            && !compact_sidebar
+                                                                                        {
+                                                                                            if summary.additions > 0 {
+                                                                                                right = right.child(
+                                                                                                    div()
+                                                                                                        .text_xs()
+                                                                                                        .text_color(rgb(
+                                                                                                            0x72d69c,
+                                                                                                        ))
+                                                                                                        .child(format!(
+                                                                                                            "+{}",
+                                                                                                            summary
+                                                                                                                .additions
+                                                                                                        )),
+                                                                                                );
+                                                                                            }
+                                                                                            if summary.deletions > 0 {
+                                                                                                right = right.child(
+                                                                                                    div()
+                                                                                                        .text_xs()
+                                                                                                        .text_color(rgb(
+                                                                                                            0xeb6f92,
+                                                                                                        ))
+                                                                                                        .child(format!(
+                                                                                                            "-{}",
+                                                                                                            summary
+                                                                                                                .deletions
+                                                                                                        )),
+                                                                                                );
+                                                                                            }
+                                                                                        }
+
+                                                                                        if let Some(activity_ms) = worktree.last_activity_unix_ms {
+                                                                                            right = right.child(
+                                                                                                div()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(
+                                                                                                        theme.text_disabled,
+                                                                                                    ))
+                                                                                                    .child(format_relative_time(activity_ms)),
+                                                                                            );
+                                                                                        }
+
+                                                                                        if let Some(divergence) = branch_divergence
+                                                                                            && !compact_sidebar
+                                                                                        {
+                                                                                            if divergence.ahead > 0 {
+                                                                                                right = right.child(
+                                                                                                    div()
+                                                                                                        .text_xs()
+                                                                                                        .text_color(rgb(0x72d69c))
+                                                                                                        .child(format!(
+                                                                                                            "\u{2191}{}",
+                                                                                                            divergence.ahead
+                                                                                                        )),
+                                                                                                );
+                                                                                            }
+                                                                                            if divergence.behind > 0 {
+                                                                                                right = right.child(
+                                                                                                    div()
+                                                                                                        .text_xs()
+                                                                                                        .text_color(rgb(0xe5c07b))
+                                                                                                        .child(format!(
+                                                                                                            "\u{2193}{}",
+                                                                                                            divergence.behind
+                                                                                                        )),
+                                                                                                );
+                                                                                            }
+                                                                                        }
+                                                                                        right
+                                                                                    }),
                                                                             )
-                                                                        } else {
-                                                                            format!(
-                                                                                "{} {} · {}",
-                                                                                attention.label,
-                                                                                activity_sparkline,
-                                                                                task_or_label
-                                                                            )
-                                                                        }
-                                                                    }),
+                                                                            .when(!compact_sidebar, |this| this.child(
+                                                                                div()
+                                                                                    .flex()
+                                                                                    .items_center()
+                                                                                    .gap_2()
+                                                                                    .child(
+                                                                                        div()
+                                                                                            .min_w_0()
+                                                                                            .flex_1()
+                                                                                            .overflow_hidden()
+                                                                                            .whitespace_nowrap()
+                                                                                            .text_ellipsis()
+                                                                                            .text_xs()
+                                                                                            .text_color(rgb(theme.text_disabled))
+                                                                                            .child({
+                                                                                                let task_or_label = worktree
+                                                                                                    .agent_task
+                                                                                                    .clone()
+                                                                                                    .unwrap_or_else(|| worktree.label.clone());
+                                                                                                if activity_sparkline.is_empty() {
+                                                                                                    format!(
+                                                                                                        "{} · {}",
+                                                                                                        attention.label,
+                                                                                                        task_or_label
+                                                                                                    )
+                                                                                                } else {
+                                                                                                    format!(
+                                                                                                        "{} {} · {}",
+                                                                                                        attention.label,
+                                                                                                        activity_sparkline,
+                                                                                                        task_or_label
+                                                                                                    )
+                                                                                                }
+                                                                                            }),
+                                                                                    )
+                                                                                    .when_some(pr_details.clone(), |this, pr| {
+                                                                                        let (checks_icon, checks_color) = match pr.checks_status {
+                                                                                            github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
+                                                                                            github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
+                                                                                            github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
+                                                                                        };
+                                                                                        let (review_icon, _, review_color) =
+                                                                                            review_status_presentation(
+                                                                                                pr.review_decision,
+                                                                                            );
+
+                                                                                        let mut badges = this.child(
+                                                                                            div()
+                                                                                                .flex_none()
+                                                                                                .text_xs()
+                                                                                                .text_color(rgb(checks_color))
+                                                                                                .child(checks_icon),
+                                                                                        ).child(
+                                                                                            div()
+                                                                                                .flex_none()
+                                                                                                .text_xs()
+                                                                                                .text_color(rgb(review_color))
+                                                                                                .child(review_icon),
+                                                                                        );
+
+                                                                                        if pr.additions > 0 {
+                                                                                            badges = badges.child(
+                                                                                                div()
+                                                                                                    .flex_none()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(0x72d69c))
+                                                                                                    .child(format!("+{}", pr.additions)),
+                                                                                            );
+                                                                                        }
+                                                                                        if pr.deletions > 0 {
+                                                                                            badges = badges.child(
+                                                                                                div()
+                                                                                                    .flex_none()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(0xeb6f92))
+                                                                                                    .child(format!("-{}", pr.deletions)),
+                                                                                            );
+                                                                                        }
+
+                                                                                        let mut badges = badges;
+                                                                                        for port in detected_ports.iter().take(2) {
+                                                                                            let port_url = worktree_port_url(port);
+                                                                                            let port_id = format!(
+                                                                                                "worktree-port-link-{index}-{}",
+                                                                                                port.port
+                                                                                            );
+                                                                                            badges = badges.child(
+                                                                                                div()
+                                                                                                    .id(ElementId::Name(
+                                                                                                        port_id.into(),
+                                                                                                    ))
+                                                                                                    .cursor_pointer()
+                                                                                                    .flex_none()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(0x72d69c))
+                                                                                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                                                                                                    .child(worktree_port_badge_text(port))
+                                                                                                    .on_click(cx.listener(
+                                                                                                        move |this, _, _, cx| {
+                                                                                                            this.open_external_url(
+                                                                                                                &port_url,
+                                                                                                                cx,
+                                                                                                            );
+                                                                                                            cx.stop_propagation();
+                                                                                                        },
+                                                                                                    )),
+                                                                                            );
+                                                                                        }
+
+                                                                                        badges
+                                                                                    })
+                                                                                    .when_some(pr_number, |this, pr_num| {
+                                                                                        let pr_text = format!("#{pr_num}");
+                                                                                        if let Some(pr_url) = pr_url.clone() {
+                                                                                            this.child(
+                                                                                                div()
+                                                                                                    .id(("worktree-pr-link", index))
+                                                                                                    .cursor_pointer()
+                                                                                                    .flex_none()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(pr_badge_color))
+                                                                                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                                                                                                    .child(pr_text)
+                                                                                                    .on_click(cx.listener(
+                                                                                                        move |this, _, _, cx| {
+                                                                                                            this.open_external_url(
+                                                                                                                &pr_url,
+                                                                                                                cx,
+                                                                                                            );
+                                                                                                            cx.stop_propagation();
+                                                                                                        },
+                                                                                                    )),
+                                                                                            )
+                                                                                        } else {
+                                                                                            this.child(
+                                                                                                div()
+                                                                                                    .flex_none()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(pr_badge_color))
+                                                                                                    .child(pr_text),
+                                                                                            )
+                                                                                        }
+                                                                                    })
+                                                                                    .when(pr_details.is_none() && !detected_ports.is_empty(), |this| {
+                                                                                        detected_ports.iter().take(2).fold(this, |this, port| {
+                                                                                            let port_url = worktree_port_url(port);
+                                                                                            let port_id = format!(
+                                                                                                "worktree-port-link-{index}-{}",
+                                                                                                port.port
+                                                                                            );
+                                                                                            this.child(
+                                                                                                div()
+                                                                                                    .id(ElementId::Name(
+                                                                                                        port_id.into(),
+                                                                                                    ))
+                                                                                                    .cursor_pointer()
+                                                                                                    .flex_none()
+                                                                                                    .text_xs()
+                                                                                                    .text_color(rgb(0x72d69c))
+                                                                                                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                                                                                                    .child(worktree_port_badge_text(port))
+                                                                                                    .on_click(cx.listener(
+                                                                                                        move |this, _, _, cx| {
+                                                                                                            this.open_external_url(
+                                                                                                                &port_url,
+                                                                                                                cx,
+                                                                                                            );
+                                                                                                            cx.stop_propagation();
+                                                                                                        },
+                                                                                                    )),
+                                                                                            )
+                                                                                        })
+                                                                                    })
+                                                                                    .when(managed_process_count > 0, |this| {
+                                                                                        this.child(
+                                                                                            div()
+                                                                                                .id(("worktree-procfile-tab", index))
+                                                                                                .cursor_pointer()
+                                                                                                .flex_none()
+                                                                                                .rounded_sm()
+                                                                                                .border_1()
+                                                                                                .border_color(rgb(theme.border))
+                                                                                                .px_1()
+                                                                                                .text_xs()
+                                                                                                .text_color(rgb(theme.text_muted))
+                                                                                                .hover(|this| {
+                                                                                                    this.bg(rgb(theme.panel_active_bg))
+                                                                                                        .text_color(rgb(theme.text_primary))
+                                                                                                })
+                                                                                                .child(if managed_process_count == 1 {
+                                                                                                    "Procfile".to_owned()
+                                                                                                } else {
+                                                                                                    format!("Procfile {managed_process_count}")
+                                                                                                })
+                                                                                                .on_click(cx.listener(
+                                                                                                    move |this, _, window, cx| {
+                                                                                                        this.select_worktree(
+                                                                                                            index,
+                                                                                                            window,
+                                                                                                            cx,
+                                                                                                        );
+                                                                                                        this.set_right_pane_tab(
+                                                                                                            RightPaneTab::Procfile,
+                                                                                                            cx,
+                                                                                                        );
+                                                                                                        cx.stop_propagation();
+                                                                                                    },
+                                                                                                )),
+                                                                                        )
+                                                                                    }),
+                                                                            )),
+                                                                    ),
                                                             )
-                                                            .when_some(pr_details.clone(), |this, pr| {
-                                                                let (checks_icon, checks_color) = match pr.checks_status {
-                                                                    github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
-                                                                    github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
-                                                                    github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
-                                                                };
-                                                                let (review_icon, _, review_color) =
-                                                                    review_status_presentation(
-                                                                        pr.review_decision,
-                                                                    );
-
-                                                                let mut badges = this.child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .text_xs()
-                                                                        .text_color(rgb(checks_color))
-                                                                        .child(checks_icon),
-                                                                ).child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .text_xs()
-                                                                        .text_color(rgb(review_color))
-                                                                        .child(review_icon),
-                                                                );
-
-                                                                if pr.additions > 0 {
-                                                                    badges = badges.child(
-                                                                        div()
-                                                                            .flex_none()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(0x72d69c))
-                                                                            .child(format!("+{}", pr.additions)),
-                                                                    );
-                                                                }
-                                                                if pr.deletions > 0 {
-                                                                    badges = badges.child(
-                                                                        div()
-                                                                            .flex_none()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(0xeb6f92))
-                                                                            .child(format!("-{}", pr.deletions)),
-                                                                    );
-                                                                }
-
-                                                                let mut badges = badges;
-                                                                for port in detected_ports.iter().take(2) {
-                                                                    let port_url = worktree_port_url(port);
-                                                                    let port_id = format!(
-                                                                        "worktree-port-link-{index}-{}",
-                                                                        port.port
-                                                                    );
-                                                                    badges = badges.child(
-                                                                        div()
-                                                                            .id(ElementId::Name(
-                                                                                port_id.into(),
-                                                                            ))
-                                                                            .cursor_pointer()
-                                                                            .flex_none()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(0x72d69c))
-                                                                            .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                                                            .child(worktree_port_badge_text(port))
-                                                                            .on_click(cx.listener(
-                                                                                move |this, _, _, cx| {
-                                                                                    this.open_external_url(
-                                                                                        &port_url,
-                                                                                        cx,
-                                                                                    );
-                                                                                    cx.stop_propagation();
-                                                                                },
-                                                                            )),
-                                                                    );
-                                                                }
-
-                                                                badges
-                                                            })
-                                                            .when_some(pr_number, |this, pr_num| {
-                                                                let pr_text = format!("#{pr_num}");
-                                                                if let Some(pr_url) = pr_url.clone() {
-                                                                    this.child(
-                                                                        div()
-                                                                            .id(("worktree-pr-link", index))
-                                                                            .cursor_pointer()
-                                                                            .flex_none()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(pr_badge_color))
-                                                                            .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                                                            .child(pr_text)
-                                                                            .on_click(cx.listener(
-                                                                                move |this, _, _, cx| {
-                                                                                    this.open_external_url(
-                                                                                        &pr_url,
-                                                                                        cx,
-                                                                                    );
-                                                                                    cx.stop_propagation();
-                                                                                },
-                                                                            )),
-                                                                    )
-                                                                } else {
-                                                                    this.child(
-                                                                        div()
-                                                                            .flex_none()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(pr_badge_color))
-                                                                            .child(pr_text),
-                                                                    )
-                                                                }
-                                                            })
-                                                            .when(pr_details.is_none() && !detected_ports.is_empty(), |this| {
-                                                                detected_ports.iter().take(2).fold(this, |this, port| {
-                                                                    let port_url = worktree_port_url(port);
-                                                                    let port_id = format!(
-                                                                        "worktree-port-link-{index}-{}",
-                                                                        port.port
-                                                                    );
-                                                                    this.child(
-                                                                        div()
-                                                                            .id(ElementId::Name(
-                                                                                port_id.into(),
-                                                                            ))
-                                                                            .cursor_pointer()
-                                                                            .flex_none()
-                                                                            .text_xs()
-                                                                            .text_color(rgb(0x72d69c))
-                                                                            .hover(|this| this.text_color(rgb(theme.text_primary)))
-                                                                            .child(worktree_port_badge_text(port))
-                                                                            .on_click(cx.listener(
-                                                                                move |this, _, _, cx| {
-                                                                                    this.open_external_url(
-                                                                                        &port_url,
-                                                                                        cx,
-                                                                                    );
-                                                                                    cx.stop_propagation();
-                                                                                },
-                                                                            )),
-                                                                    )
-                                                                })
-                                                            }),
-                                                    ))
-                                                    ) // text column
-                                                    ); // bordered cell
+                                                    })
+                                                    ; // bordered cell
                                                 if is_active {
                                                     row.with_animation(
                                                         ("worktree-select", selection_epoch),

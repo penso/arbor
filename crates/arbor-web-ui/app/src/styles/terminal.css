@@ -119,6 +119,8 @@
   padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  -webkit-appearance: none;
+  appearance: none;
   background: none;
   color: var(--text-muted);
   font-family: var(--font-body);
@@ -171,6 +173,18 @@
   background: var(--bg-hover);
   color: var(--text);
   border-color: var(--border-strong);
+}
+
+.preset-btn:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.preset-btn:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .terminal-add-btn {

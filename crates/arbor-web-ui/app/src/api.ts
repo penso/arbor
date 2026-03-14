@@ -7,6 +7,7 @@ import type {
   ChangeKind,
   ProcessInfo,
   ProcessStatus,
+  ProcessSource,
   WsServerEvent,
   WsClientEvent,
 } from "./types";
@@ -29,6 +30,13 @@ function readBoolean(value: unknown): boolean | null {
 
 function parseTerminalState(value: unknown): TerminalState | null {
   if (value === "running" || value === "completed" || value === "failed") {
+    return value;
+  }
+  return null;
+}
+
+function parseProcessSource(value: unknown): ProcessSource | null {
+  if (value === "arbor-toml" || value === "procfile") {
     return value;
   }
   return null;
@@ -104,6 +112,11 @@ export async function fetchWorktrees(repoRoot?: string): Promise<Worktree[]> {
         diff_deletions: readNumber(item["diff_deletions"]),
         pr_number: readNumber(item["pr_number"]),
         pr_url: readString(item["pr_url"]),
+        processes: Array.isArray(item["processes"])
+          ? item["processes"]
+            .map((process) => parseProcessInfo(process))
+            .filter((process): process is ProcessInfo => process !== null)
+          : [],
       });
     }
   }
@@ -278,32 +291,33 @@ function parseProcessStatus(value: unknown): ProcessStatus | null {
 
 function parseProcessInfo(item: unknown): ProcessInfo | null {
   if (!isRecord(item)) return null;
+  const id = readString(item["id"]);
   const name = readString(item["name"]);
   const command = readString(item["command"]);
+  const repoRoot = readString(item["repo_root"]);
+  const workspaceId = readString(item["workspace_id"]);
+  const source = parseProcessSource(item["source"]);
   const status = parseProcessStatus(item["status"]);
   const restartCount = readNumber(item["restart_count"]);
-  if (name === null || command === null || status === null || restartCount === null) {
+  if (
+    id === null || name === null || command === null || repoRoot === null ||
+    workspaceId === null || source === null || status === null || restartCount === null
+  ) {
     return null;
   }
   return {
+    id,
     name,
     command,
+    repo_root: repoRoot,
+    workspace_id: workspaceId,
+    source,
     status,
     exit_code: readNumber(item["exit_code"]),
     restart_count: restartCount,
+    memory_bytes: readNumber(item["memory_bytes"]),
     session_id: readString(item["session_id"]),
   };
-}
-
-export async function fetchProcesses(): Promise<ProcessInfo[]> {
-  const raw = await fetchJson("/api/v1/processes");
-  if (!Array.isArray(raw)) throw new Error("processes payload is not an array");
-  const processes: ProcessInfo[] = [];
-  for (const item of raw) {
-    const info = parseProcessInfo(item);
-    if (info !== null) processes.push(info);
-  }
-  return processes;
 }
 
 async function postProcessAction(url: string): Promise<void> {
@@ -320,22 +334,14 @@ async function postProcessAction(url: string): Promise<void> {
   }
 }
 
-export async function startAllProcesses(): Promise<void> {
-  await postProcessAction("/api/v1/processes/start-all");
+export async function startProcess(id: string): Promise<void> {
+  await postProcessAction(`/api/v1/processes/${encodeURIComponent(id)}/start`);
 }
 
-export async function stopAllProcesses(): Promise<void> {
-  await postProcessAction("/api/v1/processes/stop-all");
+export async function stopProcess(id: string): Promise<void> {
+  await postProcessAction(`/api/v1/processes/${encodeURIComponent(id)}/stop`);
 }
 
-export async function startProcess(name: string): Promise<void> {
-  await postProcessAction(`/api/v1/processes/${encodeURIComponent(name)}/start`);
-}
-
-export async function stopProcess(name: string): Promise<void> {
-  await postProcessAction(`/api/v1/processes/${encodeURIComponent(name)}/stop`);
-}
-
-export async function restartProcess(name: string): Promise<void> {
-  await postProcessAction(`/api/v1/processes/${encodeURIComponent(name)}/restart`);
+export async function restartProcess(id: string): Promise<void> {
+  await postProcessAction(`/api/v1/processes/${encodeURIComponent(id)}/restart`);
 }

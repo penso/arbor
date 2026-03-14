@@ -15,6 +15,13 @@ This file defines how coding agents should behave in this repository.
 3. Before committing code, always run `just format` and `just lint` and fix any failures.
 4. Before handoff, run relevant checks for touched code.
 
+## UI Parity
+
+- Arbor has two user-facing UI surfaces: `arbor-gui` and `arbor-web-ui`.
+- When adding, changing, or removing a user-visible feature in one surface, check whether the other surface needs the same capability.
+- Default to keeping both surfaces in parity. If parity is intentionally deferred, call that out clearly in the handoff and create follow-up work instead of silently shipping only one side.
+- UI verification should cover both surfaces when the feature is meant to exist in both.
+
 ## GPUI Threading Rules
 
 - Treat the GPUI app/window/entity context as the UI thread unless you have explicitly moved work off it.

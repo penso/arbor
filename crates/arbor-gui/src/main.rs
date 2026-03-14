@@ -26,7 +26,7 @@ use {
             self, CreateOrAttachRequest, DaemonSessionRecord, DetachRequest, KillRequest,
             ResizeRequest, SignalRequest, TerminalSessionState, TerminalSignal, WriteRequest,
         },
-        worktree,
+        procfile, worktree,
         worktree_scripts::{WorktreeScriptContext, WorktreeScriptPhase, run_worktree_scripts},
     },
     checkout::CheckoutKind,
@@ -94,6 +94,8 @@ include!("github_auth_modal.rs");
 include!("github_helpers.rs");
 include!("github_oauth.rs");
 include!("app_bootstrap.rs");
+
+const MANAGED_PROCESS_TITLE_PREFIX: &str = "[Procfile] ";
 
 impl ArborWindow {
     fn load_with_daemon_store<S>(
@@ -1651,6 +1653,7 @@ impl ArborWindow {
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| format!("term-{}", self.next_terminal_id));
+            let managed_process_id = managed_process_id_from_title(&worktree_path, &title);
             let command = record.shell.clone();
             let output = record.output_tail.clone().unwrap_or_default();
             let cols = record.cols.max(2);
@@ -1667,6 +1670,10 @@ impl ArborWindow {
                 }
                 if session.title != title {
                     session.title = title.clone();
+                    changed = true;
+                }
+                if session.managed_process_id != managed_process_id {
+                    session.managed_process_id = managed_process_id.clone();
                     changed = true;
                 }
                 if session.command != command {
@@ -1718,6 +1725,7 @@ impl ArborWindow {
                     id: session_id,
                     daemon_session_id: record.session_id.to_string(),
                     worktree_path: worktree_path.clone(),
+                    managed_process_id,
                     title,
                     last_command: record.last_command.clone(),
                     pending_command: String::new(),
@@ -3637,6 +3645,7 @@ impl ArborWindow {
             id: session_id,
             daemon_session_id: session_id.to_string(),
             worktree_path: cwd.clone(),
+            managed_process_id: None,
             title: title.clone(),
             last_command: None,
             pending_command: String::new(),
@@ -3998,6 +4007,7 @@ impl ArborWindow {
             id: session_id,
             daemon_session_id: session_id.to_string(),
             worktree_path,
+            managed_process_id: None,
             title,
             last_command: None,
             pending_command: String::new(),
@@ -4431,6 +4441,7 @@ impl WorktreeSummary {
         let is_primary_checkout = entry.path.as_path() == repo_root;
 
         let last_activity_unix_ms = worktree::last_git_activity_ms(&entry.path);
+        let managed_processes = managed_processes_for_worktree(&entry.path);
 
         Self {
             group_key: group_key.to_owned(),
@@ -4446,6 +4457,7 @@ impl WorktreeSummary {
             branch_divergence: branch_divergence_summary(&entry.path),
             diff_summary: None,
             detected_ports: Vec::new(),
+            managed_processes,
             recent_turns: Vec::new(),
             stuck_turn_count: 0,
             recent_agent_sessions: Vec::new(),
@@ -5495,7 +5507,42 @@ fn worktree_rows_changed(previous: &[WorktreeSummary], next: &[WorktreeSummary])
             || left.is_primary_checkout != right.is_primary_checkout
             || left.branch_divergence != right.branch_divergence
             || left.detected_ports != right.detected_ports
+            || left.managed_processes != right.managed_processes
     })
+}
+
+fn managed_processes_for_worktree(worktree_path: &Path) -> Vec<ManagedWorktreeProcess> {
+    match procfile::read_procfile(worktree_path) {
+        Ok(Some(entries)) => entries
+            .into_iter()
+            .map(|entry| ManagedWorktreeProcess {
+                id: managed_process_id(worktree_path, &entry.name),
+                name: entry.name,
+                command: entry.command,
+            })
+            .collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(path = %worktree_path.display(), %error, "failed to read Procfile");
+            Vec::new()
+        },
+    }
+}
+
+fn managed_process_id(worktree_path: &Path, process_name: &str) -> String {
+    format!("procfile:{}:{process_name}", worktree_path.display())
+}
+
+fn managed_process_title(process_name: &str) -> String {
+    format!("{MANAGED_PROCESS_TITLE_PREFIX}{process_name}")
+}
+
+fn managed_process_id_from_title(worktree_path: &Path, title: &str) -> Option<String> {
+    title
+        .strip_prefix(MANAGED_PROCESS_TITLE_PREFIX)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| managed_process_id(worktree_path, name))
 }
 
 fn next_active_worktree_index(
@@ -8052,6 +8099,7 @@ mod tests {
             id: 1,
             daemon_session_id: "daemon-test-1".to_owned(),
             worktree_path: PathBuf::from("/tmp/worktree"),
+            managed_process_id: None,
             title: "term-1".to_owned(),
             last_command: None,
             pending_command: String::new(),
@@ -8110,6 +8158,7 @@ mod tests {
                 deletions: 1,
             }),
             detected_ports: vec![],
+            managed_processes: vec![],
             recent_turns: vec![],
             stuck_turn_count: 0,
             recent_agent_sessions: vec![],

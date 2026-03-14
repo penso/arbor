@@ -4,11 +4,15 @@ impl ArborWindow {
         let content: Div = match self.right_pane_tab {
             RightPaneTab::Changes => self.render_changes_content(cx),
             RightPaneTab::FileTree => self.render_file_tree(cx),
+            RightPaneTab::Procfile => self.render_procfile_content(cx),
             RightPaneTab::Notes => self.render_notes_content(cx),
         };
         let search_active = self.right_pane_search_active;
         let search_text = self.right_pane_search.clone();
-        let show_search = self.right_pane_tab != RightPaneTab::Notes;
+        let show_search = matches!(
+            self.right_pane_tab,
+            RightPaneTab::Changes | RightPaneTab::FileTree
+        );
 
         div()
             .w(px(self.right_pane_width))
@@ -143,6 +147,7 @@ impl ArborWindow {
             .border_color(rgb(theme.border))
             .child(tab_button("Changes", RightPaneTab::Changes))
             .child(tab_button("Files", RightPaneTab::FileTree))
+            .child(tab_button("Procfile", RightPaneTab::Procfile))
             .child(tab_button("Notes", RightPaneTab::Notes))
     }
 
@@ -516,6 +521,291 @@ impl ArborWindow {
                             )),
                     ),
             )
+    }
+
+    fn render_procfile_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme();
+
+        let Some(worktree) = self.active_worktree().cloned() else {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(theme.text_muted))
+                        .child("Procfile commands are available for local worktrees."),
+                );
+        };
+
+        if worktree.managed_processes.is_empty() {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(theme.text_muted))
+                        .child("No Procfile commands for this worktree."),
+                );
+        }
+
+        let running_count = worktree
+            .managed_processes
+            .iter()
+            .filter(|process| {
+                self.managed_process_session(&worktree.path, &process.id)
+                    .is_some_and(|session| {
+                        session.is_initializing || session.state == TerminalState::Running
+                    })
+            })
+            .count();
+        let mut meta = Vec::new();
+        if running_count > 0 {
+            meta.push(format!("{running_count} running"));
+        }
+        meta.push(format!(
+            "{} {}",
+            worktree.managed_processes.len(),
+            if worktree.managed_processes.len() == 1 {
+                "command"
+            } else {
+                "commands"
+            }
+        ));
+
+        let worktree_path = worktree.path.clone();
+        let mut list = div()
+            .id("procfile-list")
+            .flex()
+            .flex_col()
+            .gap_2();
+        for (process_index, process) in worktree.managed_processes.iter().enumerate() {
+            list = list.child(self.render_procfile_process_row(
+                worktree_path.as_path(),
+                process,
+                process_index,
+                theme,
+                cx,
+            ));
+        }
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(theme.border))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child(procfile::PROCFILE_NAME),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme.text_disabled))
+                            .child(meta.join(" · ")),
+                    ),
+            )
+            .child(
+                div()
+                    .id("procfile-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(10.))
+                    .flex()
+                    .flex_col()
+                    .font_family(FONT_MONO)
+                    .p_1()
+                    .gap_2()
+                    .child(list),
+            )
+    }
+
+    fn render_procfile_process_row(
+        &self,
+        worktree_path: &Path,
+        process: &ManagedWorktreeProcess,
+        process_index: usize,
+        theme: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let session = self.managed_process_session(worktree_path, &process.id);
+        let session_id = session.map(|session| session.id);
+        let can_stop = session
+            .is_some_and(|session| session.is_initializing || session.state == TerminalState::Running);
+        let (status_label, status_color) = match session {
+            Some(session) if session.is_initializing => ("Starting", 0xe5c07b_u32),
+            Some(session) if session.state == TerminalState::Running => ("Running", 0x72d69c_u32),
+            Some(session) if session.state == TerminalState::Failed => ("Failed", 0xeb6f92_u32),
+            Some(_) => ("Exited", theme.text_disabled),
+            None => ("Stopped", theme.text_muted),
+        };
+
+        let worktree_index = self.active_worktree_index.unwrap_or_default();
+        let process_id_for_start = process.id.clone();
+        let process_id_for_restart = process.id.clone();
+        let process_id_for_stop = process.id.clone();
+
+        let mut actions = div().flex().flex_wrap().gap_1();
+
+        if let Some(session_id) = session_id {
+            actions = actions.child(
+                action_button(
+                    theme,
+                    ElementId::Name(format!("procfile-open-{process_index}").into()),
+                    "Open",
+                    ActionButtonStyle::Secondary,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.terminals.iter().any(|session| session.id == session_id) {
+                        this.select_terminal(session_id, window, cx);
+                    }
+                    cx.stop_propagation();
+                })),
+            );
+        }
+
+        if session_id.is_some() {
+            actions = actions.child(
+                action_button(
+                    theme,
+                    ElementId::Name(format!("procfile-restart-{process_index}").into()),
+                    "Restart",
+                    ActionButtonStyle::Primary,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.restart_managed_process_for_worktree(
+                        worktree_index,
+                        &process_id_for_restart,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                })),
+            );
+        } else {
+            actions = actions.child(
+                action_button(
+                    theme,
+                    ElementId::Name(format!("procfile-start-{process_index}").into()),
+                    "Start",
+                    ActionButtonStyle::Primary,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.start_managed_process_for_worktree(
+                        worktree_index,
+                        &process_id_for_start,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                })),
+            );
+        }
+
+        if can_stop {
+            actions = actions.child(
+                action_button(
+                    theme,
+                    ElementId::Name(format!("procfile-stop-{process_index}").into()),
+                    "Stop",
+                    ActionButtonStyle::Secondary,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.stop_managed_process_for_worktree(worktree_index, &process_id_for_stop, cx);
+                    cx.stop_propagation();
+                })),
+            );
+        }
+
+        div()
+            .id(ElementId::Name(format!("procfile-process-row-{process_index}").into()))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(theme.panel_bg))
+            .px_2()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme.text_primary))
+                            .child(process.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(rgb(status_color)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(status_color))
+                                    .child(status_label),
+                            )
+                            .when_some(session.and_then(|session| session.root_pid), |this, pid| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme.text_disabled))
+                                        .child(format!("pid {pid}")),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(theme.text_muted))
+                    .child(process.command.clone()),
+            )
+            .child(actions)
     }
 
     fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {

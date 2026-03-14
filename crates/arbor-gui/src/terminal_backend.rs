@@ -75,6 +75,24 @@ pub fn launch_backend(
 
 impl EmbeddedTerminal {
     pub fn spawn(cwd: &Path, initial_rows: u16, initial_cols: u16) -> Result<Self, String> {
+        Self::spawn_with_command(cwd, initial_rows, initial_cols, None)
+    }
+
+    pub fn spawn_command(
+        cwd: &Path,
+        command: &str,
+        initial_rows: u16,
+        initial_cols: u16,
+    ) -> Result<Self, String> {
+        Self::spawn_with_command(cwd, initial_rows, initial_cols, Some(command))
+    }
+
+    fn spawn_with_command(
+        cwd: &Path,
+        initial_rows: u16,
+        initial_cols: u16,
+        command_text: Option<&str>,
+    ) -> Result<Self, String> {
         let rows = if initial_rows > 0 {
             initial_rows
         } else {
@@ -96,7 +114,12 @@ impl EmbeddedTerminal {
             .map_err(|error| format!("failed to create PTY: {error}"))?;
 
         let mut command = CommandBuilder::new(default_shell());
-        command.arg("-l");
+        if let Some(command_text) = command_text {
+            command.arg("-c");
+            command.arg(command_text);
+        } else {
+            command.arg("-l");
+        }
         command.cwd(cwd.as_os_str());
 
         if env::var_os("TERM").is_none() {

@@ -22,12 +22,20 @@ struct WorktreeSummary {
     branch_divergence: Option<BranchDivergenceSummary>,
     diff_summary: Option<changes::DiffLineSummary>,
     detected_ports: Vec<DetectedPort>,
+    managed_processes: Vec<ManagedWorktreeProcess>,
     recent_turns: Vec<AgentTurnSnapshot>,
     stuck_turn_count: usize,
     recent_agent_sessions: Vec<arbor_core::session::AgentSessionSummary>,
     agent_state: Option<AgentState>,
     agent_task: Option<String>,
     last_activity_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedWorktreeProcess {
+    id: String,
+    name: String,
+    command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +76,7 @@ struct TerminalSession {
     id: u64,
     daemon_session_id: String,
     worktree_path: PathBuf,
+    managed_process_id: Option<String>,
     title: String,
     last_command: Option<String>,
     pending_command: String,
@@ -909,6 +918,7 @@ enum CenterTab {
 enum RightPaneTab {
     Changes,
     FileTree,
+    Procfile,
     Notes,
 }
 
