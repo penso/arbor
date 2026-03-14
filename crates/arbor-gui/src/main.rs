@@ -4793,6 +4793,37 @@ struct AgentWsSessionEntry {
     updated_at_unix_ms: Option<u64>,
 }
 
+fn legacy_agent_ws_session_id(cwd: &str) -> String {
+    format!("legacy-cwd:{cwd}")
+}
+
+fn parse_agent_ws_session_entry(value: &serde_json::Value) -> Option<AgentWsSessionEntry> {
+    let cwd = value.get("cwd")?.as_str()?;
+    let session_id = match value.get("session_id").and_then(|v| v.as_str()) {
+        Some(session_id) => session_id.to_owned(),
+        None => {
+            tracing::info!(
+                cwd,
+                "agent WS entry missing session_id, using legacy cwd fallback"
+            );
+            legacy_agent_ws_session_id(cwd)
+        },
+    };
+    let state_str = value.get("state")?.as_str()?;
+    let state = match state_str {
+        "working" => AgentState::Working,
+        "waiting" => AgentState::Waiting,
+        _ => return None,
+    };
+    let updated_at = value.get("updated_at_unix_ms").and_then(|v| v.as_u64());
+    Some(AgentWsSessionEntry {
+        session_id,
+        cwd: cwd.to_owned(),
+        state,
+        updated_at_unix_ms: updated_at,
+    })
+}
+
 fn process_agent_ws_message(
     this: &gpui::WeakEntity<ArborWindow>,
     cx: &mut gpui::AsyncApp,
@@ -4814,23 +4845,7 @@ fn process_agent_ws_message(
                 .unwrap_or_default();
             let entries: Vec<AgentWsSessionEntry> = sessions
                 .iter()
-                .filter_map(|s| {
-                    let session_id = s.get("session_id")?.as_str()?;
-                    let cwd = s.get("cwd")?.as_str()?;
-                    let state_str = s.get("state")?.as_str()?;
-                    let state = match state_str {
-                        "working" => AgentState::Working,
-                        "waiting" => AgentState::Waiting,
-                        _ => return None,
-                    };
-                    let updated_at = s.get("updated_at_unix_ms").and_then(|v| v.as_u64());
-                    Some(AgentWsSessionEntry {
-                        session_id: session_id.to_owned(),
-                        cwd: cwd.to_owned(),
-                        state,
-                        updated_at_unix_ms: updated_at,
-                    })
-                })
+                .filter_map(parse_agent_ws_session_entry)
                 .collect();
             tracing::info!(count = entries.len(), "agent WS snapshot received");
             for entry in &entries {
@@ -4847,35 +4862,20 @@ fn process_agent_ws_message(
             });
         },
         Some("update") => {
-            if let Some(session) = value.get("session") {
-                let session_id = session.get("session_id").and_then(|v| v.as_str());
-                let cwd = session.get("cwd").and_then(|v| v.as_str());
-                let state_str = session.get("state").and_then(|v| v.as_str());
-                if let (Some(session_id), Some(cwd), Some(state_str)) = (session_id, cwd, state_str)
-                {
-                    tracing::info!(
-                        session_id,
-                        cwd,
-                        state = state_str,
-                        "agent WS update received"
-                    );
-                    let state = match state_str {
-                        "working" => AgentState::Working,
-                        "waiting" => AgentState::Waiting,
-                        _ => return,
-                    };
-                    let updated_at = session.get("updated_at_unix_ms").and_then(|v| v.as_u64());
-                    let entries = vec![AgentWsSessionEntry {
-                        session_id: session_id.to_owned(),
-                        cwd: cwd.to_owned(),
-                        state,
-                        updated_at_unix_ms: updated_at,
-                    }];
-                    let _ = this.update(cx, |this, cx| {
-                        apply_agent_ws_update(this, &entries, cx);
-                        cx.notify();
-                    });
-                }
+            if let Some(session) = value.get("session")
+                && let Some(entry) = parse_agent_ws_session_entry(session)
+            {
+                tracing::info!(
+                    session_id = entry.session_id.as_str(),
+                    cwd = entry.cwd.as_str(),
+                    state = ?entry.state,
+                    "agent WS update received"
+                );
+                let entries = vec![entry];
+                let _ = this.update(cx, |this, cx| {
+                    apply_agent_ws_update(this, &entries, cx);
+                    cx.notify();
+                });
             }
         },
         Some("clear") => {
@@ -8300,6 +8300,37 @@ mod tests {
         let mut merged = (AgentState::Waiting, Some(100));
         crate::merge_agent_activity_state(&mut merged, AgentState::Waiting, Some(200));
         assert_eq!(merged, (AgentState::Waiting, Some(200)));
+    }
+
+    #[test]
+    fn parse_agent_ws_session_entry_uses_legacy_cwd_id_when_missing() {
+        let entry = crate::parse_agent_ws_session_entry(&serde_json::json!({
+            "cwd": "/tmp/repo/worktree",
+            "state": "working",
+            "updated_at_unix_ms": 42_u64,
+        }))
+        .expect("expected agent ws entry");
+
+        assert_eq!(entry.session_id, "legacy-cwd:/tmp/repo/worktree");
+        assert_eq!(entry.cwd, "/tmp/repo/worktree");
+        assert_eq!(entry.state, AgentState::Working);
+        assert_eq!(entry.updated_at_unix_ms, Some(42));
+    }
+
+    #[test]
+    fn parse_agent_ws_session_entry_preserves_explicit_session_id() {
+        let entry = crate::parse_agent_ws_session_entry(&serde_json::json!({
+            "session_id": "terminal:daemon-1",
+            "cwd": "/tmp/repo/worktree",
+            "state": "waiting",
+            "updated_at_unix_ms": 99_u64,
+        }))
+        .expect("expected agent ws entry");
+
+        assert_eq!(entry.session_id, "terminal:daemon-1");
+        assert_eq!(entry.cwd, "/tmp/repo/worktree");
+        assert_eq!(entry.state, AgentState::Waiting);
+        assert_eq!(entry.updated_at_unix_ms, Some(99));
     }
 
     #[test]
