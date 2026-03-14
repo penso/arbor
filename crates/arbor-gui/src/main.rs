@@ -7993,12 +7993,26 @@ fn parse_theme_kind(theme: Option<&str>) -> Result<ThemeKind, String> {
         "tokyo-night" | "tokyonight" => Ok(ThemeKind::TokyoNight),
         "vantablack" => Ok(ThemeKind::Vantablack),
         "white" => Ok(ThemeKind::White),
+        "atom-one-light" | "atomonelight" => Ok(ThemeKind::AtomOneLight),
+        "github-light-default" | "githublightdefault" => Ok(ThemeKind::GitHubLightDefault),
+        "github-light-high-contrast" | "githublighthighcontrast" => {
+            Ok(ThemeKind::GitHubLightHighContrast)
+        },
+        "github-light-colorblind" | "githublightcolorblind" => Ok(ThemeKind::GitHubLightColorblind),
+        "github-light" | "githublight" => Ok(ThemeKind::GitHubLight),
+        "github-dark-default" | "githubdarkdefault" => Ok(ThemeKind::GitHubDarkDefault),
+        "github-dark-high-contrast" | "githubdarkhighcontrast" => {
+            Ok(ThemeKind::GitHubDarkHighContrast)
+        },
+        "github-dark-colorblind" | "githubdarkcolorblind" => Ok(ThemeKind::GitHubDarkColorblind),
+        "github-dark-dimmed" | "githubdarkdimmed" => Ok(ThemeKind::GitHubDarkDimmed),
+        "github-dark" | "githubdark" => Ok(ThemeKind::GitHubDark),
         "retrobox-classic" | "retrobox" => Ok(ThemeKind::RetroboxClassic),
         "tokyonight-day" | "tokionight-day" => Ok(ThemeKind::TokyoNightDay),
         "tokyonight-classic" | "tokionight-classic" => Ok(ThemeKind::TokyoNightClassic),
         "zellner" => Ok(ThemeKind::Zellner),
         _ => Err(format!(
-            "invalid theme `{value}` in config, expected one-dark/ayu-dark/gruvbox-dark/dracula/solarized-light/everforest-dark/catppuccin/catppuccin-latte/ethereal/flexoki-light/hackerman/kanagawa/matte-black/miasma/nord/osaka-jade/ristretto/rose-pine/tokyo-night/vantablack/white/retrobox-classic/tokyonight-day/tokyonight-classic/zellner"
+            "invalid theme `{value}` in config, expected one-dark/ayu-dark/gruvbox-dark/dracula/solarized-light/everforest-dark/catppuccin/catppuccin-latte/ethereal/flexoki-light/hackerman/kanagawa/matte-black/miasma/nord/osaka-jade/ristretto/rose-pine/tokyo-night/vantablack/white/atom-one-light/github-light-default/github-light-high-contrast/github-light-colorblind/github-light/github-dark-default/github-dark-high-contrast/github-dark-colorblind/github-dark-dimmed/github-dark/retrobox-classic/tokyonight-day/tokyonight-classic/zellner"
         )),
     }
 }
@@ -8826,6 +8840,46 @@ mod tests {
         assert_eq!(
             crate::parse_theme_kind(Some("white")).ok(),
             Some(ThemeKind::White)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("atom-one-light")).ok(),
+            Some(ThemeKind::AtomOneLight)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light-default")).ok(),
+            Some(ThemeKind::GitHubLightDefault)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light-high-contrast")).ok(),
+            Some(ThemeKind::GitHubLightHighContrast)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light-colorblind")).ok(),
+            Some(ThemeKind::GitHubLightColorblind)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-light")).ok(),
+            Some(ThemeKind::GitHubLight)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-default")).ok(),
+            Some(ThemeKind::GitHubDarkDefault)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-high-contrast")).ok(),
+            Some(ThemeKind::GitHubDarkHighContrast)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-colorblind")).ok(),
+            Some(ThemeKind::GitHubDarkColorblind)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark-dimmed")).ok(),
+            Some(ThemeKind::GitHubDarkDimmed)
+        );
+        assert_eq!(
+            crate::parse_theme_kind(Some("github-dark")).ok(),
+            Some(ThemeKind::GitHubDark)
         );
         assert_eq!(
             crate::parse_theme_kind(Some("retrobox-classic")).ok(),
