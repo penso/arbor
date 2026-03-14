@@ -2567,20 +2567,13 @@ impl ArborWindow {
             .collect();
         let github_token = self.github_access_token();
         let github_service = self.github_service.clone();
+        let cleared_untracked =
+            clear_pull_request_data_for_untracked_worktrees(&mut self.worktrees, &tracked_paths);
+        if cleared_untracked {
+            cx.notify();
+        }
 
         if tracked_branches.is_empty() {
-            let mut changed = false;
-            for worktree in &mut self.worktrees {
-                if worktree.pr_number.take().is_some()
-                    || worktree.pr_url.take().is_some()
-                    || worktree.pr_details.take().is_some()
-                {
-                    changed = true;
-                }
-            }
-            if changed {
-                cx.notify();
-            }
             return;
         }
 
@@ -2600,22 +2593,6 @@ impl ArborWindow {
         );
 
         self.worktree_prs_loading = true;
-        let mut cleared_untracked = false;
-        for worktree in &mut self.worktrees {
-            if tracked_paths.contains(&worktree.path) {
-                continue;
-            }
-            if worktree.pr_number.take().is_some()
-                || worktree.pr_url.take().is_some()
-                || worktree.pr_details.take().is_some()
-            {
-                cleared_untracked = true;
-            }
-        }
-        if cleared_untracked {
-            cx.notify();
-        }
-
         cx.spawn(async move |this, cx| {
             let results = cx
                 .background_spawn(async move {
@@ -6686,6 +6663,27 @@ fn should_preserve_cached_pr_data_on_rate_limit(
         && next_details.is_none()
 }
 
+fn clear_pull_request_data_for_untracked_worktrees(
+    worktrees: &mut [WorktreeSummary],
+    tracked_paths: &HashSet<PathBuf>,
+) -> bool {
+    let mut cleared = false;
+
+    for worktree in worktrees {
+        if tracked_paths.contains(&worktree.path) {
+            continue;
+        }
+        let had_pr_number = worktree.pr_number.take().is_some();
+        let had_pr_url = worktree.pr_url.take().is_some();
+        let had_pr_details = worktree.pr_details.take().is_some();
+        if had_pr_number || had_pr_url || had_pr_details {
+            cleared = true;
+        }
+    }
+
+    cleared
+}
+
 fn is_gui_editor(editor: &str) -> bool {
     let basename = Path::new(editor)
         .file_name()
@@ -8153,7 +8151,7 @@ mod tests {
         gpui::{Keystroke, point, px},
         std::{
             cell::Cell,
-            collections::HashMap,
+            collections::{HashMap, HashSet},
             env, fs,
             path::{Path, PathBuf},
             sync::{Arc, Mutex},
@@ -9318,6 +9316,62 @@ mod tests {
         assert!(!crate::should_preserve_cached_pr_data_on_rate_limit(
             None, None, None, None,
         ));
+    }
+
+    #[test]
+    fn clear_pull_request_data_for_untracked_worktrees_only_clears_stale_rows() {
+        let mut tracked = sample_worktree_summary();
+        tracked.pr_number = Some(7);
+        tracked.pr_url = Some("https://github.com/penso/arbor/pull/7".to_owned());
+        tracked.pr_details = Some(crate::github_service::PrDetails {
+            number: 7,
+            title: "Tracked".to_owned(),
+            url: "https://github.com/penso/arbor/pull/7".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 0,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: Vec::new(),
+        });
+
+        let mut stale = sample_worktree_summary();
+        stale.path = "/tmp/repo/wt-stale".into();
+        stale.label = "wt-stale".to_owned();
+        stale.branch = "main".to_owned();
+        stale.pr_number = Some(8);
+        stale.pr_url = Some("https://github.com/penso/arbor/pull/8".to_owned());
+        stale.pr_details = Some(crate::github_service::PrDetails {
+            number: 8,
+            title: "Stale".to_owned(),
+            url: "https://github.com/penso/arbor/pull/8".to_owned(),
+            state: crate::github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: crate::github_service::ReviewDecision::Pending,
+            mergeable: crate::github_service::MergeableState::Mergeable,
+            merge_state_status: crate::github_service::MergeStateStatus::Clean,
+            passed_checks: 0,
+            checks_status: crate::github_service::CheckStatus::Pending,
+            checks: Vec::new(),
+        });
+
+        let tracked_path = tracked.path.clone();
+        let mut worktrees = vec![tracked, stale];
+        let tracked_paths = HashSet::from([tracked_path]);
+
+        assert!(crate::clear_pull_request_data_for_untracked_worktrees(
+            &mut worktrees,
+            &tracked_paths,
+        ));
+        assert_eq!(worktrees[0].pr_number, Some(7));
+        assert!(worktrees[0].pr_details.is_some());
+        assert_eq!(worktrees[1].pr_number, None);
+        assert_eq!(worktrees[1].pr_url, None);
+        assert_eq!(worktrees[1].pr_details, None);
     }
 
     #[test]
