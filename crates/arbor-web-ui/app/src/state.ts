@@ -92,137 +92,153 @@ export function updateState(partial: Partial<AppState>): void {
 }
 
 let refreshInFlight = false;
+let refreshPromise: Promise<void> | null = null;
 
 export async function refresh(): Promise<void> {
-  if (refreshInFlight) return;
-  refreshInFlight = true;
-  updateState({ loading: true, error: null });
-
-  try {
-    const [repositories, worktrees, sessions, processes] = await Promise.all([
-      fetchRepositories(),
-      fetchWorktrees(),
-      fetchTerminals(),
-      fetchProcesses().catch(() => [] as ProcessInfo[]),
-    ]);
-
-    // Validate selections still exist, auto-select on first load
-    let selectedRepoRoot =
-      state.selectedRepoRoot !== null &&
-      repositories.some((r) => r.root === state.selectedRepoRoot)
-        ? state.selectedRepoRoot
-        : null;
-
-    // Auto-select first repo on initial load
-    if (selectedRepoRoot === null && repositories.length > 0) {
-      const firstRepository = repositories[0];
-      if (firstRepository !== undefined) {
-        selectedRepoRoot = firstRepository.root;
-      }
-    }
-
-    let selectedWorktreePath =
-      state.selectedWorktreePath !== null &&
-      worktrees.some((w) => w.path === state.selectedWorktreePath)
-        ? state.selectedWorktreePath
-        : null;
-
-    // Auto-select primary worktree (or first) for the selected repo on initial load
-    if (selectedWorktreePath === null && selectedRepoRoot !== null) {
-      const repoWorktrees = worktrees.filter((w) => w.repo_root === selectedRepoRoot);
-      const primary = repoWorktrees.find((w) => w.is_primary_checkout);
-      const first = primary ?? repoWorktrees[0];
-      if (first !== undefined) {
-        selectedWorktreePath = first.path;
-      }
-    }
-
-    if (selectedWorktreePath !== null) {
-      const selectedWorktree = worktrees.find((w) => w.path === selectedWorktreePath);
-      if (selectedWorktree !== undefined) {
-        selectedRepoRoot = selectedWorktree.repo_root;
-      }
-    }
-
-    let activeSessionId =
-      state.activeSessionId !== null &&
-      sessions.some((s) => s.session_id === state.activeSessionId)
-        ? state.activeSessionId
-        : null;
-
-    // Auto-select first running terminal for the selected worktree
-    const visibleSessions = selectedWorktreePath !== null
-      ? sessions.filter((s) => s.workspace_id === selectedWorktreePath || s.cwd === selectedWorktreePath)
-      : sessions;
-
-    // Clear active session if it doesn't belong to the selected worktree
-    if (activeSessionId !== null && selectedWorktreePath !== null) {
-      const belongs = visibleSessions.some((s) => s.session_id === activeSessionId);
-      if (!belongs) {
-        activeSessionId = null;
-      }
-    }
-
-    if (activeSessionId === null && visibleSessions.length > 0) {
-      const running = visibleSessions.find((s) => s.state === "running");
-      const first = running ?? visibleSessions[0];
-      if (first !== undefined) {
-        activeSessionId = first.session_id;
-      }
-    }
-
-    const nextIssuesRepoRoot = selectedIssueRepoRootForSelection(
-      worktrees,
-      selectedRepoRoot,
-      selectedWorktreePath,
-    );
-    const issueRepoChanged = nextIssuesRepoRoot !== state.issuesRepoRoot;
-    const shouldRefreshIssues =
-      state.rightPanelTab === "issues" &&
-      nextIssuesRepoRoot !== null &&
-      (issueRepoChanged || state.issuesLoadedRepoRoot !== nextIssuesRepoRoot);
-
-    updateState({
-      repositories,
-      worktrees,
-      sessions,
-      processes,
-      selectedRepoRoot,
-      selectedWorktreePath,
-      activeSessionId,
-      ...(issueRepoChanged
-        ? {
-            issues: [],
-            issueSource: null,
-            issuesNotice: null,
-            issuesError: null,
-            issuesLoading: false,
-            issuesRepoRoot: nextIssuesRepoRoot,
-            issuesLoadedRepoRoot: null,
-            issuesRequestGeneration: state.issuesRequestGeneration,
-          }
-        : {}),
-      loading: false,
-    });
-
-    // Fetch changed files for selected worktree
-    if (selectedWorktreePath !== null) {
-      refreshChangedFiles(selectedWorktreePath);
-    } else {
-      updateState({ changedFiles: [] });
-    }
-
-    if (shouldRefreshIssues) {
-      refreshIssues(nextIssuesRepoRoot, true);
-    }
-  } catch (error) {
-    updateState({
-      loading: false,
-      error: error instanceof Error ? error.message : "unknown request failure",
-    });
-  } finally {
-    refreshInFlight = false;
+  if (refreshPromise !== null) {
+    return refreshPromise;
   }
+
+  refreshPromise = (async () => {
+    refreshInFlight = true;
+    updateState({ loading: true, error: null });
+
+    try {
+      const [repositories, worktrees, sessions, processes] = await Promise.all([
+        fetchRepositories(),
+        fetchWorktrees(),
+        fetchTerminals(),
+        fetchProcesses().catch(() => [] as ProcessInfo[]),
+      ]);
+
+      // Validate selections still exist, auto-select on first load
+      let selectedRepoRoot =
+        state.selectedRepoRoot !== null &&
+        repositories.some((r) => r.root === state.selectedRepoRoot)
+          ? state.selectedRepoRoot
+          : null;
+
+      // Auto-select first repo on initial load
+      if (selectedRepoRoot === null && repositories.length > 0) {
+        const firstRepository = repositories[0];
+        if (firstRepository !== undefined) {
+          selectedRepoRoot = firstRepository.root;
+        }
+      }
+
+      let selectedWorktreePath =
+        state.selectedWorktreePath !== null &&
+        worktrees.some((w) => w.path === state.selectedWorktreePath)
+          ? state.selectedWorktreePath
+          : null;
+
+      // Auto-select primary worktree (or first) for the selected repo on initial load
+      if (selectedWorktreePath === null && selectedRepoRoot !== null) {
+        const repoWorktrees = worktrees.filter((w) => w.repo_root === selectedRepoRoot);
+        const primary = repoWorktrees.find((w) => w.is_primary_checkout);
+        const first = primary ?? repoWorktrees[0];
+        if (first !== undefined) {
+          selectedWorktreePath = first.path;
+        }
+      }
+
+      if (selectedWorktreePath !== null) {
+        const selectedWorktree = worktrees.find((w) => w.path === selectedWorktreePath);
+        if (selectedWorktree !== undefined) {
+          selectedRepoRoot = selectedWorktree.repo_root;
+        }
+      }
+
+      let activeSessionId =
+        state.activeSessionId !== null &&
+        sessions.some((s) => s.session_id === state.activeSessionId)
+          ? state.activeSessionId
+          : null;
+
+      // Auto-select first running terminal for the selected worktree
+      const visibleSessions = selectedWorktreePath !== null
+        ? sessions.filter((s) => s.workspace_id === selectedWorktreePath || s.cwd === selectedWorktreePath)
+        : sessions;
+
+      // Clear active session if it doesn't belong to the selected worktree
+      if (activeSessionId !== null && selectedWorktreePath !== null) {
+        const belongs = visibleSessions.some((s) => s.session_id === activeSessionId);
+        if (!belongs) {
+          activeSessionId = null;
+        }
+      }
+
+      if (activeSessionId === null && visibleSessions.length > 0) {
+        const running = visibleSessions.find((s) => s.state === "running");
+        const first = running ?? visibleSessions[0];
+        if (first !== undefined) {
+          activeSessionId = first.session_id;
+        }
+      }
+
+      const nextIssuesRepoRoot = selectedIssueRepoRootForSelection(
+        worktrees,
+        selectedRepoRoot,
+        selectedWorktreePath,
+      );
+      const issueRepoChanged = nextIssuesRepoRoot !== state.issuesRepoRoot;
+      const shouldRefreshIssues =
+        state.rightPanelTab === "issues" &&
+        nextIssuesRepoRoot !== null &&
+        (issueRepoChanged || state.issuesLoadedRepoRoot !== nextIssuesRepoRoot);
+
+      updateState({
+        repositories,
+        worktrees,
+        sessions,
+        processes,
+        selectedRepoRoot,
+        selectedWorktreePath,
+        activeSessionId,
+        ...(issueRepoChanged
+          ? {
+              issues: [],
+              issueSource: null,
+              issuesNotice: null,
+              issuesError: null,
+              issuesLoading: false,
+              issuesRepoRoot: nextIssuesRepoRoot,
+              issuesLoadedRepoRoot: null,
+              issuesRequestGeneration: state.issuesRequestGeneration,
+            }
+          : {}),
+        loading: false,
+      });
+
+      // Fetch changed files for selected worktree
+      if (selectedWorktreePath !== null) {
+        refreshChangedFiles(selectedWorktreePath);
+      } else {
+        updateState({ changedFiles: [] });
+      }
+
+      if (shouldRefreshIssues) {
+        refreshIssues(nextIssuesRepoRoot, true);
+      }
+    } catch (error) {
+      updateState({
+        loading: false,
+        error: error instanceof Error ? error.message : "unknown request failure",
+      });
+    } finally {
+      refreshInFlight = false;
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+export async function forceRefresh(): Promise<void> {
+  if (refreshPromise !== null) {
+    await refreshPromise;
+  }
+  await refresh();
 }
 
 export function refreshChangedFiles(worktreePath: string): void {

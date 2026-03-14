@@ -401,6 +401,108 @@ test.describe("Arbor Web UI", () => {
     ).toBeVisible();
   });
 
+  test("creating a worktree forces a fresh refresh after an in-flight refresh", async ({ page }) => {
+    let worktreeRequestCount = 0;
+    let releaseStaleRefresh: (() => void) | null = null;
+    let resolveStaleRefreshSeen: (() => void) | null = null;
+    const staleRefreshSeen = new Promise<void>((resolve) => {
+      resolveStaleRefreshSeen = resolve;
+    });
+
+    await page.unroute("**/api/v1/worktrees");
+    await page.route("**/api/v1/worktrees", async (route) => {
+      worktreeRequestCount += 1;
+
+      const baseWorktrees = [
+        {
+          repo_root: "/home/user/projects/arbor",
+          path: "/home/user/projects/arbor",
+          branch: "main",
+          is_primary_checkout: true,
+          last_activity_unix_ms: Date.now() - 30_000,
+          diff_additions: 84,
+          diff_deletions: 2,
+          pr_number: null,
+          pr_url: null,
+        },
+        {
+          repo_root: "/home/user/projects/arbor",
+          path: "/home/user/projects/arbor-worktrees/feature-auth",
+          branch: "feature/auth",
+          is_primary_checkout: false,
+          last_activity_unix_ms: Date.now() - 120_000,
+          diff_additions: 15,
+          diff_deletions: 3,
+          pr_number: 365,
+          pr_url: "https://github.com/penso/arbor/pull/365",
+        },
+        {
+          repo_root: "/home/user/projects/moltis",
+          path: "/home/user/projects/moltis",
+          branch: "main",
+          is_primary_checkout: true,
+          last_activity_unix_ms: null,
+          diff_additions: null,
+          diff_deletions: null,
+          pr_number: null,
+          pr_url: null,
+        },
+      ];
+
+      if (worktreeRequestCount === 1) {
+        resolveStaleRefreshSeen?.();
+        await new Promise<void>((resolve) => {
+          releaseStaleRefresh = resolve;
+        });
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(baseWorktrees),
+        });
+      }
+
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          ...baseWorktrees,
+          {
+            repo_root: "/home/user/projects/arbor",
+            path: "/Users/penso/.arbor/worktrees/arbor/github-513-command-palette-issues",
+            branch: "codex/github-513-command-palette-issues",
+            is_primary_checkout: false,
+            last_activity_unix_ms: Date.now(),
+            diff_additions: 0,
+            diff_deletions: 0,
+            pr_number: null,
+            pr_url: null,
+          },
+        ]),
+      });
+    });
+
+    const changesPanel = page.getByTestId("changes-panel");
+    await changesPanel.getByRole("button", { name: /Issues/ }).click();
+    await expect(changesPanel.getByText("Teach the command palette about issues")).toBeVisible();
+    await page.locator(".issue-item").nth(1).click();
+
+    const modal = page.getByTestId("create-worktree-modal");
+    await expect(modal).toBeVisible();
+
+    await page.waitForTimeout(5_100);
+    await staleRefreshSeen;
+
+    const submitPromise = modal.getByRole("button", { name: "Create worktree" }).click();
+    releaseStaleRefresh?.();
+    await submitPromise;
+
+    await expect(modal).toBeHidden();
+    await expect(
+      page.getByTestId("sidebar").getByText("codex/github-513-command-palette-issues"),
+    ).toBeVisible();
+    expect(worktreeRequestCount).toBeGreaterThanOrEqual(2);
+  });
+
   test("issues tab does not refetch unsupported providers on background refresh", async ({ page }) => {
     let issuesRequestCount = 0;
 

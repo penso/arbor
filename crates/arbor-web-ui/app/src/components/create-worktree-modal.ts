@@ -1,5 +1,5 @@
 import { createManagedWorktree, previewManagedWorktree } from "../api";
-import { refresh, selectWorktree, selectedIssueRepoRoot } from "../state";
+import { forceRefresh, selectWorktree, selectedIssueRepoRoot } from "../state";
 import type { Issue, ManagedWorktreePreview } from "../types";
 import { el } from "../utils";
 
@@ -272,7 +272,7 @@ async function submitCreateWorktree(): Promise<void> {
 
   try {
     const response = await createManagedWorktree(activeRepoRoot, worktreeName);
-    await refresh();
+    await forceRefresh();
     selectWorktree(response.path);
     closeCreateWorktreeModal();
   } catch (error) {

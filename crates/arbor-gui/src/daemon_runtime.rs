@@ -25,7 +25,7 @@ fn local_daemon_runtime(
         daemon,
         ws_state,
         last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
-        snapshot_request_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        snapshot_request_in_flight: Arc::new(AtomicBool::new(false)),
         kind: TerminalRuntimeKind::Local,
         resize_error_label: "failed to resize terminal",
         exit_labels: Some(RuntimeExitLabels {
@@ -409,7 +409,7 @@ fn request_async_daemon_snapshot(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
     ws_state: Arc<DaemonTerminalWsState>,
-    in_flight: Arc<std::sync::atomic::AtomicBool>,
+    in_flight: Arc<AtomicBool>,
 ) {
     if in_flight
         .compare_exchange(
