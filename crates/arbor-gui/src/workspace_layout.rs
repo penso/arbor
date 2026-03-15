@@ -666,6 +666,14 @@ impl ArborWindow {
                     ))
                     .child(status_text(theme, "•"))
                     .child(status_text(theme, format!("terminals {terminal_count}")))
+                    .when_some(self.update_available.clone(), |this, version| {
+                        this.child(status_text(theme, "•")).child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme.accent))
+                                .child(format!("update available: v{version}")),
+                        )
+                    })
                     .when_some(self.github_rate_limit_remaining(), |this, remaining| {
                         this.child(status_text(theme, "•")).child(
                             div().text_xs().text_color(rgb(theme.accent)).child(format!(

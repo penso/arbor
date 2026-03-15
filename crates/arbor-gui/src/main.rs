@@ -60,6 +60,7 @@ mod top_bar;
 mod types;
 mod ui_state_store;
 mod ui_widgets;
+mod version_check;
 mod welcome_ui;
 mod workspace_layout;
 mod workspace_navigation;

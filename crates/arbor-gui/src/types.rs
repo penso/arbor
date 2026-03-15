@@ -2377,6 +2377,8 @@ pub(crate) struct ArborWindow {
     /// Currently selected remote worktree (if any). The window stays connected
     /// to the local daemon; only terminal sessions use the remote client.
     pub(crate) active_remote_worktree: Option<ActiveRemoteWorktree>,
+    /// When `Some`, a newer version of Arbor is available on GitHub.
+    pub(crate) update_available: Option<String>,
 }
 
 #[derive(Debug, Clone)]
