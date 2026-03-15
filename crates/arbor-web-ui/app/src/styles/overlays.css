@@ -135,22 +135,48 @@
 .palette-results {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   margin-top: 14px;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb, #3f3f46) var(--scrollbar-track, transparent);
+}
+
+.palette-hint {
+  font-size: 11px;
+  color: var(--text-faint, var(--text-muted));
+  text-align: center;
+  padding: 2px 0 6px;
+  letter-spacing: 0.02em;
+}
+
+.palette-category {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint, var(--text-muted));
+  padding: 10px 6px 4px;
+}
+
+.palette-category:first-child {
+  padding-top: 2px;
 }
 
 .palette-item {
   width: 100%;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
   border: 1px solid transparent;
   border-radius: 12px;
   background: var(--bg-hover);
   color: var(--text);
   cursor: pointer;
   text-align: left;
-  padding: 13px 14px;
+  padding: 10px 14px;
   transition: background 0.12s, border-color 0.12s, transform 0.12s;
 }
 
@@ -161,15 +187,45 @@
   transform: translateY(-1px);
 }
 
+.palette-item-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-family: "CaskaydiaMono Nerd Font Mono", "JetBrains Mono", monospace;
+  font-size: 14px;
+}
+
+.palette-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .palette-item-title {
   font-size: 14px;
   font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .palette-item-subtitle,
 .palette-empty {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.palette-item-subtitle {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .palette-empty {
