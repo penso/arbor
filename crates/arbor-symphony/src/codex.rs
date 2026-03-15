@@ -83,6 +83,18 @@ pub enum RunnerError {
     Io(String),
 }
 
+impl From<std::io::Error> for RunnerError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for RunnerError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::ResponseError(error.to_string())
+    }
+}
+
 #[async_trait]
 pub trait Runner: Send + Sync {
     async fn run_attempt(
@@ -302,8 +314,7 @@ impl AppServerProcess {
                 self.stdout.next_line(),
             )
             .await
-            .map_err(|_| RunnerError::TurnTimeout)?
-            .map_err(|error| RunnerError::Io(error.to_string()))?;
+            .map_err(|_| RunnerError::TurnTimeout)??;
 
             let Some(line) = line else {
                 return Err(RunnerError::PortExit);
@@ -312,8 +323,7 @@ impl AppServerProcess {
                 continue;
             }
 
-            let message: Value = serde_json::from_str(&line)
-                .map_err(|error| RunnerError::ResponseError(error.to_string()))?;
+            let message: Value = serde_json::from_str(&line)?;
             if let Some(method) = message.get("method").and_then(Value::as_str) {
                 if let Some(outcome) = handle_server_method(
                     method,
@@ -346,8 +356,7 @@ impl AppServerProcess {
             let line =
                 tokio::time::timeout(Duration::from_millis(timeout_ms), self.stdout.next_line())
                     .await
-                    .map_err(|_| RunnerError::ResponseTimeout)?
-                    .map_err(|error| RunnerError::Io(error.to_string()))?;
+                    .map_err(|_| RunnerError::ResponseTimeout)??;
 
             let Some(line) = line else {
                 return Err(RunnerError::PortExit);
@@ -356,8 +365,7 @@ impl AppServerProcess {
                 continue;
             }
 
-            let value: Value = serde_json::from_str(&line)
-                .map_err(|error| RunnerError::ResponseError(error.to_string()))?;
+            let value: Value = serde_json::from_str(&line)?;
             if value.get("id").and_then(Value::as_u64) == Some(request_id) {
                 if value.get("error").is_some() {
                     return Err(RunnerError::ResponseError(value.to_string()));
@@ -375,17 +383,11 @@ impl AppServerProcess {
     }
 
     async fn send_message(&mut self, value: &Value) -> Result<(), RunnerError> {
-        let mut line =
-            serde_json::to_vec(value).map_err(|error| RunnerError::Io(error.to_string()))?;
+        let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
-        self.stdin
-            .write_all(&line)
-            .await
-            .map_err(|error| RunnerError::Io(error.to_string()))?;
-        self.stdin
-            .flush()
-            .await
-            .map_err(|error| RunnerError::Io(error.to_string()))
+        self.stdin.write_all(&line).await?;
+        self.stdin.flush().await?;
+        Ok(())
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -570,17 +572,11 @@ async fn respond(
     let mut payload = serde_json::to_vec(&json!({
         "id": request_id,
         "result": result,
-    }))
-    .map_err(|error| RunnerError::Io(error.to_string()))?;
+    }))?;
     payload.push(b'\n');
-    stdin
-        .write_all(&payload)
-        .await
-        .map_err(|error| RunnerError::Io(error.to_string()))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|error| RunnerError::Io(error.to_string()))
+    stdin.write_all(&payload).await?;
+    stdin.flush().await?;
+    Ok(())
 }
 
 async fn spawn_process(request: &RunAttemptRequest) -> Result<Child, RunnerError> {
@@ -593,9 +589,12 @@ async fn spawn_process(request: &RunAttemptRequest) -> Result<Child, RunnerError
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.spawn().map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => RunnerError::CodexNotFound(error.to_string()),
-        _ => RunnerError::Io(error.to_string()),
+    command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RunnerError::CodexNotFound(error.to_string())
+        } else {
+            RunnerError::from(error)
+        }
     })
 }
 

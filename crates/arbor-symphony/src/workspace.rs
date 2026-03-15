@@ -29,7 +29,7 @@ pub enum WorkspaceError {
     #[error("workspace path exists and is not a directory: {0}")]
     NotDirectory(PathBuf),
     #[error("failed to create workspace: {0}")]
-    Create(String),
+    Create(#[from] std::io::Error),
     #[error("workspace hook failed: {0}")]
     Hook(String),
 }
@@ -63,7 +63,7 @@ impl WorkspaceManager {
         }
 
         let created_now = !path.exists();
-        fs::create_dir_all(&path).map_err(|error| WorkspaceError::Create(error.to_string()))?;
+        fs::create_dir_all(&path)?;
 
         let workspace = Workspace {
             path,
@@ -118,7 +118,8 @@ impl WorkspaceManager {
             tracing::warn!(%error, path = %path.display(), "workspace before_remove hook failed");
         }
 
-        fs::remove_dir_all(&path).map_err(|error| WorkspaceError::Create(error.to_string()))
+        fs::remove_dir_all(&path)?;
+        Ok(())
     }
 
     async fn run_hook(
@@ -140,11 +141,12 @@ impl WorkspaceManager {
         let timeout = Duration::from_millis(self.hooks.timeout_ms.max(1));
         let child = command
             .spawn()
-            .map_err(|error| WorkspaceError::Hook(error.to_string()))?;
+            .map_err(|error| WorkspaceError::Hook(format!("{hook_name}: {error}")))?;
         let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
             .map_err(|_| WorkspaceError::Hook(format!("{hook_name} timed out")))?;
-        let output = output.map_err(|error| WorkspaceError::Hook(error.to_string()))?;
+        let output =
+            output.map_err(|error| WorkspaceError::Hook(format!("{hook_name}: {error}")))?;
 
         if output.status.success() {
             return Ok(());

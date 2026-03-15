@@ -295,16 +295,16 @@ impl Actor {
     }
 
     async fn tick(&mut self) {
-        let mut tick_error = None;
+        let mut tick_error: Option<String> = None;
         if let Err(error) = self.reload_workflow_if_changed().await {
             tick_error = Some(error.to_string());
         }
 
         if let Some(error) = self.reconcile_running().await {
-            tick_error = Some(error);
+            tick_error = Some(error.to_string());
         }
         if let Some(error) = self.process_due_retries().await {
-            tick_error = Some(error);
+            tick_error = Some(error.to_string());
         }
 
         match self.tracker.fetch_candidate_issues().await {
@@ -335,7 +335,7 @@ impl Actor {
         Ok(())
     }
 
-    async fn reconcile_running(&mut self) -> Option<String> {
+    async fn reconcile_running(&mut self) -> Option<TrackerError> {
         if self.running.is_empty() {
             return None;
         }
@@ -351,7 +351,6 @@ impl Actor {
                 }
             }
             for issue_id in stalled {
-                reconciliation_error.get_or_insert_with(|| "stall timeout".to_owned());
                 self.cancel_running(
                     &issue_id,
                     CancellationAction::Retry {
@@ -411,14 +410,14 @@ impl Actor {
                 }
             },
             Err(error) => {
-                reconciliation_error = Some(error.to_string());
+                reconciliation_error = Some(error);
             },
         }
 
         reconciliation_error
     }
 
-    async fn process_due_retries(&mut self) -> Option<String> {
+    async fn process_due_retries(&mut self) -> Option<TrackerError> {
         let now = Instant::now();
         let due_ids: Vec<String> = self
             .retry_attempts
@@ -433,7 +432,7 @@ impl Actor {
         let candidates = match self.tracker.fetch_candidate_issues().await {
             Ok(candidates) => candidates,
             Err(error) => {
-                return Some(error.to_string());
+                return Some(error);
             },
         };
 
@@ -626,15 +625,7 @@ impl Actor {
                     issue_id,
                     issue_identifier,
                     workspace: None,
-                    result: Err(match error {
-                        WorkerTaskError::Workflow(error) => {
-                            RunnerError::ResponseError(error.to_string())
-                        },
-                        WorkerTaskError::Runner(error) => error,
-                        WorkerTaskError::Workspace(error) => {
-                            RunnerError::ResponseError(error.to_string())
-                        },
-                    }),
+                    result: Err(RunnerError::from(error)),
                 },
                 Err(error) => ServiceEvent::WorkerFinished {
                     issue_id,
@@ -940,6 +931,16 @@ enum WorkerTaskError {
     Workspace(#[from] crate::workspace::WorkspaceError),
     #[error("{0}")]
     Runner(#[from] RunnerError),
+}
+
+impl From<WorkerTaskError> for RunnerError {
+    fn from(error: WorkerTaskError) -> Self {
+        match error {
+            WorkerTaskError::Runner(error) => error,
+            WorkerTaskError::Workflow(error) => Self::ResponseError(error.to_string()),
+            WorkerTaskError::Workspace(error) => Self::ResponseError(error.to_string()),
+        }
+    }
 }
 
 fn retry_delay_ms(attempt: u32, max_retry_backoff_ms: u64) -> u64 {

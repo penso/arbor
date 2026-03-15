@@ -26,6 +26,18 @@ pub enum TrackerError {
     LinearMissingEndCursor,
 }
 
+impl From<serde_json::Error> for TrackerError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::LinearUnknownPayload(error.to_string())
+    }
+}
+
+impl From<ureq::Error> for TrackerError {
+    fn from(error: ureq::Error) -> Self {
+        Self::LinearApiRequest(error.to_string())
+    }
+}
+
 #[async_trait]
 pub trait IssueTracker: Send + Sync {
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError>;
@@ -71,8 +83,7 @@ impl LinearTracker {
             .config()
             .timeout_global(Some(Duration::from_secs(30)))
             .build()
-            .send(&payload)
-            .map_err(|error| TrackerError::LinearApiRequest(error.to_string()))?;
+            .send(&payload)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -84,8 +95,7 @@ impl LinearTracker {
             .body_mut()
             .read_to_string()
             .map_err(|error| TrackerError::LinearApiRequest(error.to_string()))?;
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|error| TrackerError::LinearUnknownPayload(error.to_string()))?;
+        let value: Value = serde_json::from_str(&text)?;
 
         if let Some(errors) = value.get("errors") {
             return Err(TrackerError::LinearGraphqlErrors(errors.to_string()));
@@ -177,7 +187,7 @@ impl IssueTracker for LinearTracker {
 
         let ids = issue_ids.to_vec();
         let tracker = self.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<Vec<Issue>, TrackerError> {
             let response = tracker.request_json(
                 ISSUE_STATES_QUERY,
                 json!({

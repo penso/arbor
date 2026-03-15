@@ -27,7 +27,7 @@ pub enum WorkflowError {
     #[error("invalid_config: {0}")]
     InvalidConfig(String),
     #[error("io: {0}")]
-    Io(String),
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,17 +83,15 @@ impl WorkflowLoader {
             return Err(WorkflowError::MissingWorkflowFile(path.clone()));
         }
 
-        let metadata = fs::metadata(path).map_err(|error| WorkflowError::Io(error.to_string()))?;
+        let metadata = fs::metadata(path)?;
         self.last_modified = metadata.modified().ok();
 
-        let content =
-            fs::read_to_string(path).map_err(|error| WorkflowError::Io(error.to_string()))?;
+        let content = fs::read_to_string(path)?;
         parse_workflow(&content)
     }
 
     pub fn load_if_changed(&mut self) -> Result<Option<WorkflowDefinition>, WorkflowError> {
-        let metadata =
-            fs::metadata(&self.path).map_err(|error| WorkflowError::Io(error.to_string()))?;
+        let metadata = fs::metadata(&self.path)?;
         let modified = metadata.modified().ok();
         if modified.is_some() && modified == self.last_modified {
             return Ok(None);
