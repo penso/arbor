@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn open_add_repository_picker(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_add_repository_picker(&mut self, cx: &mut Context<Self>) {
         let picker = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -28,7 +30,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn submit_welcome_clone(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_welcome_clone(&mut self, cx: &mut Context<Self>) {
         let url = self.welcome_clone_url.trim().to_owned();
         if url.is_empty() {
             self.welcome_clone_error = Some("Please enter a repository URL".to_owned());
@@ -114,7 +116,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn render_welcome_pane(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_welcome_pane(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let clone_url_active = self.welcome_clone_url_active;
         let cloning = self.welcome_cloning;

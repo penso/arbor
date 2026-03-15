@@ -1,4 +1,6 @@
-fn render_diff_session(
+use super::*;
+
+pub(crate) fn render_diff_session(
     session: DiffSession,
     theme: ThemePalette,
     scroll_handle: &UniformListScrollHandle,
@@ -104,7 +106,7 @@ fn render_diff_session(
         )
 }
 
-fn render_diff_row(
+pub(crate) fn render_diff_row(
     session_id: u64,
     row_index: usize,
     line: DiffLine,
@@ -176,7 +178,7 @@ fn render_diff_row(
         ))
 }
 
-fn render_diff_column(
+pub(crate) fn render_diff_column(
     session_id: u64,
     row_index: usize,
     side: usize,
@@ -245,7 +247,7 @@ fn render_diff_column(
         )
 }
 
-fn render_diff_zonemap(
+pub(crate) fn render_diff_zonemap(
     lines: Arc<[DiffLine]>,
     theme: ThemePalette,
     scroll_handle: &UniformListScrollHandle,
@@ -372,13 +374,13 @@ fn render_diff_zonemap(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ZonemapMarkerSpan {
-    start_row: usize,
-    end_row: usize,
-    color: u32,
+pub(crate) struct ZonemapMarkerSpan {
+    pub(crate) start_row: usize,
+    pub(crate) end_row: usize,
+    pub(crate) color: u32,
 }
 
-fn build_zonemap_marker_spans(lines: &[DiffLine]) -> Vec<ZonemapMarkerSpan> {
+pub(crate) fn build_zonemap_marker_spans(lines: &[DiffLine]) -> Vec<ZonemapMarkerSpan> {
     let mut spans: Vec<ZonemapMarkerSpan> = Vec::new();
 
     for (row, line) in lines.iter().enumerate() {
@@ -404,7 +406,7 @@ fn build_zonemap_marker_spans(lines: &[DiffLine]) -> Vec<ZonemapMarkerSpan> {
     spans
 }
 
-fn diff_visible_row_range(
+pub(crate) fn diff_visible_row_range(
     scroll_handle: &UniformListScrollHandle,
     total_rows: usize,
 ) -> (usize, usize) {
@@ -426,7 +428,7 @@ fn diff_visible_row_range(
     (clamped_top, clamped_bottom.max(clamped_top))
 }
 
-fn zonemap_marker_color(kind: DiffLineKind) -> Option<u32> {
+pub(crate) fn zonemap_marker_color(kind: DiffLineKind) -> Option<u32> {
     match kind {
         DiffLineKind::FileHeader => Some(0x6d88a6),
         DiffLineKind::Added => Some(0x72d69c),
@@ -436,7 +438,7 @@ fn zonemap_marker_color(kind: DiffLineKind) -> Option<u32> {
     }
 }
 
-fn diff_line_backgrounds(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
+pub(crate) fn diff_line_backgrounds(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
     match kind {
         DiffLineKind::FileHeader => (theme.tab_active_bg, theme.tab_active_bg),
         DiffLineKind::Context
@@ -446,7 +448,7 @@ fn diff_line_backgrounds(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) 
     }
 }
 
-fn diff_line_text_colors(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
+pub(crate) fn diff_line_text_colors(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) {
     match kind {
         DiffLineKind::FileHeader => (theme.text_primary, theme.text_primary),
         DiffLineKind::Context => (theme.text_primary, theme.text_primary),
@@ -456,7 +458,7 @@ fn diff_line_text_colors(kind: DiffLineKind, theme: ThemePalette) -> (u32, u32) 
     }
 }
 
-fn diff_line_markers(kind: DiffLineKind) -> (char, char) {
+pub(crate) fn diff_line_markers(kind: DiffLineKind) -> (char, char) {
     match kind {
         DiffLineKind::FileHeader => (' ', ' '),
         DiffLineKind::Context => (' ', ' '),
@@ -466,7 +468,7 @@ fn diff_line_markers(kind: DiffLineKind) -> (char, char) {
     }
 }
 
-fn diff_marker_color(marker: char) -> u32 {
+pub(crate) fn diff_marker_color(marker: char) -> u32 {
     match marker {
         '+' => 0x72d69c,
         '-' => 0xeb6f92,
@@ -475,7 +477,7 @@ fn diff_marker_color(marker: char) -> u32 {
     }
 }
 
-fn wrap_diff_document_lines(
+pub(crate) fn wrap_diff_document_lines(
     raw_lines: &[DiffLine],
     raw_file_row_indices: &HashMap<PathBuf, usize>,
     wrap_columns: usize,
@@ -499,7 +501,7 @@ fn wrap_diff_document_lines(
     (wrapped_lines, wrapped_file_row_indices)
 }
 
-fn wrap_diff_line(line: DiffLine, wrap_columns: usize) -> Vec<DiffLine> {
+pub(crate) fn wrap_diff_line(line: DiffLine, wrap_columns: usize) -> Vec<DiffLine> {
     let wrap_columns = wrap_columns.max(1);
     if line.kind == DiffLineKind::FileHeader {
         return split_diff_text_chunks(line.left_text, wrap_columns.saturating_mul(2))
@@ -532,7 +534,7 @@ fn wrap_diff_line(line: DiffLine, wrap_columns: usize) -> Vec<DiffLine> {
     wrapped
 }
 
-fn split_diff_text_chunks(text: String, wrap_columns: usize) -> Vec<String> {
+pub(crate) fn split_diff_text_chunks(text: String, wrap_columns: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
@@ -564,12 +566,16 @@ fn split_diff_text_chunks(text: String, wrap_columns: usize) -> Vec<String> {
     chunks
 }
 
-fn diff_row_element_id(prefix: &'static str, session_id: u64, row_index: usize) -> ElementId {
+pub(crate) fn diff_row_element_id(
+    prefix: &'static str,
+    session_id: u64,
+    row_index: usize,
+) -> ElementId {
     let session_scope = ElementId::from((prefix, session_id));
     ElementId::from((session_scope, row_index.to_string()))
 }
 
-fn diff_row_side_element_id(
+pub(crate) fn diff_row_side_element_id(
     prefix: &'static str,
     session_id: u64,
     row_index: usize,

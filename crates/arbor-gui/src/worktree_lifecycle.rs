@@ -1,11 +1,13 @@
+use super::*;
+
 impl ArborWindow {
-    fn next_create_modal_instance_id(&mut self) -> u64 {
+    pub(crate) fn next_create_modal_instance_id(&mut self) -> u64 {
         let instance_id = self.next_create_modal_instance_id;
         self.next_create_modal_instance_id = self.next_create_modal_instance_id.wrapping_add(1);
         instance_id
     }
 
-    fn queue_local_worktree_selection_after_refresh(
+    pub(crate) fn queue_local_worktree_selection_after_refresh(
         &mut self,
         worktree_path: PathBuf,
         cx: &mut Context<Self>,
@@ -16,7 +18,7 @@ impl ArborWindow {
         self.focus_terminal_on_next_render = true;
     }
 
-    fn refresh_create_modal_branch_previews(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_create_modal_branch_previews(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.create_modal.as_mut() else {
             return;
         };
@@ -63,7 +65,10 @@ impl ArborWindow {
         }));
     }
 
-    fn repository_for_issue_target(&self, target: &IssueTarget) -> Option<&RepositorySummary> {
+    pub(crate) fn repository_for_issue_target(
+        &self,
+        target: &IssueTarget,
+    ) -> Option<&RepositorySummary> {
         match target.daemon_target {
             ManagedDaemonTarget::Primary => self
                 .repositories
@@ -73,7 +78,7 @@ impl ArborWindow {
         }
     }
 
-    fn open_create_modal(
+    pub(crate) fn open_create_modal(
         &mut self,
         repo_index: usize,
         tab: CreateModalTab,
@@ -128,13 +133,14 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn open_issue_create_modal(
+    pub(crate) fn open_issue_create_modal(
         &mut self,
         issue: terminal_daemon_http::IssueDto,
         cx: &mut Context<Self>,
     ) {
         let Some(target) = self.issue_target_for_current_selection() else {
-            self.notice = Some("No daemon-backed repository is selected for this issue.".to_owned());
+            self.notice =
+                Some("No daemon-backed repository is selected for this issue.".to_owned());
             cx.notify();
             return;
         };
@@ -148,7 +154,7 @@ impl ArborWindow {
         self.open_issue_create_modal_for_target(target, source_label, issue, cx);
     }
 
-    fn open_issue_create_modal_for_target(
+    pub(crate) fn open_issue_create_modal_for_target(
         &mut self,
         target: IssueTarget,
         source_label: String,
@@ -207,7 +213,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn refresh_create_modal_managed_preview(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_create_modal_managed_preview(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.create_modal.as_mut() else {
             return;
         };
@@ -284,7 +290,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn update_create_review_pr_modal_input(
+    pub(crate) fn update_create_review_pr_modal_input(
         &mut self,
         input: ReviewPrModalInputEvent,
         cx: &mut Context<Self>,
@@ -315,7 +321,9 @@ impl ArborWindow {
             },
             ReviewPrModalInputEvent::MoveActiveField => {
                 modal.review_active_field = match modal.review_active_field {
-                    CreateReviewPrField::RepositoryPath => CreateReviewPrField::PullRequestReference,
+                    CreateReviewPrField::RepositoryPath => {
+                        CreateReviewPrField::PullRequestReference
+                    },
                     CreateReviewPrField::PullRequestReference => CreateReviewPrField::WorktreeName,
                     CreateReviewPrField::WorktreeName => CreateReviewPrField::RepositoryPath,
                 };
@@ -357,7 +365,7 @@ impl ArborWindow {
         }
     }
 
-    fn set_create_modal_checkout_kind(
+    pub(crate) fn set_create_modal_checkout_kind(
         &mut self,
         checkout_kind: CheckoutKind,
         cx: &mut Context<Self>,
@@ -375,12 +383,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_create_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_create_modal(&mut self, cx: &mut Context<Self>) {
         self.create_modal = None;
         cx.notify();
     }
 
-    fn open_delete_modal(
+    pub(crate) fn open_delete_modal(
         &mut self,
         target: DeleteTarget,
         label: String,
@@ -425,12 +433,12 @@ impl ArborWindow {
         }
     }
 
-    fn close_delete_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_delete_modal(&mut self, cx: &mut Context<Self>) {
         self.delete_modal = None;
         cx.notify();
     }
 
-    fn execute_delete(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn execute_delete(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.delete_modal.as_ref() else {
             return;
         };
@@ -563,7 +571,7 @@ impl ArborWindow {
         }
     }
 
-    fn update_create_worktree_modal_input(
+    pub(crate) fn update_create_worktree_modal_input(
         &mut self,
         input: ModalInputEvent,
         cx: &mut Context<Self>,
@@ -630,7 +638,7 @@ impl ArborWindow {
         }
     }
 
-    fn submit_create_worktree_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_create_worktree_modal(&mut self, cx: &mut Context<Self>) {
         let github_login = self.branch_prefix_github_login();
         let Some(modal) = self.create_modal.as_mut() else {
             return;
@@ -657,7 +665,8 @@ impl ArborWindow {
         }
 
         modal.is_creating = true;
-        modal.creating_status = daemon_managed_target.map(|_| "Creating managed worktree…".to_owned());
+        modal.creating_status =
+            daemon_managed_target.map(|_| "Creating managed worktree…".to_owned());
         cx.notify();
 
         if let Some(target) = daemon_managed_target {
@@ -703,7 +712,10 @@ impl ArborWindow {
                                 ManagedDaemonTarget::Remote(index) => {
                                     if let Some(state) = this.remote_daemon_states.get_mut(&index) {
                                         let branch = created.branch.clone().unwrap_or_default();
-                                        if !state.worktrees.iter().any(|worktree| worktree.path == created.path)
+                                        if !state
+                                            .worktrees
+                                            .iter()
+                                            .any(|worktree| worktree.path == created.path)
                                         {
                                             state.worktrees.push(
                                                 terminal_daemon_http::RemoteWorktreeDto {
@@ -721,11 +733,7 @@ impl ArborWindow {
                                         }
                                     }
 
-                                    this.activate_remote_worktree(
-                                        index,
-                                        created.path,
-                                        cx,
-                                    );
+                                    this.activate_remote_worktree(index, created.path, cx);
                                 },
                             }
                         },
@@ -813,7 +821,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn submit_create_review_pr_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_create_review_pr_modal(&mut self, cx: &mut Context<Self>) {
         let github_token = self.github_access_token();
         let github_login = self.branch_prefix_github_login();
         let Some(modal) = self.create_modal.as_mut() else {
@@ -921,7 +929,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn update_create_outpost_modal_input(
+    pub(crate) fn update_create_outpost_modal_input(
         &mut self,
         input: OutpostModalInputEvent,
         cx: &mut Context<Self>,
@@ -1013,7 +1021,7 @@ impl ArborWindow {
         }
     }
 
-    fn submit_create_outpost_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_create_outpost_modal(&mut self, cx: &mut Context<Self>) {
         let repo_root = self.repo_root.clone();
         let github_login = self.branch_prefix_github_login();
         let Some(modal) = self.create_modal.as_mut() else {
@@ -1074,12 +1082,12 @@ impl ArborWindow {
                     let conn_slot = pool
                         .get_or_connect(&host)
                         .map_err(|error| OutpostError::Connection(format!("{error}")))?;
-                    let guard = conn_slot
-                        .lock()
-                        .map_err(|_| OutpostError::Connection("SSH connection lock poisoned".to_owned()))?;
-                    let connection = guard
-                        .as_ref()
-                        .ok_or_else(|| OutpostError::Connection("SSH connection not available".to_owned()))?;
+                    let guard = conn_slot.lock().map_err(|_| {
+                        OutpostError::Connection("SSH connection lock poisoned".to_owned())
+                    })?;
+                    let connection = guard.as_ref().ok_or_else(|| {
+                        OutpostError::Connection("SSH connection not available".to_owned())
+                    })?;
                     let provisioner =
                         arbor_ssh::provisioner::SshProvisioner::new(connection, &host);
                     provisioner
@@ -1098,7 +1106,9 @@ impl ArborWindow {
             })
             .detach();
 
-            let mut result: Result<arbor_core::remote::ProvisionResult, OutpostError> = Err(OutpostError::Provisioning("provisioning task was cancelled".to_owned()));
+            let mut result: Result<arbor_core::remote::ProvisionResult, OutpostError> = Err(
+                OutpostError::Provisioning("provisioning task was cancelled".to_owned()),
+            );
             while let Ok(msg) = msg_rx.recv().await {
                 match msg {
                     ProvisionMsg::Progress(status) => {
@@ -1131,17 +1141,17 @@ impl ArborWindow {
                             has_remote_daemon: provision_result.has_remote_daemon,
                         };
                         if let Err(error) = this.outpost_store.upsert(record) {
-                            this.notice = Some(format!("outpost created but failed to save: {error}"));
+                            this.notice =
+                                Some(format!("outpost created but failed to save: {error}"));
                         } else {
                             this.notice =
                                 Some(format!("outpost `{outpost_name}` created on {host_name}"));
                         }
                         this.outposts =
                             load_outpost_summaries(this.outpost_store.as_ref(), &this.remote_hosts);
-                        let new_index = this
-                            .outposts
-                            .iter()
-                            .position(|outpost| outpost.label == outpost_name && outpost.host_name == host_name);
+                        let new_index = this.outposts.iter().position(|outpost| {
+                            outpost.label == outpost_name && outpost.host_name == host_name
+                        });
                         if let Some(index) = new_index {
                             this.active_outpost_index = Some(index);
                         }
@@ -1165,7 +1175,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn render_outpost_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_outpost_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(menu) = self.outpost_context_menu.as_ref() else {
             return div();
         };
@@ -1265,7 +1275,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_create_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_create_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.create_modal.clone() else {
             return div();
         };
@@ -2145,7 +2155,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_delete_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.delete_modal.clone() else {
             return div();
         };
@@ -2244,9 +2254,11 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_delete_modal(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_delete_modal(cx);
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -2262,58 +2274,57 @@ impl ArborWindow {
                                 .text_color(rgb(theme.text_muted))
                                 .child("Checking for unpushed commits..."),
                         ),
-                        Some(true) => this.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0xe5c07b))
-                                .child("\u{f071} This worktree has unpushed commits that will be lost."),
-                        ),
+                        Some(true) => this.child(div().text_xs().text_color(rgb(0xe5c07b)).child(
+                            "\u{f071} This worktree has unpushed commits that will be lost.",
+                        )),
                         Some(false) => this,
                     })
-                    .when(is_worktree && !is_discrete_clone && !modal.branch.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .id("delete-branch-checkbox")
-                                .cursor_pointer()
-                                .hover(|this| this.bg(rgb(theme.panel_active_bg)))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .py_1()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(modal) = this.delete_modal.as_mut() {
-                                        modal.delete_branch = !modal.delete_branch;
-                                        cx.notify();
-                                    }
-                                }))
-                                .child(
-                                    div()
-                                        .w(px(14.))
-                                        .h(px(14.))
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(rgb(theme.border))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .when(modal.delete_branch, |this| {
-                                            this.bg(rgb(theme.accent)).child(
-                                                div()
-                                                    .font_family(FONT_MONO)
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(theme.sidebar_bg))
-                                                    .child("\u{f00c}"),
-                                            )
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_primary))
-                                        .child(format!("Also delete branch `{}`", modal.branch)),
-                                ),
-                        )
-                    })
+                    .when(
+                        is_worktree && !is_discrete_clone && !modal.branch.is_empty(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("delete-branch-checkbox")
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(theme.panel_active_bg)))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .py_1()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(modal) = this.delete_modal.as_mut() {
+                                            modal.delete_branch = !modal.delete_branch;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .w(px(14.))
+                                            .h(px(14.))
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(rgb(theme.border))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(modal.delete_branch, |this| {
+                                                this.bg(rgb(theme.accent)).child(
+                                                    div()
+                                                        .font_family(FONT_MONO)
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(theme.sidebar_bg))
+                                                        .child("\u{f00c}"),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div().text_xs().text_color(rgb(theme.text_primary)).child(
+                                            format!("Also delete branch `{}`", modal.branch),
+                                        ),
+                                    ),
+                            )
+                        },
+                    )
                     .when_some(modal.error.clone(), |this, error| {
                         this.child(div().text_xs().text_color(rgb(0xeb6f92)).child(error))
                     })
@@ -2332,9 +2343,11 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_delete_modal(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_delete_modal(cx);
+                                    },
+                                )),
                             )
                             .child(
                                 div()
@@ -2353,9 +2366,7 @@ impl ArborWindow {
                                     })
                                     .when(!delete_disabled, |this| {
                                         this.hover(|surface| {
-                                            surface
-                                                .bg(rgb(0xeb6f92))
-                                                .text_color(rgb(theme.app_bg))
+                                            surface.bg(rgb(0xeb6f92)).text_color(rgb(theme.app_bg))
                                         })
                                     })
                                     .child(delete_label)
@@ -2370,18 +2381,18 @@ impl ArborWindow {
     }
 }
 
-const CREATE_MODAL_MONO_PREVIEW_MAX_CHARS: usize = 56;
-const CREATE_MODAL_TEXT_PREVIEW_MAX_CHARS: usize = 72;
+pub(crate) const CREATE_MODAL_MONO_PREVIEW_MAX_CHARS: usize = 56;
+pub(crate) const CREATE_MODAL_TEXT_PREVIEW_MAX_CHARS: usize = 72;
 
-fn modal_mono_preview(value: &str) -> String {
+pub(crate) fn modal_mono_preview(value: &str) -> String {
     truncate_middle_text(value, CREATE_MODAL_MONO_PREVIEW_MAX_CHARS)
 }
 
-fn modal_text_preview(value: &str) -> String {
+pub(crate) fn modal_text_preview(value: &str) -> String {
     truncate_with_ellipsis(value, CREATE_MODAL_TEXT_PREVIEW_MAX_CHARS)
 }
 
-fn modal_preview_line(value: String, color: u32, mono: bool) -> Div {
+pub(crate) fn modal_preview_line(value: String, color: u32, mono: bool) -> Div {
     div()
         .w_full()
         .min_w_0()
@@ -2394,7 +2405,7 @@ fn modal_preview_line(value: String, color: u32, mono: bool) -> Div {
         .child(value)
 }
 
-fn modal_preview_box(theme: ThemePalette, label: &'static str, value: String) -> Div {
+pub(crate) fn modal_preview_box(theme: ThemePalette, label: &'static str, value: String) -> Div {
     div()
         .flex_none()
         .w_full()
@@ -2413,7 +2424,7 @@ fn modal_preview_box(theme: ThemePalette, label: &'static str, value: String) ->
         .child(modal_preview_line(value, theme.text_primary, true))
 }
 
-fn preview_managed_worktree_path(
+pub(crate) fn preview_managed_worktree_path(
     repository_path: &str,
     worktree_name: &str,
 ) -> Result<String, WorktreeError> {
@@ -2421,17 +2432,24 @@ fn preview_managed_worktree_path(
     let repository_name = repository_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| WorktreeError::InvalidInput("repository name cannot be determined".to_owned()))?;
+        .ok_or_else(|| {
+            WorktreeError::InvalidInput("repository name cannot be determined".to_owned())
+        })?;
     let sanitized_worktree = sanitize_worktree_name(worktree_name);
     if sanitized_worktree.is_empty() {
-        return Err(WorktreeError::InvalidInput("invalid worktree name".to_owned()));
+        return Err(WorktreeError::InvalidInput(
+            "invalid worktree name".to_owned(),
+        ));
     }
 
     let path = build_managed_worktree_path(repository_name, &sanitized_worktree)?;
     Ok(path.display().to_string())
 }
 
-fn review_worktree_name_preview(pr_reference: &str, explicit_worktree_name: &str) -> Option<String> {
+pub(crate) fn review_worktree_name_preview(
+    pr_reference: &str,
+    explicit_worktree_name: &str,
+) -> Option<String> {
     let explicit = sanitize_worktree_name(explicit_worktree_name);
     if !explicit.is_empty() {
         return Some(explicit);
@@ -2440,13 +2458,13 @@ fn review_worktree_name_preview(pr_reference: &str, explicit_worktree_name: &str
     github_service::parse_pull_request_number(pr_reference).map(|number| format!("pr-{number}"))
 }
 
-struct CreateModalBranchPreviews {
-    local_branch_preview: String,
-    review_branch_preview: String,
-    outpost_branch_preview: String,
+pub(crate) struct CreateModalBranchPreviews {
+    pub(crate) local_branch_preview: String,
+    pub(crate) review_branch_preview: String,
+    pub(crate) outpost_branch_preview: String,
 }
 
-fn resolve_create_modal_branch_previews(
+pub(crate) fn resolve_create_modal_branch_previews(
     repository_path: &str,
     worktree_name: &str,
     review_worktree_name: Option<&str>,
@@ -2474,7 +2492,7 @@ fn resolve_create_modal_branch_previews(
     }
 }
 
-fn create_managed_worktree(
+pub(crate) fn create_managed_worktree(
     repository_path_input: String,
     worktree_name_input: String,
     checkout_kind: CheckoutKind,
@@ -2488,16 +2506,21 @@ fn create_managed_worktree(
         )));
     }
 
-    let repository_root = worktree::repo_root(&repository_path)
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to resolve repository root: {error}")))?;
+    let repository_root = worktree::repo_root(&repository_path).map_err(|error| {
+        WorktreeError::GitOperation(format!("failed to resolve repository root: {error}"))
+    })?;
     let repository_name = repository_root
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| WorktreeError::InvalidInput("repository root has no terminal directory name".to_owned()))?;
+        .ok_or_else(|| {
+            WorktreeError::InvalidInput("repository root has no terminal directory name".to_owned())
+        })?;
 
     let sanitized_worktree_name = sanitize_worktree_name(&worktree_name_input);
     if sanitized_worktree_name.is_empty() {
-        return Err(WorktreeError::InvalidInput("worktree name contains no usable characters".to_owned()));
+        return Err(WorktreeError::InvalidInput(
+            "worktree name contains no usable characters".to_owned(),
+        ));
     }
 
     let branch_name = derive_branch_name_with_repo_config(
@@ -2514,7 +2537,9 @@ fn create_managed_worktree(
     }
 
     let Some(parent_directory) = worktree_path.parent() else {
-        return Err(WorktreeError::InvalidInput("invalid worktree path".to_owned()));
+        return Err(WorktreeError::InvalidInput(
+            "invalid worktree path".to_owned(),
+        ));
     };
     fs::create_dir_all(parent_directory).map_err(|error| {
         WorktreeError::Io(format!(
@@ -2533,7 +2558,9 @@ fn create_managed_worktree(
                 force: false,
             },
         )
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to create worktree: {error}")))?,
+        .map_err(|error| {
+            WorktreeError::GitOperation(format!("failed to create worktree: {error}"))
+        })?,
         CheckoutKind::DiscreteClone => {
             create_discrete_clone(&repository_root, &worktree_path, &branch_name)?
         },
@@ -2569,7 +2596,7 @@ fn create_managed_worktree(
     })
 }
 
-fn create_review_worktree(
+pub(crate) fn create_review_worktree(
     repository_path_input: String,
     pr_reference_input: String,
     worktree_name_input: String,
@@ -2585,12 +2612,15 @@ fn create_review_worktree(
         )));
     }
 
-    let repository_root = worktree::repo_root(&repository_path)
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to resolve repository root: {error}")))?;
+    let repository_root = worktree::repo_root(&repository_path).map_err(|error| {
+        WorktreeError::GitOperation(format!("failed to resolve repository root: {error}"))
+    })?;
     let repository_name = repository_root
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| WorktreeError::InvalidInput("repository root has no terminal directory name".to_owned()))?;
+        .ok_or_else(|| {
+            WorktreeError::InvalidInput("repository root has no terminal directory name".to_owned())
+        })?;
     let repo_slug = github_repo_slug_for_repo(&repository_root).ok_or_else(|| {
         WorktreeError::GitHub(format!(
             "repository `{}` does not have a GitHub origin remote",
@@ -2611,7 +2641,9 @@ fn create_review_worktree(
     };
     let sanitized_worktree_name = sanitize_worktree_name(&requested_name);
     if sanitized_worktree_name.is_empty() {
-        return Err(WorktreeError::InvalidInput("worktree name contains no usable characters".to_owned()));
+        return Err(WorktreeError::InvalidInput(
+            "worktree name contains no usable characters".to_owned(),
+        ));
     }
 
     let branch_name = derive_branch_name_with_repo_config(
@@ -2628,7 +2660,9 @@ fn create_review_worktree(
     }
 
     let Some(parent_directory) = worktree_path.parent() else {
-        return Err(WorktreeError::InvalidInput("invalid worktree path".to_owned()));
+        return Err(WorktreeError::InvalidInput(
+            "invalid worktree path".to_owned(),
+        ));
     };
     fs::create_dir_all(parent_directory).map_err(|error| {
         WorktreeError::Io(format!(
@@ -2639,7 +2673,11 @@ fn create_review_worktree(
 
     match checkout_kind {
         CheckoutKind::LinkedWorktree => {
-            fetch_pull_request_head_into_branch(&repository_root, pull_request.number, &branch_name)?;
+            fetch_pull_request_head_into_branch(
+                &repository_root,
+                pull_request.number,
+                &branch_name,
+            )?;
             worktree::add(
                 &repository_root,
                 &worktree_path,
@@ -2649,7 +2687,9 @@ fn create_review_worktree(
                     force: false,
                 },
             )
-            .map_err(|error| WorktreeError::GitOperation(format!("failed to create worktree: {error}")))?;
+            .map_err(|error| {
+                WorktreeError::GitOperation(format!("failed to create worktree: {error}"))
+            })?;
         },
         CheckoutKind::DiscreteClone => create_discrete_clone_from_pull_request(
             &repository_root,
@@ -2689,7 +2729,9 @@ fn create_review_worktree(
     })
 }
 
-fn default_review_worktree_name(pull_request: &github_service::ReviewPullRequest) -> String {
+pub(crate) fn default_review_worktree_name(
+    pull_request: &github_service::ReviewPullRequest,
+) -> String {
     let title_slug = sanitize_worktree_name(&pull_request.title);
     if title_slug.is_empty() {
         format!("pr-{}", pull_request.number)
@@ -2698,7 +2740,7 @@ fn default_review_worktree_name(pull_request: &github_service::ReviewPullRequest
     }
 }
 
-fn fetch_pull_request_head_into_branch(
+pub(crate) fn fetch_pull_request_head_into_branch(
     repository_root: &Path,
     pull_request_number: u64,
     branch_name: &str,
@@ -2712,23 +2754,26 @@ fn fetch_pull_request_head_into_branch(
 
     let output = run_command_output(&mut command, "fetch pull request")?;
     if !output.status.success() {
-        return Err(WorktreeError::CommandFailed(command_failure_message("fetch pull request", &output)));
+        return Err(WorktreeError::CommandFailed(command_failure_message(
+            "fetch pull request",
+            &output,
+        )));
     }
 
     Ok(())
 }
 
-fn create_discrete_clone(
+pub(crate) fn create_discrete_clone(
     source_repo_root: &Path,
     checkout_path: &Path,
     branch_name: &str,
 ) -> Result<(), WorktreeError> {
-    let clone_source = source_repo_root
-        .to_str()
-        .ok_or_else(|| WorktreeError::InvalidInput("repository path contains invalid UTF-8".to_owned()))?;
-    let checkout_target = checkout_path
-        .to_str()
-        .ok_or_else(|| WorktreeError::InvalidInput("checkout path contains invalid UTF-8".to_owned()))?;
+    let clone_source = source_repo_root.to_str().ok_or_else(|| {
+        WorktreeError::InvalidInput("repository path contains invalid UTF-8".to_owned())
+    })?;
+    let checkout_target = checkout_path.to_str().ok_or_else(|| {
+        WorktreeError::InvalidInput("checkout path contains invalid UTF-8".to_owned())
+    })?;
 
     let source_repo = git2::Repository::open(source_repo_root).map_err(|error| {
         WorktreeError::GitOperation(format!(
@@ -2756,37 +2801,43 @@ fn create_discrete_clone(
     let head_commit = cloned_repo
         .head()
         .and_then(|head| head.peel_to_commit())
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to resolve cloned HEAD: {error}")))?;
+        .map_err(|error| {
+            WorktreeError::GitOperation(format!("failed to resolve cloned HEAD: {error}"))
+        })?;
     cloned_repo
         .branch(branch_name, &head_commit, false)
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to create branch `{branch_name}`: {error}")))?;
+        .map_err(|error| {
+            WorktreeError::GitOperation(format!("failed to create branch `{branch_name}`: {error}"))
+        })?;
 
     let branch_ref = format!("refs/heads/{branch_name}");
-    cloned_repo
-        .set_head(&branch_ref)
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to set HEAD to `{branch_name}`: {error}")))?;
+    cloned_repo.set_head(&branch_ref).map_err(|error| {
+        WorktreeError::GitOperation(format!("failed to set HEAD to `{branch_name}`: {error}"))
+    })?;
 
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.force();
     cloned_repo
         .checkout_head(Some(&mut checkout))
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to check out `{branch_name}`: {error}")))?;
+        .map_err(|error| {
+            WorktreeError::GitOperation(format!("failed to check out `{branch_name}`: {error}"))
+        })?;
 
     Ok(())
 }
 
-fn create_discrete_clone_from_pull_request(
+pub(crate) fn create_discrete_clone_from_pull_request(
     source_repo_root: &Path,
     checkout_path: &Path,
     pull_request_number: u64,
     branch_name: &str,
 ) -> Result<(), WorktreeError> {
-    let clone_source = source_repo_root
-        .to_str()
-        .ok_or_else(|| WorktreeError::InvalidInput("repository path contains invalid UTF-8".to_owned()))?;
-    let checkout_target = checkout_path
-        .to_str()
-        .ok_or_else(|| WorktreeError::InvalidInput("checkout path contains invalid UTF-8".to_owned()))?;
+    let clone_source = source_repo_root.to_str().ok_or_else(|| {
+        WorktreeError::InvalidInput("repository path contains invalid UTF-8".to_owned())
+    })?;
+    let checkout_target = checkout_path.to_str().ok_or_else(|| {
+        WorktreeError::InvalidInput("checkout path contains invalid UTF-8".to_owned())
+    })?;
 
     let source_repo = git2::Repository::open(source_repo_root).map_err(|error| {
         WorktreeError::GitOperation(format!(
@@ -2814,20 +2865,22 @@ fn create_discrete_clone_from_pull_request(
     fetch_pull_request_head_into_branch(checkout_path, pull_request_number, branch_name)?;
 
     let branch_ref = format!("refs/heads/{branch_name}");
-    cloned_repo
-        .set_head(&branch_ref)
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to set HEAD to `{branch_name}`: {error}")))?;
+    cloned_repo.set_head(&branch_ref).map_err(|error| {
+        WorktreeError::GitOperation(format!("failed to set HEAD to `{branch_name}`: {error}"))
+    })?;
 
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.force();
     cloned_repo
         .checkout_head(Some(&mut checkout))
-        .map_err(|error| WorktreeError::GitOperation(format!("failed to check out `{branch_name}`: {error}")))?;
+        .map_err(|error| {
+            WorktreeError::GitOperation(format!("failed to check out `{branch_name}`: {error}"))
+        })?;
 
     Ok(())
 }
 
-fn rollback_created_checkout(
+pub(crate) fn rollback_created_checkout(
     repo_root: &Path,
     worktree_path: &Path,
     checkout_kind: CheckoutKind,
@@ -2838,8 +2891,11 @@ fn rollback_created_checkout(
             worktree::remove(repo_root, worktree_path, true)
                 .map_err(|error| WorktreeError::GitOperation(error.to_string()))?;
             if !branch_name.trim().is_empty() {
-                worktree::delete_branch(repo_root, branch_name)
-                    .map_err(|error| WorktreeError::GitOperation(format!("failed to delete branch `{branch_name}`: {error}")))?;
+                worktree::delete_branch(repo_root, branch_name).map_err(|error| {
+                    WorktreeError::GitOperation(format!(
+                        "failed to delete branch `{branch_name}`: {error}"
+                    ))
+                })?;
             }
         },
         CheckoutKind::DiscreteClone => {
@@ -2857,7 +2913,7 @@ fn rollback_created_checkout(
     Ok(())
 }
 
-fn managed_preview_request_matches(
+pub(crate) fn managed_preview_request_matches(
     modal: &CreateModal,
     modal_instance_id: u64,
     generation: u64,
@@ -2865,7 +2921,7 @@ fn managed_preview_request_matches(
     modal.instance_id == modal_instance_id && modal.managed_preview_generation == generation
 }
 
-fn create_modal_branch_preview_matches(
+pub(crate) fn create_modal_branch_preview_matches(
     modal: &CreateModal,
     modal_instance_id: u64,
     generation: u64,

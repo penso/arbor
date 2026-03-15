@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn render_logs_content(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_logs_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let entry_count = self.log_entries.len();
         let auto_scroll = self.log_auto_scroll;
@@ -113,7 +115,11 @@ impl ArborWindow {
     }
 }
 
-fn render_log_row(entry: &log_layer::LogEntry, index: usize, theme: ThemePalette) -> Div {
+pub(crate) fn render_log_row(
+    entry: &log_layer::LogEntry,
+    index: usize,
+    theme: ThemePalette,
+) -> Div {
     let timestamp = entry
         .timestamp
         .duration_since(SystemTime::UNIX_EPOCH)

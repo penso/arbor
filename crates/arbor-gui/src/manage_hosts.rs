@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn open_manage_hosts_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_manage_hosts_modal(&mut self, cx: &mut Context<Self>) {
         self.manage_hosts_modal = Some(ManageHostsModal {
             adding: false,
             name: String::new(),
@@ -15,12 +17,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_manage_hosts_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_manage_hosts_modal(&mut self, cx: &mut Context<Self>) {
         self.manage_hosts_modal = None;
         cx.notify();
     }
 
-    fn update_manage_hosts_modal_input(
+    pub(crate) fn update_manage_hosts_modal_input(
         &mut self,
         input: HostsModalInputEvent,
         cx: &mut Context<Self>,
@@ -73,7 +75,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn submit_add_host(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_add_host(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.manage_hosts_modal.clone() else {
             return;
         };
@@ -158,7 +160,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn remove_host_at(&mut self, host_name: String, cx: &mut Context<Self>) {
+    pub(crate) fn remove_host_at(&mut self, host_name: String, cx: &mut Context<Self>) {
         let store = self.app_config_store.clone();
         let host_name_for_save = host_name.clone();
         self.begin_background_config_save();
@@ -184,7 +186,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn render_manage_hosts_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_manage_hosts_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_hosts_modal.clone() else {
             return div();
         };
@@ -261,15 +263,20 @@ impl ArborWindow {
                                         ActionButtonStyle::Secondary,
                                         !modal.saving,
                                     )
-                                    .when(!modal.saving, |this| {
-                                        this.on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(modal) = this.manage_hosts_modal.as_mut() {
-                                                modal.adding = false;
-                                                modal.error = None;
-                                                cx.notify();
-                                            }
-                                        }))
-                                    }),
+                                    .when(
+                                        !modal.saving,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(modal) =
+                                                    this.manage_hosts_modal.as_mut()
+                                                {
+                                                    modal.adding = false;
+                                                    modal.error = None;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                        },
+                                    ),
                                 ),
                         )
                         .child(
@@ -352,15 +359,20 @@ impl ArborWindow {
                                         ActionButtonStyle::Secondary,
                                         !modal.saving,
                                     )
-                                    .when(!modal.saving, |this| {
-                                        this.on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(modal) = this.manage_hosts_modal.as_mut() {
-                                                modal.adding = false;
-                                                modal.error = None;
-                                                cx.notify();
-                                            }
-                                        }))
-                                    }),
+                                    .when(
+                                        !modal.saving,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(modal) =
+                                                    this.manage_hosts_modal.as_mut()
+                                                {
+                                                    modal.adding = false;
+                                                    modal.error = None;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                        },
+                                    ),
                                 )
                                 .child(
                                     action_button(
@@ -370,11 +382,14 @@ impl ArborWindow {
                                         ActionButtonStyle::Primary,
                                         !add_disabled,
                                     )
-                                    .when(!add_disabled, |this| {
-                                        this.on_click(cx.listener(|this, _, _, cx| {
-                                            this.submit_add_host(cx);
-                                        }))
-                                    }),
+                                    .when(
+                                        !add_disabled,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                this.submit_add_host(cx);
+                                            }))
+                                        },
+                                    ),
                                 ),
                         ),
                 );
@@ -442,9 +457,11 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_manage_hosts_modal(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_manage_hosts_modal(cx);
+                                    },
+                                )),
                             ),
                     )
                     .child(if hosts.is_empty() {
@@ -503,47 +520,42 @@ impl ArborWindow {
                                     .child(
                                         action_button(
                                             theme,
-                                            ElementId::NamedInteger(
-                                                "remove-host".into(),
-                                                i as u64,
-                                            ),
+                                            ElementId::NamedInteger("remove-host".into(), i as u64),
                                             "Remove",
                                             ActionButtonStyle::Secondary,
                                             true,
                                         )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.remove_host_at(host_name.clone(), cx);
-                                        })),
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.remove_host_at(host_name.clone(), cx);
+                                            }),
+                                        ),
                                     ),
                             );
                         }
                         list.into_any_element()
                     })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .child(
-                                action_button(
-                                    theme,
-                                    "open-add-host-form",
-                                    "+ Add Host",
-                                    ActionButtonStyle::Primary,
-                                    true,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(modal) = this.manage_hosts_modal.as_mut() {
-                                        modal.adding = true;
-                                        modal.name.clear();
-                                        modal.hostname.clear();
-                                        modal.user.clear();
-                                        modal.active_field = ManageHostsField::Name;
-                                        modal.error = None;
-                                        cx.notify();
-                                    }
-                                })),
-                            ),
+                        div().flex().items_center().justify_end().child(
+                            action_button(
+                                theme,
+                                "open-add-host-form",
+                                "+ Add Host",
+                                ActionButtonStyle::Primary,
+                                true,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(modal) = this.manage_hosts_modal.as_mut() {
+                                    modal.adding = true;
+                                    modal.name.clear();
+                                    modal.hostname.clear();
+                                    modal.user.clear();
+                                    modal.active_field = ManageHostsField::Name;
+                                    modal.error = None;
+                                    cx.notify();
+                                }
+                            })),
+                        ),
                     ),
             )
     }

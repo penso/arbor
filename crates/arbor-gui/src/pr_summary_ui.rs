@@ -1,7 +1,12 @@
-const MAX_VISIBLE_PR_CHECKS: usize = 6;
+use super::*;
+
+pub(crate) const MAX_VISIBLE_PR_CHECKS: usize = 6;
 
 impl ArborWindow {
-    fn render_changes_worktree_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn render_changes_worktree_summary(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let worktree = self.active_worktree()?;
         let theme = self.theme();
         let attention = worktree_attention_indicator(worktree);
@@ -258,16 +263,13 @@ impl ArborWindow {
 
                 if can_toggle_checks {
                     checks_summary = checks_summary
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.text_disabled))
-                                .child(if checks_expanded {
-                                    "\u{f078}"
-                                } else {
-                                    "\u{f054}"
-                                }),
-                        )
+                        .child(div().text_xs().text_color(rgb(theme.text_disabled)).child(
+                            if checks_expanded {
+                                "\u{f078}"
+                            } else {
+                                "\u{f054}"
+                            },
+                        ))
                         .cursor_pointer()
                         .hover(|this| this.bg(rgb(theme.sidebar_bg)))
                         .rounded_sm()
@@ -291,12 +293,7 @@ impl ArborWindow {
                     .items_center()
                     .gap(px(3.))
                     .child(div().text_xs().text_color(rgb(review.2)).child(review.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(review.2))
-                            .child(review.1),
-                    ),
+                    .child(div().text_xs().text_color(rgb(review.2)).child(review.1)),
             );
             status_row = status_row.child(
                 div()
@@ -345,16 +342,13 @@ impl ArborWindow {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child(if checks_expanded {
-                                        "\u{f078}"
-                                    } else {
-                                        "\u{f054}"
-                                    }),
-                            )
+                            .child(div().text_xs().text_color(rgb(theme.text_disabled)).child(
+                                if checks_expanded {
+                                    "\u{f078}"
+                                } else {
+                                    "\u{f054}"
+                                },
+                            ))
                             .child(
                                 div()
                                     .text_xs()
@@ -404,16 +398,13 @@ impl ArborWindow {
                                     this.open_external_url(&pr_url, cx);
                                 })),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.text_disabled))
-                                .child(if show_pr_loading_indicator {
-                                    "Fetching GitHub details"
-                                } else {
-                                    "GitHub details unavailable"
-                                }),
-                        ),
+                        .child(div().text_xs().text_color(rgb(theme.text_disabled)).child(
+                            if show_pr_loading_indicator {
+                                "Fetching GitHub details"
+                            } else {
+                                "GitHub details unavailable"
+                            },
+                        )),
                 );
             } else if !show_pr_loading_indicator {
                 card = card.child(
@@ -428,7 +419,7 @@ impl ArborWindow {
         Some(card.into_any_element())
     }
 
-    fn toggle_changes_pr_checks_for_worktree(
+    pub(crate) fn toggle_changes_pr_checks_for_worktree(
         &mut self,
         worktree_path: PathBuf,
         cx: &mut Context<Self>,
@@ -442,7 +433,7 @@ impl ArborWindow {
     }
 }
 
-fn pr_state_presentation(
+pub(crate) fn pr_state_presentation(
     theme: &ThemePalette,
     state: github_service::PrState,
 ) -> (&'static str, u32) {
@@ -454,7 +445,7 @@ fn pr_state_presentation(
     }
 }
 
-fn review_status_presentation(
+pub(crate) fn review_status_presentation(
     review_decision: github_service::ReviewDecision,
 ) -> (&'static str, &'static str, u32) {
     match review_decision {
@@ -466,7 +457,7 @@ fn review_status_presentation(
     }
 }
 
-fn merge_status_presentation(
+pub(crate) fn merge_status_presentation(
     theme: &ThemePalette,
     pr: &github_service::PrDetails,
 ) -> (&'static str, u32) {
@@ -488,7 +479,7 @@ fn merge_status_presentation(
                 MergeStateStatus::Blocked => ("Merge blocked", 0xe5c07b_u32),
                 MergeStateStatus::Clean | MergeStateStatus::HasHooks => {
                     ("Ready to merge", 0x72d69c_u32)
-                }
+                },
                 MergeStateStatus::Dirty => ("Merge conflicts", 0xeb6f92_u32),
                 MergeStateStatus::Draft => ("Draft", theme.text_disabled),
                 MergeStateStatus::Unknown => match pr.mergeable {
@@ -498,11 +489,13 @@ fn merge_status_presentation(
                 },
                 MergeStateStatus::Unstable => ("Checks failing", 0xeb6f92_u32),
             }
-        }
+        },
     }
 }
 
-fn check_status_presentation(status: github_service::CheckStatus) -> (&'static str, u32) {
+pub(crate) fn check_status_presentation(
+    status: github_service::CheckStatus,
+) -> (&'static str, u32) {
     match status {
         github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
         github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
@@ -510,24 +503,24 @@ fn check_status_presentation(status: github_service::CheckStatus) -> (&'static s
     }
 }
 
-fn pr_check_counts(pr: &github_service::PrDetails) -> (usize, usize) {
+pub(crate) fn pr_check_counts(pr: &github_service::PrDetails) -> (usize, usize) {
     (pr.passed_checks, pr.checks.len())
 }
 
-fn prioritized_pr_checks_for_display(
+pub(crate) fn prioritized_pr_checks_for_display(
     pr: &github_service::PrDetails,
 ) -> &[(String, github_service::CheckStatus)] {
     let visible_check_count = pr.checks.len().min(MAX_VISIBLE_PR_CHECKS);
     &pr.checks[..visible_check_count]
 }
 
-fn sorted_pr_checks_for_display(
+pub(crate) fn sorted_pr_checks_for_display(
     pr: &github_service::PrDetails,
 ) -> &[(String, github_service::CheckStatus)] {
     pr.checks.as_slice()
 }
 
-fn pr_loading_chip(theme: &ThemePalette, label: &'static str) -> AnyElement {
+pub(crate) fn pr_loading_chip(theme: &ThemePalette, label: &'static str) -> AnyElement {
     div()
         .px_1()
         .py(px(2.))
@@ -546,7 +539,7 @@ fn pr_loading_chip(theme: &ThemePalette, label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-fn pr_loading_row(theme: &ThemePalette, label: &'static str) -> AnyElement {
+pub(crate) fn pr_loading_row(theme: &ThemePalette, label: &'static str) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -561,7 +554,7 @@ fn pr_loading_row(theme: &ThemePalette, label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-fn pr_loading_icon(theme: &ThemePalette, animation_key: &'static str) -> AnyElement {
+pub(crate) fn pr_loading_icon(theme: &ThemePalette, animation_key: &'static str) -> AnyElement {
     div()
         .font_family(FONT_MONO)
         .text_xs()

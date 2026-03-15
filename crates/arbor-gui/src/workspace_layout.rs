@@ -1,11 +1,13 @@
-fn ui_state_save_has_work(
+use super::*;
+
+pub(crate) fn ui_state_save_has_work(
     pending_ui_state_save: Option<&ui_state_store::UiState>,
     ui_state_save_in_flight: Option<&ui_state_store::UiState>,
 ) -> bool {
     pending_ui_state_save.is_some() || ui_state_save_in_flight.is_some()
 }
 
-fn next_pending_ui_state_save(
+pub(crate) fn next_pending_ui_state_save(
     last_persisted_ui_state: &ui_state_store::UiState,
     pending_ui_state_save: Option<&ui_state_store::UiState>,
     ui_state_save_in_flight: Option<&ui_state_store::UiState>,
@@ -22,20 +24,21 @@ fn next_pending_ui_state_save(
     Some(next_state.clone())
 }
 
-fn issue_cache_save_has_work(
+pub(crate) fn issue_cache_save_has_work(
     pending_issue_cache_save: Option<&issue_cache_store::IssueCache>,
     issue_cache_save_in_flight: Option<&issue_cache_store::IssueCache>,
 ) -> bool {
     pending_issue_cache_save.is_some() || issue_cache_save_in_flight.is_some()
 }
 
-fn next_pending_issue_cache_save(
+pub(crate) fn next_pending_issue_cache_save(
     last_persisted_issue_cache: &issue_cache_store::IssueCache,
     pending_issue_cache_save: Option<&issue_cache_store::IssueCache>,
     issue_cache_save_in_flight: Option<&issue_cache_store::IssueCache>,
     next_cache: &issue_cache_store::IssueCache,
 ) -> Option<issue_cache_store::IssueCache> {
-    if pending_issue_cache_save == Some(next_cache) || issue_cache_save_in_flight == Some(next_cache)
+    if pending_issue_cache_save == Some(next_cache)
+        || issue_cache_save_in_flight == Some(next_cache)
     {
         return pending_issue_cache_save.cloned();
     }
@@ -47,7 +50,7 @@ fn next_pending_issue_cache_save(
     Some(next_cache.clone())
 }
 
-fn persisted_sidebar_selection_for_ui_state(
+pub(crate) fn persisted_sidebar_selection_for_ui_state(
     current_selection: Option<ui_state_store::PersistedSidebarSelection>,
     queued_selection: Option<ui_state_store::PersistedSidebarSelection>,
     pending_startup_worktree_restore: bool,
@@ -59,17 +62,19 @@ fn persisted_sidebar_selection_for_ui_state(
     match (current_selection, queued_selection) {
         (
             Some(ui_state_store::PersistedSidebarSelection::Repository { root }),
-            Some(ref saved_selection @ ui_state_store::PersistedSidebarSelection::Worktree {
-                ref repo_root,
-                ..
-            }),
+            Some(
+                ref saved_selection @ ui_state_store::PersistedSidebarSelection::Worktree {
+                    ref repo_root,
+                    ..
+                },
+            ),
         ) if root == *repo_root => Some(saved_selection.clone()),
         (current_selection, _) => current_selection,
     }
 }
 
 impl ArborWindow {
-    fn clamp_pane_widths_for_workspace(&mut self, workspace_width: f32) {
+    pub(crate) fn clamp_pane_widths_for_workspace(&mut self, workspace_width: f32) {
         let available_side_width =
             (workspace_width - (2. * PANE_RESIZE_HANDLE_WIDTH) - PANE_CENTER_MIN_WIDTH).max(0.);
 
@@ -101,7 +106,7 @@ impl ArborWindow {
         self.left_pane_width -= left_reduction;
     }
 
-    fn estimated_diff_wrap_columns(&self, cell_width_px: f32) -> usize {
+    pub(crate) fn estimated_diff_wrap_columns(&self, cell_width_px: f32) -> usize {
         let fallback_window_width = self.left_pane_width
             + self.right_pane_width
             + PANE_CENTER_MIN_WIDTH
@@ -115,7 +120,7 @@ impl ArborWindow {
         self.estimated_diff_wrap_columns_for_window_width(window_width, cell_width_px)
     }
 
-    fn estimated_diff_wrap_columns_for_window_width(
+    pub(crate) fn estimated_diff_wrap_columns_for_window_width(
         &self,
         window_width: f32,
         cell_width_px: f32,
@@ -130,7 +135,7 @@ impl ArborWindow {
         self.estimated_diff_wrap_columns_for_list_width(list_width, cell_width_px)
     }
 
-    fn estimated_diff_wrap_columns_for_list_width(
+    pub(crate) fn estimated_diff_wrap_columns_for_list_width(
         &self,
         list_width: f32,
         cell_width_px: f32,
@@ -151,7 +156,7 @@ impl ArborWindow {
         estimated_columns.saturating_add(2).clamp(12, 320)
     }
 
-    fn live_diff_list_width_px(&self) -> Option<f32> {
+    pub(crate) fn live_diff_list_width_px(&self) -> Option<f32> {
         let width = self
             .diff_scroll_handle
             .0
@@ -164,7 +169,7 @@ impl ArborWindow {
         (width.is_finite() && width >= 80.).then_some(width)
     }
 
-    fn rewrap_diff_sessions_if_needed(&mut self, wrap_columns: usize) {
+    pub(crate) fn rewrap_diff_sessions_if_needed(&mut self, wrap_columns: usize) {
         for session in &mut self.diff_sessions {
             if session.is_loading
                 || session.raw_lines.is_empty()
@@ -184,7 +189,7 @@ impl ArborWindow {
         }
     }
 
-    fn ui_state_snapshot(&self, window: &Window) -> ui_state_store::UiState {
+    pub(crate) fn ui_state_snapshot(&self, window: &Window) -> ui_state_store::UiState {
         let bounds = window.window_bounds().get_bounds();
         let x = f32::from(bounds.origin.x).round() as i32;
         let y = f32::from(bounds.origin.y).round() as i32;
@@ -215,14 +220,14 @@ impl ArborWindow {
         }
     }
 
-    fn queued_ui_state_base(&self) -> ui_state_store::UiState {
+    pub(crate) fn queued_ui_state_base(&self) -> ui_state_store::UiState {
         self.pending_ui_state_save
             .clone()
             .or_else(|| self.ui_state_save_in_flight.clone())
             .unwrap_or_else(|| self.last_persisted_ui_state.clone())
     }
 
-    fn repository_sidebar_tabs_snapshot(&self) -> HashMap<String, RepositorySidebarTab> {
+    pub(crate) fn repository_sidebar_tabs_snapshot(&self) -> HashMap<String, RepositorySidebarTab> {
         self.repository_sidebar_tabs
             .iter()
             .filter(|(_, tab)| **tab != RepositorySidebarTab::Worktrees)
@@ -230,7 +235,7 @@ impl ArborWindow {
             .collect()
     }
 
-    fn collapsed_repository_group_keys_snapshot(&self) -> Vec<String> {
+    pub(crate) fn collapsed_repository_group_keys_snapshot(&self) -> Vec<String> {
         let mut group_keys: Vec<String> = self
             .collapsed_repositories
             .iter()
@@ -242,7 +247,9 @@ impl ArborWindow {
         group_keys
     }
 
-    fn sidebar_selection_snapshot(&self) -> Option<ui_state_store::PersistedSidebarSelection> {
+    pub(crate) fn sidebar_selection_snapshot(
+        &self,
+    ) -> Option<ui_state_store::PersistedSidebarSelection> {
         if let Some(outpost_index) = self.active_outpost_index {
             return self.outposts.get(outpost_index).map(|outpost| {
                 ui_state_store::PersistedSidebarSelection::Outpost {
@@ -266,7 +273,7 @@ impl ArborWindow {
         })
     }
 
-    fn sidebar_selection_snapshot_for_persistence(
+    pub(crate) fn sidebar_selection_snapshot_for_persistence(
         &self,
     ) -> Option<ui_state_store::PersistedSidebarSelection> {
         persisted_sidebar_selection_for_ui_state(
@@ -276,7 +283,7 @@ impl ArborWindow {
         )
     }
 
-    fn pull_request_cache_snapshot(
+    pub(crate) fn pull_request_cache_snapshot(
         &self,
     ) -> HashMap<String, ui_state_store::CachedPullRequestState> {
         self.worktrees
@@ -289,7 +296,7 @@ impl ArborWindow {
             .collect()
     }
 
-    fn queue_ui_state_save(
+    pub(crate) fn queue_ui_state_save(
         &mut self,
         next_state: ui_state_store::UiState,
         cx: &mut Context<Self>,
@@ -310,11 +317,11 @@ impl ArborWindow {
         self.start_pending_ui_state_save(cx);
     }
 
-    fn sync_ui_state_store(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync_ui_state_store(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.queue_ui_state_save(self.ui_state_snapshot(window), cx);
     }
 
-    fn start_pending_ui_state_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_ui_state_save(&mut self, cx: &mut Context<Self>) {
         if self.ui_state_save_in_flight.is_some() {
             return;
         }
@@ -354,31 +361,32 @@ impl ArborWindow {
         }));
     }
 
-    fn sync_pull_request_cache_store(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_pull_request_cache_store(&mut self, cx: &mut Context<Self>) {
         let mut next_state = self.queued_ui_state_base();
         next_state.pull_request_cache = self.pull_request_cache_snapshot();
         self.queue_ui_state_save(next_state, cx);
     }
 
-    fn sync_repository_sidebar_tabs_store(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_repository_sidebar_tabs_store(&mut self, cx: &mut Context<Self>) {
         let mut next_state = self.queued_ui_state_base();
         next_state.repository_sidebar_tabs = self.repository_sidebar_tabs_snapshot();
         self.queue_ui_state_save(next_state, cx);
     }
 
-    fn sync_sidebar_order_store(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_sidebar_order_store(&mut self, cx: &mut Context<Self>) {
         let mut next_state = self.queued_ui_state_base();
         next_state.sidebar_order = self.sidebar_order.clone();
         self.queue_ui_state_save(next_state, cx);
     }
 
-    fn sync_collapsed_repositories_store(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_collapsed_repositories_store(&mut self, cx: &mut Context<Self>) {
         let mut next_state = self.queued_ui_state_base();
-        next_state.collapsed_repository_group_keys = self.collapsed_repository_group_keys_snapshot();
+        next_state.collapsed_repository_group_keys =
+            self.collapsed_repository_group_keys_snapshot();
         self.queue_ui_state_save(next_state, cx);
     }
 
-    fn sync_navigation_ui_state_store(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_navigation_ui_state_store(&mut self, cx: &mut Context<Self>) {
         let mut next_state = self.queued_ui_state_base();
         next_state.selected_sidebar_selection = self.sidebar_selection_snapshot_for_persistence();
         next_state.right_pane_tab = Some(persisted_right_pane_tab(self.right_pane_tab));
@@ -387,14 +395,14 @@ impl ArborWindow {
         self.queue_ui_state_save(next_state, cx);
     }
 
-    fn queued_issue_cache_base(&self) -> issue_cache_store::IssueCache {
+    pub(crate) fn queued_issue_cache_base(&self) -> issue_cache_store::IssueCache {
         self.pending_issue_cache_save
             .clone()
             .or_else(|| self.issue_cache_save_in_flight.clone())
             .unwrap_or_else(|| self.last_persisted_issue_cache.clone())
     }
 
-    fn issue_cache_snapshot(&self) -> issue_cache_store::IssueCache {
+    pub(crate) fn issue_cache_snapshot(&self) -> issue_cache_store::IssueCache {
         issue_cache_store::issue_cache_snapshot(
             &self.repositories,
             &self.queued_issue_cache_base(),
@@ -402,7 +410,7 @@ impl ArborWindow {
         )
     }
 
-    fn queue_issue_cache_save(
+    pub(crate) fn queue_issue_cache_save(
         &mut self,
         next_cache: issue_cache_store::IssueCache,
         cx: &mut Context<Self>,
@@ -423,7 +431,7 @@ impl ArborWindow {
         self.start_pending_issue_cache_save(cx);
     }
 
-    fn start_pending_issue_cache_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_issue_cache_save(&mut self, cx: &mut Context<Self>) {
         if self.issue_cache_save_in_flight.is_some() {
             return;
         }
@@ -463,11 +471,11 @@ impl ArborWindow {
         }));
     }
 
-    fn sync_issue_cache_store(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_issue_cache_store(&mut self, cx: &mut Context<Self>) {
         self.queue_issue_cache_save(self.issue_cache_snapshot(), cx);
     }
 
-    fn handle_pane_divider_drag_move(
+    pub(crate) fn handle_pane_divider_drag_move(
         &mut self,
         event: &DragMoveEvent<DraggedPaneDivider>,
         window: &mut Window,
@@ -500,7 +508,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn render_pane_resize_handle(
+    pub(crate) fn render_pane_resize_handle(
         &self,
         id: &'static str,
         divider: DraggedPaneDivider,
@@ -523,7 +531,7 @@ impl ArborWindow {
             .occlude()
     }
 
-    fn render_notice_toast(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_notice_toast(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(notice) = self.notice.clone() else {
             return div();
         };
@@ -610,7 +618,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_status_bar(&self) -> impl IntoElement {
+    pub(crate) fn render_status_bar(&self) -> impl IntoElement {
         let theme = self.theme();
         let repo_name = self
             .repo_root
@@ -660,44 +668,39 @@ impl ArborWindow {
                     .child(status_text(theme, format!("terminals {terminal_count}")))
                     .when_some(self.github_rate_limit_remaining(), |this, remaining| {
                         this.child(status_text(theme, "•")).child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.accent))
-                                .child(format!(
-                                    "GitHub rate limited: {}",
-                                    format_countdown(remaining)
-                                )),
+                            div().text_xs().text_color(rgb(theme.accent)).child(format!(
+                                "GitHub rate limited: {}",
+                                format_countdown(remaining)
+                            )),
                         )
                     })
-                    .child(
-                        if self.github_rate_limit_remaining().is_some() {
-                            loading_status_text(theme, "waiting")
-                        } else if let Some(label) = workspace_loading_status_label(
-                            if self.worktree_stats_loading {
-                                self.worktrees
-                                    .iter()
-                                    .filter(|worktree| worktree.diff_summary.is_none())
-                                    .count()
-                            } else {
-                                0
-                            },
+                    .child(if self.github_rate_limit_remaining().is_some() {
+                        loading_status_text(theme, "waiting")
+                    } else if let Some(label) = workspace_loading_status_label(
+                        if self.worktree_stats_loading {
                             self.worktrees
                                 .iter()
-                                .filter(|worktree| worktree.pr_loading)
-                                .count(),
-                            self.worktrees.iter().any(|worktree| worktree.pr_loaded),
-                        ) {
-                            loading_status_text(
-                                theme,
-                                format!(
-                                    "{} {label}",
-                                    loading_spinner_frame(self.loading_animation_frame)
-                                ),
-                            )
+                                .filter(|worktree| worktree.diff_summary.is_none())
+                                .count()
                         } else {
-                            status_text(theme, "ready")
+                            0
                         },
-                    ),
+                        self.worktrees
+                            .iter()
+                            .filter(|worktree| worktree.pr_loading)
+                            .count(),
+                        self.worktrees.iter().any(|worktree| worktree.pr_loaded),
+                    ) {
+                        loading_status_text(
+                            theme,
+                            format!(
+                                "{} {label}",
+                                loading_spinner_frame(self.loading_animation_frame)
+                            ),
+                        )
+                    } else {
+                        status_text(theme, "ready")
+                    }),
             )
     }
 }

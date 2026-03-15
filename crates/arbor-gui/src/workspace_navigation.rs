@@ -1,12 +1,17 @@
+use super::*;
+
 impl ArborWindow {
-    fn issue_target_for_repository(&self, repository: &RepositorySummary) -> IssueTarget {
+    pub(crate) fn issue_target_for_repository(
+        &self,
+        repository: &RepositorySummary,
+    ) -> IssueTarget {
         IssueTarget {
             daemon_target: ManagedDaemonTarget::Primary,
             repo_root: repository.root.display().to_string(),
         }
     }
 
-    fn issue_target_for_current_selection(&self) -> Option<IssueTarget> {
+    pub(crate) fn issue_target_for_current_selection(&self) -> Option<IssueTarget> {
         if let Some(active_remote_worktree) = self.active_remote_worktree.as_ref() {
             return Some(IssueTarget {
                 daemon_target: ManagedDaemonTarget::Remote(active_remote_worktree.daemon_index),
@@ -29,7 +34,7 @@ impl ArborWindow {
             .map(|repository| self.issue_target_for_repository(repository))
     }
 
-    fn daemon_client_for_target(
+    pub(crate) fn daemon_client_for_target(
         &self,
         target: &IssueTarget,
     ) -> Option<terminal_daemon_http::SharedTerminalDaemonClient> {
@@ -42,15 +47,19 @@ impl ArborWindow {
         }
     }
 
-    fn issue_list_state(&self, target: &IssueTarget) -> Option<&IssueListState> {
+    pub(crate) fn issue_list_state(&self, target: &IssueTarget) -> Option<&IssueListState> {
         self.issue_lists.get(target)
     }
 
-    fn issue_list_state_mut(&mut self, target: &IssueTarget) -> &mut IssueListState {
+    pub(crate) fn issue_list_state_mut(&mut self, target: &IssueTarget) -> &mut IssueListState {
         self.issue_lists.entry(target.clone()).or_default()
     }
 
-    fn ensure_issues_loaded_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_issues_loaded_for_target(
+        &mut self,
+        target: IssueTarget,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .issue_list_state(&target)
             .is_some_and(|state| state.loading || state.loaded)
@@ -62,14 +71,18 @@ impl ArborWindow {
         self.refresh_issues_for_target(target, cx);
     }
 
-    fn refresh_cached_issue_lists_on_startup(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_cached_issue_lists_on_startup(&mut self, cx: &mut Context<Self>) {
         let targets: Vec<IssueTarget> = self.issue_lists.keys().cloned().collect();
         for target in targets {
             self.refresh_issues_for_target(target, cx);
         }
     }
 
-    fn refresh_issues_for_target(&mut self, target: IssueTarget, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_issues_for_target(
+        &mut self,
+        target: IssueTarget,
+        cx: &mut Context<Self>,
+    ) {
         let refresh_generation = {
             let state = self.issue_list_state_mut(&target);
             state.refresh_generation = state.refresh_generation.wrapping_add(1);
@@ -105,7 +118,9 @@ impl ArborWindow {
             let repo_root = target.repo_root.clone();
             let github_token = github_token.clone();
             let response = cx
-                .background_spawn(async move { client.list_issues(&repo_root, github_token.as_deref()) })
+                .background_spawn(
+                    async move { client.list_issues(&repo_root, github_token.as_deref()) },
+                )
                 .await;
 
             let _ = this.update(cx, |this, cx| {
@@ -124,7 +139,10 @@ impl ArborWindow {
                                 .issues
                                 .iter()
                                 .filter(|issue| {
-                                    issue.body.as_deref().is_some_and(|body| !body.trim().is_empty())
+                                    issue
+                                        .body
+                                        .as_deref()
+                                        .is_some_and(|body| !body.trim().is_empty())
                                 })
                                 .count();
                             let issues_without_body_count = issue_count - issues_with_body_count;
@@ -170,7 +188,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn sync_visible_repository_issue_tabs(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_visible_repository_issue_tabs(&mut self, cx: &mut Context<Self>) {
         let targets: Vec<IssueTarget> = self
             .repositories
             .iter()
@@ -184,7 +202,7 @@ impl ArborWindow {
         }
     }
 
-    fn selected_worktree_path(&self) -> Option<&Path> {
+    pub(crate) fn selected_worktree_path(&self) -> Option<&Path> {
         if let Some(ref arw) = self.active_remote_worktree {
             return Some(arw.worktree_path.as_path());
         }
@@ -199,27 +217,26 @@ impl ArborWindow {
             .map(|worktree| worktree.path.as_path())
     }
 
-    fn selected_local_worktree_path(&self) -> Option<&Path> {
+    pub(crate) fn selected_local_worktree_path(&self) -> Option<&Path> {
         self.active_worktree()
             .map(|worktree| worktree.path.as_path())
     }
 
-    fn can_run_local_git_actions(&self) -> bool {
+    pub(crate) fn can_run_local_git_actions(&self) -> bool {
         self.active_outpost_index.is_none() && self.selected_worktree_path().is_some()
     }
 
-    fn selected_local_worktree_has_pull_request(&self) -> bool {
-        self.active_worktree().is_some_and(|worktree| {
-            worktree.pr_number.is_some() || worktree.pr_url.is_some()
-        })
+    pub(crate) fn selected_local_worktree_has_pull_request(&self) -> bool {
+        self.active_worktree()
+            .is_some_and(|worktree| worktree.pr_number.is_some() || worktree.pr_url.is_some())
     }
 
-    fn active_worktree(&self) -> Option<&WorktreeSummary> {
+    pub(crate) fn active_worktree(&self) -> Option<&WorktreeSummary> {
         self.active_worktree_index
             .and_then(|index| self.worktrees.get(index))
     }
 
-    fn active_terminal_id_for_worktree(&self, worktree_path: &Path) -> Option<u64> {
+    pub(crate) fn active_terminal_id_for_worktree(&self, worktree_path: &Path) -> Option<u64> {
         self.active_terminal_by_worktree
             .get(worktree_path)
             .copied()
@@ -236,7 +253,7 @@ impl ArborWindow {
             })
     }
 
-    fn managed_process_session(
+    pub(crate) fn managed_process_session(
         &self,
         worktree_path: &Path,
         process_id: &str,
@@ -247,17 +264,15 @@ impl ArborWindow {
         })
     }
 
-    fn start_managed_process_for_worktree(
+    pub(crate) fn start_managed_process_for_worktree(
         &mut self,
         worktree_index: usize,
         process_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((worktree_path, process)) = self
-            .worktrees
-            .get(worktree_index)
-            .and_then(|worktree| {
+        let Some((worktree_path, process)) =
+            self.worktrees.get(worktree_index).and_then(|worktree| {
                 worktree
                     .managed_processes
                     .iter()
@@ -288,17 +303,15 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn restart_managed_process_for_worktree(
+    pub(crate) fn restart_managed_process_for_worktree(
         &mut self,
         worktree_index: usize,
         process_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((worktree_path, process)) = self
-            .worktrees
-            .get(worktree_index)
-            .and_then(|worktree| {
+        let Some((worktree_path, process)) =
+            self.worktrees.get(worktree_index).and_then(|worktree| {
                 worktree
                     .managed_processes
                     .iter()
@@ -325,7 +338,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn stop_managed_process_for_worktree(
+    pub(crate) fn stop_managed_process_for_worktree(
         &mut self,
         worktree_index: usize,
         process_id: &str,
@@ -352,7 +365,7 @@ impl ArborWindow {
         }
     }
 
-    fn spawn_managed_process_session(
+    pub(crate) fn spawn_managed_process_session(
         &mut self,
         worktree_path: PathBuf,
         process: ManagedWorktreeProcess,
@@ -605,7 +618,7 @@ impl ArborWindow {
         session_id
     }
 
-    fn active_terminal_id_for_selected_worktree(&self) -> Option<u64> {
+    pub(crate) fn active_terminal_id_for_selected_worktree(&self) -> Option<u64> {
         let worktree_path = self.selected_worktree_path()?;
         let is_outpost = self.active_outpost_index.is_some();
 
@@ -638,7 +651,7 @@ impl ArborWindow {
             })
     }
 
-    fn selected_worktree_terminals(&self) -> Vec<&TerminalSession> {
+    pub(crate) fn selected_worktree_terminals(&self) -> Vec<&TerminalSession> {
         let Some(worktree_path) = self.selected_worktree_path() else {
             return Vec::new();
         };
@@ -658,7 +671,7 @@ impl ArborWindow {
             .collect()
     }
 
-    fn selected_worktree_diff_sessions(&self) -> Vec<&DiffSession> {
+    pub(crate) fn selected_worktree_diff_sessions(&self) -> Vec<&DiffSession> {
         let Some(worktree_path) = self.selected_worktree_path() else {
             return Vec::new();
         };
@@ -669,7 +682,7 @@ impl ArborWindow {
             .collect()
     }
 
-    fn active_center_tab_for_selected_worktree(&self) -> Option<CenterTab> {
+    pub(crate) fn active_center_tab_for_selected_worktree(&self) -> Option<CenterTab> {
         if self.logs_tab_active {
             return Some(CenterTab::Logs);
         }
@@ -698,7 +711,7 @@ impl ArborWindow {
             .map(CenterTab::Terminal)
     }
 
-    fn ensure_selected_worktree_terminal(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn ensure_selected_worktree_terminal(&mut self, cx: &mut Context<Self>) -> bool {
         // Don't auto-spawn local terminals when an outpost is selected;
         // outpost terminals are created explicitly via spawn_outpost_terminal.
         if self.active_outpost_index.is_some() {
@@ -725,7 +738,7 @@ impl ArborWindow {
         true
     }
 
-    fn close_terminal_session_by_id(&mut self, session_id: u64) -> bool {
+    pub(crate) fn close_terminal_session_by_id(&mut self, session_id: u64) -> bool {
         tracing::info!(session_id, "closing terminal session");
         let Some(index) = self
             .terminals
@@ -776,7 +789,7 @@ impl ArborWindow {
         true
     }
 
-    fn close_diff_session_by_id(&mut self, session_id: u64) -> bool {
+    pub(crate) fn close_diff_session_by_id(&mut self, session_id: u64) -> bool {
         let Some(index) = self
             .diff_sessions
             .iter()
@@ -792,7 +805,7 @@ impl ArborWindow {
         true
     }
 
-    fn selected_worktree_file_view_sessions(&self) -> Vec<&FileViewSession> {
+    pub(crate) fn selected_worktree_file_view_sessions(&self) -> Vec<&FileViewSession> {
         let Some(worktree_path) = self.selected_worktree_path() else {
             return Vec::new();
         };
@@ -803,7 +816,7 @@ impl ArborWindow {
             .collect()
     }
 
-    fn open_file_view_tab(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_view_tab(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
         let Some(worktree_path) = self.selected_worktree_path().map(Path::to_path_buf) else {
             return;
         };
@@ -921,7 +934,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn select_file_view_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn select_file_view_tab(&mut self, session_id: u64, cx: &mut Context<Self>) {
         if self.active_file_view_session_id == Some(session_id) && !self.logs_tab_active {
             return;
         }
@@ -932,7 +945,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_file_view_session_by_id(&mut self, session_id: u64) -> bool {
+    pub(crate) fn close_file_view_session_by_id(&mut self, session_id: u64) -> bool {
         let Some(index) = self
             .file_view_sessions
             .iter()
@@ -949,7 +962,7 @@ impl ArborWindow {
         true
     }
 
-    fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_center_tab_for_selected_worktree() {
             Some(CenterTab::Terminal(session_id)) => {
                 if self.close_terminal_session_by_id(session_id) {
@@ -980,11 +993,11 @@ impl ArborWindow {
         }
     }
 
-    fn theme(&self) -> ThemePalette {
+    pub(crate) fn theme(&self) -> ThemePalette {
         self.theme_kind.palette()
     }
 
-    fn embedded_shell(&self) -> String {
+    pub(crate) fn embedded_shell(&self) -> String {
         if let Some(shell) = &self.configured_embedded_shell {
             return shell.clone();
         }
@@ -994,12 +1007,15 @@ impl ArborWindow {
         }
     }
 
-    fn selected_repository(&self) -> Option<&RepositorySummary> {
+    pub(crate) fn selected_repository(&self) -> Option<&RepositorySummary> {
         self.active_repository_index
             .and_then(|index| self.repositories.get(index))
     }
 
-    fn set_repositories_preserving_state(&mut self, repositories: Vec<RepositorySummary>) {
+    pub(crate) fn set_repositories_preserving_state(
+        &mut self,
+        repositories: Vec<RepositorySummary>,
+    ) {
         let active_group_key = self
             .active_repository_index
             .and_then(|index| self.repositories.get(index))
@@ -1039,7 +1055,7 @@ impl ArborWindow {
         }
     }
 
-    fn upsert_repository_checkout_root(
+    pub(crate) fn upsert_repository_checkout_root(
         &mut self,
         root: PathBuf,
         kind: CheckoutKind,
@@ -1062,7 +1078,7 @@ impl ArborWindow {
         }
     }
 
-    fn remove_repository_checkout_root(&mut self, root: &Path) {
+    pub(crate) fn remove_repository_checkout_root(&mut self, root: &Path) {
         let entries = repository_store::repository_entries_from_summaries(&self.repositories)
             .into_iter()
             .filter(|entry| entry.root != root)
@@ -1071,7 +1087,7 @@ impl ArborWindow {
         self.set_repositories_preserving_state(repositories);
     }
 
-    fn sync_active_repository_from_selected_worktree(&mut self) {
+    pub(crate) fn sync_active_repository_from_selected_worktree(&mut self) {
         let Some(worktree_group_key) = self
             .active_worktree()
             .map(|worktree| worktree.group_key.clone())
@@ -1094,7 +1110,7 @@ impl ArborWindow {
         }
     }
 
-    fn selected_repository_label(&self) -> String {
+    pub(crate) fn selected_repository_label(&self) -> String {
         if let Some(worktree) = self.active_worktree() {
             return self
                 .repositories
@@ -1109,7 +1125,7 @@ impl ArborWindow {
             .unwrap_or_else(|| repository_display_name(&self.repo_root))
     }
 
-    fn select_repository(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn select_repository(&mut self, index: usize, cx: &mut Context<Self>) {
         self.repository_context_menu = None;
         self.worktree_context_menu = None;
         let Some(repository) = self.repositories.get(index).cloned() else {
@@ -1143,7 +1159,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn persist_repositories(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn persist_repositories(&mut self, cx: &mut Context<Self>) {
         self.repository_entries_save
             .queue(repository_store::repository_entries_from_summaries(
                 &self.repositories,
@@ -1151,7 +1167,7 @@ impl ArborWindow {
         self.start_pending_repository_entries_save(cx);
     }
 
-    fn start_pending_repository_entries_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_repository_entries_save(&mut self, cx: &mut Context<Self>) {
         let Some(entries) = self.repository_entries_save.begin_next() else {
             self.maybe_finish_quit_after_persistence_flush(cx);
             return;
@@ -1175,7 +1191,11 @@ impl ArborWindow {
         }));
     }
 
-    fn add_repository_from_path(&mut self, selected_path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn add_repository_from_path(
+        &mut self,
+        selected_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let repository_root = match worktree::repo_root(&selected_path) {
             Ok(path) => path,
             Err(error) => {
@@ -1229,11 +1249,11 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn open_external_url(&mut self, url: &str, cx: &mut Context<Self>) {
+    pub(crate) fn open_external_url(&mut self, url: &str, cx: &mut Context<Self>) {
         cx.open_url(url);
     }
 
-    fn copy_settings_daemon_auth_token_to_clipboard(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn copy_settings_daemon_auth_token_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.settings_modal.as_ref() else {
             return;
         };
@@ -1246,7 +1266,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn has_persisted_github_token(&self) -> bool {
+    pub(crate) fn has_persisted_github_token(&self) -> bool {
         self.github_auth_state
             .access_token
             .as_deref()
@@ -1254,7 +1274,7 @@ impl ArborWindow {
             .is_some()
     }
 
-    fn refresh_github_auth_identity(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_github_auth_identity(&mut self, cx: &mut Context<Self>) {
         let Some(token) = self.github_access_token() else {
             return;
         };
@@ -1289,16 +1309,17 @@ impl ArborWindow {
         .detach();
     }
 
-    fn github_access_token(&self) -> Option<String> {
+    pub(crate) fn github_access_token(&self) -> Option<String> {
         resolve_github_access_token(self.github_auth_state.access_token.as_deref())
     }
 
-    fn persist_github_auth_state(&mut self, cx: &mut Context<Self>) {
-        self.github_auth_state_save.queue(self.github_auth_state.clone());
+    pub(crate) fn persist_github_auth_state(&mut self, cx: &mut Context<Self>) {
+        self.github_auth_state_save
+            .queue(self.github_auth_state.clone());
         self.start_pending_github_auth_state_save(cx);
     }
 
-    fn start_pending_github_auth_state_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_github_auth_state_save(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.github_auth_state_save.begin_next() else {
             self.maybe_finish_quit_after_persistence_flush(cx);
             return;
@@ -1320,7 +1341,7 @@ impl ArborWindow {
         }));
     }
 
-    fn clear_saved_github_token(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_saved_github_token(&mut self, cx: &mut Context<Self>) {
         if !self.has_persisted_github_token() {
             self.notice = Some("no saved GitHub session to disconnect".to_owned());
             cx.notify();
@@ -1334,7 +1355,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn run_github_auth_button_action(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_github_auth_button_action(&mut self, cx: &mut Context<Self>) {
         if self.github_auth_in_progress {
             return;
         }
@@ -1347,7 +1368,7 @@ impl ArborWindow {
         self.start_github_oauth_sign_in(cx);
     }
 
-    fn start_github_oauth_sign_in(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_github_oauth_sign_in(&mut self, cx: &mut Context<Self>) {
         if self.github_auth_in_progress {
             return;
         }
@@ -1421,8 +1442,7 @@ impl ArborWindow {
                 this.github_auth_copy_feedback_active = false;
                 match poll_result {
                     Ok(token) => {
-                        let identity =
-                            github_authenticated_user(Some(token.access_token.as_str()));
+                        let identity = github_authenticated_user(Some(token.access_token.as_str()));
                         this.github_auth_state = github_auth_store::GithubAuthState {
                             access_token: Some(token.access_token),
                             token_type: token.token_type,
@@ -1448,16 +1468,18 @@ impl ArborWindow {
         .detach();
     }
 
-    fn close_top_bar_worktree_quick_actions(&mut self) {
+    pub(crate) fn close_top_bar_worktree_quick_actions(&mut self) {
         self.top_bar_quick_actions_open = false;
         self.top_bar_quick_actions_submenu = None;
     }
 
-    fn refresh_top_bar_external_launchers(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_top_bar_external_launchers(&mut self, cx: &mut Context<Self>) {
         let next_epoch = self.launcher_refresh_epoch.wrapping_add(1);
         self.launcher_refresh_epoch = next_epoch;
         self._launcher_refresh_task = Some(cx.spawn(async move |this, cx| {
-            let ide_launchers = cx.background_spawn(async move { detect_ide_launchers() }).await;
+            let ide_launchers = cx
+                .background_spawn(async move { detect_ide_launchers() })
+                .await;
 
             let _ = this.update(cx, |this, cx| {
                 if this.launcher_refresh_epoch != next_epoch {
@@ -1472,7 +1494,7 @@ impl ArborWindow {
         }));
     }
 
-    fn toggle_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) {
         if self.selected_local_worktree_path().is_none() {
             self.notice = Some("select a local worktree first".to_owned());
             self.close_top_bar_worktree_quick_actions();
@@ -1490,7 +1512,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn toggle_top_bar_worktree_quick_actions_submenu(
+    pub(crate) fn toggle_top_bar_worktree_quick_actions_submenu(
         &mut self,
         submenu: QuickActionSubmenu,
         cx: &mut Context<Self>,
@@ -1508,7 +1530,11 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn run_worktree_quick_action(&mut self, action: WorktreeQuickAction, cx: &mut Context<Self>) {
+    pub(crate) fn run_worktree_quick_action(
+        &mut self,
+        action: WorktreeQuickAction,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
             self.notice = Some("select a local worktree first".to_owned());
             self.close_top_bar_worktree_quick_actions();
@@ -1536,7 +1562,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn run_worktree_external_launcher(
+    pub(crate) fn run_worktree_external_launcher(
         &mut self,
         launcher_index: usize,
         cx: &mut Context<Self>,
@@ -1565,7 +1591,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn select_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_worktree(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.repository_context_menu = None;
         self.worktree_context_menu = None;
         self._hover_show_task = None;
@@ -1607,7 +1638,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn show_worktree_hover_popover(
+    pub(crate) fn show_worktree_hover_popover(
         &mut self,
         index: usize,
         mouse_y: Pixels,
@@ -1628,22 +1659,22 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn cancel_worktree_hover_popover_show(&mut self) {
+    pub(crate) fn cancel_worktree_hover_popover_show(&mut self) {
         self._hover_show_task = None;
     }
 
-    fn cancel_worktree_hover_popover_dismiss(&mut self) {
+    pub(crate) fn cancel_worktree_hover_popover_dismiss(&mut self) {
         self._hover_dismiss_task = None;
     }
 
-    fn update_worktree_hover_mouse_position(&mut self, position: gpui::Point<Pixels>) {
+    pub(crate) fn update_worktree_hover_mouse_position(&mut self, position: gpui::Point<Pixels>) {
         self.last_mouse_position = position;
         if self.worktree_hover_safe_zone_contains_mouse() {
             self.cancel_worktree_hover_popover_dismiss();
         }
     }
 
-    fn worktree_hover_safe_zone_contains_mouse(&self) -> bool {
+    pub(crate) fn worktree_hover_safe_zone_contains_mouse(&self) -> bool {
         let Some(popover) = self.worktree_hover_popover.as_ref() else {
             return false;
         };
@@ -1658,7 +1689,7 @@ impl ArborWindow {
         )
     }
 
-    fn schedule_worktree_hover_popover_dismiss(
+    pub(crate) fn schedule_worktree_hover_popover_dismiss(
         &mut self,
         worktree_index: usize,
         cx: &mut Context<Self>,
@@ -1683,7 +1714,7 @@ impl ArborWindow {
         }));
     }
 
-    fn schedule_worktree_hover_popover_show(
+    pub(crate) fn schedule_worktree_hover_popover_show(
         &mut self,
         worktree_index: usize,
         mouse_y: Pixels,
@@ -1710,7 +1741,12 @@ impl ArborWindow {
         self.show_worktree_hover_popover(worktree_index, mouse_y, cx);
     }
 
-    fn select_outpost(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_outpost(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.repository_context_menu = None;
         self.worktree_context_menu = None;
         self._hover_show_task = None;
@@ -1727,7 +1763,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn reload_changed_files(&mut self) -> bool {
+    pub(crate) fn reload_changed_files(&mut self) -> bool {
         let previous_files = self.changed_files.clone();
         let previous_notice = self.notice.clone();
         // Remote outposts don't have a local working tree to diff against.
@@ -1757,13 +1793,13 @@ impl ArborWindow {
         self.changed_files != previous_files || self.notice != previous_notice
     }
 
-    fn refresh_changed_files(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_changed_files(&mut self, cx: &mut Context<Self>) {
         if self.reload_changed_files() {
             cx.notify();
         }
     }
 
-    fn refresh_remote_changed_files(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_remote_changed_files(&mut self, cx: &mut Context<Self>) {
         let Some(outpost_index) = self.active_outpost_index else {
             return;
         };
@@ -1850,7 +1886,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn sync_selected_changed_file(&mut self) {
+    pub(crate) fn sync_selected_changed_file(&mut self) {
         let Some(selected) = self.selected_changed_file.as_ref() else {
             self.selected_changed_file =
                 self.changed_files.first().map(|change| change.path.clone());
@@ -1867,7 +1903,7 @@ impl ArborWindow {
         }
     }
 
-    fn select_changed_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn select_changed_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self
             .selected_changed_file
             .as_ref()
@@ -1887,14 +1923,14 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn selected_changed_file(&self) -> Option<&ChangedFile> {
+    pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {
         let selected_path = self.selected_changed_file.as_ref()?;
         self.changed_files
             .iter()
             .find(|change| change.path == *selected_path)
     }
 
-    fn rebuild_file_tree(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn rebuild_file_tree(&mut self, cx: &mut Context<Self>) {
         let Some(worktree_path) = self.selected_worktree_path().map(|p| p.to_path_buf()) else {
             self.file_tree_entries.clear();
             self.file_tree_loading = false;
@@ -1933,7 +1969,7 @@ impl ArborWindow {
         }));
     }
 
-    fn walk_directory(
+    pub(crate) fn walk_directory(
         base: &Path,
         dir: &Path,
         expanded_dirs: &HashSet<PathBuf>,
@@ -1984,7 +2020,7 @@ impl ArborWindow {
         }
     }
 
-    fn toggle_file_tree_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_file_tree_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.expanded_dirs.contains(&path) {
             self.expanded_dirs.remove(&path);
         } else {
@@ -1995,7 +2031,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn select_file_tree_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.selected_file_tree_entry = Some(path.clone());
 
         let ext = path
@@ -2034,7 +2070,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn set_right_pane_tab(&mut self, tab: RightPaneTab, cx: &mut Context<Self>) {
+    pub(crate) fn set_right_pane_tab(&mut self, tab: RightPaneTab, cx: &mut Context<Self>) {
         if self.right_pane_tab == tab {
             return;
         }
@@ -2052,7 +2088,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn sync_selected_worktree_notes(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_selected_worktree_notes(&mut self, cx: &mut Context<Self>) {
         let Some(worktree_path) = self.selected_local_worktree_path().map(Path::to_path_buf) else {
             if self.worktree_notes_path.is_none() {
                 return;
@@ -2127,12 +2163,12 @@ impl ArborWindow {
         .detach();
     }
 
-    fn save_selected_worktree_notes(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_selected_worktree_notes(&mut self, cx: &mut Context<Self>) {
         self.worktree_notes_save_pending = true;
         self.start_pending_worktree_notes_save(cx);
     }
 
-    fn start_pending_worktree_notes_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_worktree_notes_save(&mut self, cx: &mut Context<Self>) {
         if self._worktree_notes_save_task.is_some() || !self.worktree_notes_save_pending {
             return;
         }
@@ -2178,7 +2214,11 @@ impl ArborWindow {
         }));
     }
 
-    fn insert_text_into_selected_worktree_notes(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub(crate) fn insert_text_into_selected_worktree_notes(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self.worktree_notes_lines.is_empty() {
             self.worktree_notes_lines.push(String::new());
         }
@@ -2206,7 +2246,7 @@ impl ArborWindow {
         self.save_selected_worktree_notes(cx);
     }
 
-    fn handle_worktree_notes_key_down(
+    pub(crate) fn handle_worktree_notes_key_down(
         &mut self,
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
@@ -2236,7 +2276,9 @@ impl ArborWindow {
                     line.replace_range(prev_byte..byte_pos, "");
                     self.worktree_notes_cursor.col -= 1;
                 } else if self.worktree_notes_cursor.line > 0 {
-                    let removed = self.worktree_notes_lines.remove(self.worktree_notes_cursor.line);
+                    let removed = self
+                        .worktree_notes_lines
+                        .remove(self.worktree_notes_cursor.line);
                     self.worktree_notes_cursor.line -= 1;
                     let previous = &mut self.worktree_notes_lines[self.worktree_notes_cursor.line];
                     self.worktree_notes_cursor.col = previous.chars().count();

@@ -1,26 +1,61 @@
 mod actions;
+mod agent_presets;
 mod app_config;
 mod assets;
+mod center_panel;
+mod changes_pane;
 mod checkout;
+mod command_palette;
 mod connection_history;
 mod constants;
+mod daemon_connection_ui;
+mod daemon_runtime;
+mod diff_view;
 mod error;
+mod external_launchers;
+mod file_view;
+mod git_actions;
+mod github_auth_modal;
 mod github_auth_store;
+mod github_helpers;
+mod github_oauth;
 mod github_service;
 mod graphql;
 mod issue_cache_store;
+mod issue_details_modal;
 mod log_layer;
+mod log_view;
+mod manage_hosts;
 mod mdns_browser;
 mod notifications;
+mod pr_summary_ui;
+mod prompt_runner;
+mod repo_presets;
 mod repository_store;
+mod settings_ui;
+mod sidebar;
 mod simple_http_client;
 mod terminal_backend;
 mod terminal_daemon_http;
+mod terminal_interaction;
 mod terminal_keys;
+mod terminal_rendering;
 mod theme;
+mod theme_picker;
+mod top_bar;
+mod types;
 mod ui_state_store;
+mod welcome_ui;
+mod workspace_layout;
+mod workspace_navigation;
+mod worktree_lifecycle;
 
-pub(crate) use {actions::*, assets::*, constants::*, error::*};
+pub(crate) use {
+    actions::*, assets::*, constants::*, daemon_runtime::*, diff_view::*, error::*,
+    external_launchers::*, file_view::*, git_actions::*, github_helpers::*, github_oauth::*,
+    issue_details_modal::*, pr_summary_ui::*, prompt_runner::*, repo_presets::*, settings_ui::*,
+    terminal_rendering::*, theme_picker::*, types::*, workspace_layout::*,
+};
 use {
     arbor_core::{
         agent::AgentState,
@@ -71,36 +106,6 @@ use {
     theme::{ThemeKind, ThemePalette},
 };
 
-include!("types.rs");
-include!("theme_picker.rs");
-include!("repo_presets.rs");
-include!("prompt_runner.rs");
-include!("command_palette.rs");
-include!("issue_details_modal.rs");
-include!("git_actions.rs");
-include!("worktree_lifecycle.rs");
-include!("welcome_ui.rs");
-include!("manage_hosts.rs");
-include!("agent_presets.rs");
-include!("daemon_connection_ui.rs");
-include!("settings_ui.rs");
-include!("top_bar.rs");
-include!("sidebar.rs");
-include!("pr_summary_ui.rs");
-include!("changes_pane.rs");
-include!("log_view.rs");
-include!("center_panel.rs");
-include!("workspace_layout.rs");
-include!("workspace_navigation.rs");
-include!("file_view.rs");
-include!("diff_view.rs");
-include!("terminal_interaction.rs");
-include!("daemon_runtime.rs");
-include!("terminal_rendering.rs");
-include!("external_launchers.rs");
-include!("github_auth_modal.rs");
-include!("github_helpers.rs");
-include!("github_oauth.rs");
 include!("app_bootstrap.rs");
 
 impl ArborWindow {
@@ -9646,7 +9651,7 @@ mod tests {
         let outposts = vec![crate::SidebarItemId::Outpost("outpost-1".to_owned())];
 
         assert_eq!(
-            crate::normalized_sidebar_order(Some(saved.as_slice()), worktrees, outposts),
+            crate::sidebar::normalized_sidebar_order(Some(saved.as_slice()), worktrees, outposts),
             vec![
                 crate::SidebarItemId::Outpost("outpost-1".to_owned()),
                 crate::SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-2")),
@@ -9664,7 +9669,7 @@ mod tests {
         ];
 
         assert_eq!(
-            crate::reordered_sidebar_items(
+            crate::sidebar::reordered_sidebar_items(
                 &items,
                 &crate::SidebarItemId::Outpost("outpost-1".to_owned()),
                 0,
@@ -9677,7 +9682,7 @@ mod tests {
         );
 
         assert_eq!(
-            crate::reordered_sidebar_items(
+            crate::sidebar::reordered_sidebar_items(
                 &items,
                 &crate::SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-1")),
                 1,
@@ -9820,14 +9825,20 @@ mod tests {
         let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
 
         session.is_initializing = true;
-        assert!(crate::should_queue_terminal_input(&session));
+        assert!(crate::terminal_interaction::should_queue_terminal_input(
+            &session
+        ));
 
         session.is_initializing = false;
-        assert!(!crate::should_queue_terminal_input(&session));
+        assert!(!crate::terminal_interaction::should_queue_terminal_input(
+            &session
+        ));
 
         session.is_initializing = true;
         session.runtime = Some(Arc::new(daemon_runtime_for_test()));
-        assert!(!crate::should_queue_terminal_input(&session));
+        assert!(!crate::terminal_interaction::should_queue_terminal_input(
+            &session
+        ));
     }
 
     #[test]

@@ -1,62 +1,64 @@
+use super::*;
+
 #[derive(Debug, Clone, serde::Deserialize)]
-struct GitHubDeviceCode {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    verification_uri_complete: Option<String>,
-    expires_in: u64,
-    interval: Option<u64>,
+pub(crate) struct GitHubDeviceCode {
+    pub(crate) device_code: String,
+    pub(crate) user_code: String,
+    pub(crate) verification_uri: String,
+    pub(crate) verification_uri_complete: Option<String>,
+    pub(crate) expires_in: u64,
+    pub(crate) interval: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct GitHubDeviceCodeResponse {
+pub(crate) struct GitHubDeviceCodeResponse {
     #[serde(default)]
-    device_code: String,
+    pub(crate) device_code: String,
     #[serde(default)]
-    user_code: String,
+    pub(crate) user_code: String,
     #[serde(default)]
-    verification_uri: String,
+    pub(crate) verification_uri: String,
     #[serde(default)]
-    verification_uri_complete: Option<String>,
+    pub(crate) verification_uri_complete: Option<String>,
     #[serde(default)]
-    expires_in: u64,
+    pub(crate) expires_in: u64,
     #[serde(default)]
-    interval: Option<u64>,
+    pub(crate) interval: Option<u64>,
     #[serde(default)]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(default)]
-    error_description: Option<String>,
+    pub(crate) error_description: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct GitHubTokenResponse {
+pub(crate) struct GitHubTokenResponse {
     #[serde(default)]
-    access_token: Option<String>,
+    pub(crate) access_token: Option<String>,
     #[serde(default)]
-    token_type: Option<String>,
+    pub(crate) token_type: Option<String>,
     #[serde(default)]
-    scope: Option<String>,
+    pub(crate) scope: Option<String>,
     #[serde(default)]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(default)]
-    error_description: Option<String>,
+    pub(crate) error_description: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct GitHubAccessToken {
-    access_token: String,
-    token_type: Option<String>,
-    scope: Option<String>,
+pub(crate) struct GitHubAccessToken {
+    pub(crate) access_token: String,
+    pub(crate) token_type: Option<String>,
+    pub(crate) scope: Option<String>,
 }
 
-fn github_oauth_http_agent() -> ureq::Agent {
+pub(crate) fn github_oauth_http_agent() -> ureq::Agent {
     let config = ureq::config::Config::builder()
         .http_status_as_error(false)
         .build();
     ureq::Agent::new_with_config(config)
 }
 
-fn github_request_device_code(client_id: &str) -> Result<GitHubDeviceCode, GitHubError> {
+pub(crate) fn github_request_device_code(client_id: &str) -> Result<GitHubDeviceCode, GitHubError> {
     let response = github_oauth_http_agent()
         .post(GITHUB_OAUTH_DEVICE_CODE_URL)
         .header("Accept", "application/json")
@@ -67,16 +69,12 @@ fn github_request_device_code(client_id: &str) -> Result<GitHubDeviceCode, GitHu
         })?;
 
     let status = response.status();
-    let body = response
-        .into_body()
-        .read_to_string()
-        .map_err(|error| {
-            GitHubError::Auth(format!("failed to read GitHub OAuth response: {error}"))
-        })?;
-    let payload: GitHubDeviceCodeResponse = serde_json::from_str(&body)
-        .map_err(|error| {
-            GitHubError::Auth(format!("failed to parse GitHub OAuth response: {error}"))
-        })?;
+    let body = response.into_body().read_to_string().map_err(|error| {
+        GitHubError::Auth(format!("failed to read GitHub OAuth response: {error}"))
+    })?;
+    let payload: GitHubDeviceCodeResponse = serde_json::from_str(&body).map_err(|error| {
+        GitHubError::Auth(format!("failed to parse GitHub OAuth response: {error}"))
+    })?;
 
     if !status.is_success() {
         let reason = payload
@@ -127,7 +125,7 @@ fn github_request_device_code(client_id: &str) -> Result<GitHubDeviceCode, GitHu
     })
 }
 
-fn github_poll_device_access_token(
+pub(crate) fn github_poll_device_access_token(
     client_id: &str,
     device_code: &GitHubDeviceCode,
 ) -> Result<GitHubAccessToken, GitHubError> {
@@ -197,7 +195,7 @@ fn github_poll_device_access_token(
     }
 }
 
-fn github_request_access_token(
+pub(crate) fn github_request_access_token(
     client_id: &str,
     device_code: &str,
 ) -> Result<GitHubTokenResponse, GitHubError> {
@@ -215,14 +213,11 @@ fn github_request_access_token(
         })?;
 
     let status = response.status();
-    let body = response
-        .into_body()
-        .read_to_string()
-        .map_err(|error| {
-            GitHubError::Auth(format!(
-                "failed to read GitHub OAuth token response: {error}"
-            ))
-        })?;
+    let body = response.into_body().read_to_string().map_err(|error| {
+        GitHubError::Auth(format!(
+            "failed to read GitHub OAuth token response: {error}"
+        ))
+    })?;
     let payload: GitHubTokenResponse = serde_json::from_str(&body).map_err(|error| {
         GitHubError::Auth(format!(
             "failed to parse GitHub OAuth token response: {error}"

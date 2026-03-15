@@ -1,20 +1,24 @@
-fn github_repo_slug_for_repo(repo_root: &Path) -> Option<String> {
+use super::*;
+
+pub(crate) fn github_repo_slug_for_repo(repo_root: &Path) -> Option<String> {
     let remote_url = git_origin_remote_url(repo_root)?;
     github_repo_slug_from_remote_url(remote_url.trim())
 }
 
-fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
+pub(crate) fn github_avatar_url_for_repo_slug(repo_slug: &str) -> Option<String> {
     let (owner, _) = repo_slug.split_once('/')?;
     Some(format!(
         "https://avatars.githubusercontent.com/{owner}?size=96"
     ))
 }
 
-fn github_repo_url(repo_slug: &str) -> String {
+pub(crate) fn github_repo_url(repo_slug: &str) -> String {
     format!("https://github.com/{repo_slug}")
 }
 
-fn github_authenticated_user(saved_token: Option<&str>) -> Option<(String, Option<String>)> {
+pub(crate) fn github_authenticated_user(
+    saved_token: Option<&str>,
+) -> Option<(String, Option<String>)> {
     let token = resolve_github_access_token(saved_token)?;
     let response = ureq::get("https://api.github.com/user")
         .header("Authorization", &format!("Bearer {token}"))
@@ -42,7 +46,7 @@ fn github_authenticated_user(saved_token: Option<&str>) -> Option<(String, Optio
     Some((login, avatar_url))
 }
 
-fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
+pub(crate) fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
     let repo = gix::open(repo_root).ok()?;
     let remote = repo.find_remote("origin").ok()?;
     let url = remote.url(gix::remote::Direction::Fetch)?;
@@ -53,7 +57,7 @@ fn git_origin_remote_url(repo_root: &Path) -> Option<String> {
     Some(url_str)
 }
 
-fn github_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
+pub(crate) fn github_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
     if let Some(path) = remote_url.strip_prefix("git@github.com:") {
         return github_repo_slug_from_path(path);
     }
@@ -73,7 +77,7 @@ fn github_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
     None
 }
 
-fn github_repo_slug_from_path(path: &str) -> Option<String> {
+pub(crate) fn github_repo_slug_from_path(path: &str) -> Option<String> {
     let normalized = path.trim_end_matches('/');
     let repository_path = normalized.strip_suffix(".git").unwrap_or(normalized);
     let (owner, repository) = repository_path.split_once('/')?;
@@ -84,7 +88,7 @@ fn github_repo_slug_from_path(path: &str) -> Option<String> {
     Some(format!("{owner}/{repository}"))
 }
 
-fn github_pr_number_for_worktree(
+pub(crate) fn github_pr_number_for_worktree(
     github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     branch: &str,
@@ -94,11 +98,12 @@ fn github_pr_number_for_worktree(
         return None;
     }
 
-    github_pr_number_by_tracking_branch(github_service, worktree_path, github_token)
-        .or_else(|| github_pr_number_by_head_branch(github_service, worktree_path, branch, github_token))
+    github_pr_number_by_tracking_branch(github_service, worktree_path, github_token).or_else(|| {
+        github_pr_number_by_head_branch(github_service, worktree_path, branch, github_token)
+    })
 }
 
-fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
+pub(crate) fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
     if worktree.is_primary_checkout {
         return false;
     }
@@ -115,7 +120,7 @@ fn should_lookup_pull_request_for_worktree(worktree: &WorktreeSummary) -> bool {
         || branch.eq_ignore_ascii_case("trunk"))
 }
 
-fn github_pr_number_by_tracking_branch(
+pub(crate) fn github_pr_number_by_tracking_branch(
     github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     github_token: Option<&str>,
@@ -124,7 +129,7 @@ fn github_pr_number_by_tracking_branch(
     github_pr_number_by_head_branch(github_service, worktree_path, &branch, github_token)
 }
 
-fn github_pr_number_by_head_branch(
+pub(crate) fn github_pr_number_by_head_branch(
     github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     branch: &str,
@@ -135,11 +140,11 @@ fn github_pr_number_by_head_branch(
     github_service.open_pull_request_number(&slug, branch, &token)
 }
 
-fn github_pr_url(repo_slug: &str, pr_number: u64) -> String {
+pub(crate) fn github_pr_url(repo_slug: &str, pr_number: u64) -> String {
     format!("https://github.com/{repo_slug}/pull/{pr_number}")
 }
 
-fn non_empty_trimmed_str(value: &str) -> Option<&str> {
+pub(crate) fn non_empty_trimmed_str(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
@@ -148,19 +153,19 @@ fn non_empty_trimmed_str(value: &str) -> Option<&str> {
     }
 }
 
-fn github_access_token_from_env() -> Option<String> {
+pub(crate) fn github_access_token_from_env() -> Option<String> {
     env::var("GITHUB_TOKEN")
         .ok()
         .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
 }
 
-fn resolve_github_access_token(saved_token: Option<&str>) -> Option<String> {
+pub(crate) fn resolve_github_access_token(saved_token: Option<&str>) -> Option<String> {
     let env_token = github_access_token_from_env();
     resolve_github_access_token_from_sources(saved_token, env_token.as_deref())
         .or_else(github_service::github_access_token_from_gh_cli)
 }
 
-fn resolve_github_access_token_from_sources(
+pub(crate) fn resolve_github_access_token_from_sources(
     saved_token: Option<&str>,
     env_token: Option<&str>,
 ) -> Option<String> {
@@ -170,7 +175,7 @@ fn resolve_github_access_token_from_sources(
         .or_else(|| env_token.and_then(non_empty_trimmed_str).map(str::to_owned))
 }
 
-fn github_oauth_client_id() -> Option<String> {
+pub(crate) fn github_oauth_client_id() -> Option<String> {
     env::var("ARBOR_GITHUB_OAUTH_CLIENT_ID")
         .ok()
         .or_else(|| env::var("GITHUB_OAUTH_CLIENT_ID").ok())

@@ -1,4 +1,6 @@
-fn styled_lines_for_session(
+use super::*;
+
+pub(crate) fn styled_lines_for_session(
     session: &TerminalSession,
     theme: ThemePalette,
     show_cursor: bool,
@@ -53,7 +55,7 @@ fn styled_lines_for_session(
     lines
 }
 
-fn apply_cursor_to_lines(
+pub(crate) fn apply_cursor_to_lines(
     lines: &mut Vec<TerminalStyledLine>,
     cursor: TerminalCursor,
     theme: ThemePalette,
@@ -104,7 +106,7 @@ fn apply_cursor_to_lines(
     }
 }
 
-fn apply_ime_marked_text_to_lines(
+pub(crate) fn apply_ime_marked_text_to_lines(
     lines: &mut [TerminalStyledLine],
     cursor: TerminalCursor,
     marked_text: &str,
@@ -152,7 +154,7 @@ fn apply_ime_marked_text_to_lines(
     line.runs = runs_from_cells(&line.cells);
 }
 
-fn apply_selection_to_lines(
+pub(crate) fn apply_selection_to_lines(
     lines: &mut Vec<TerminalStyledLine>,
     selection: &TerminalSelection,
     theme: ThemePalette,
@@ -205,7 +207,7 @@ fn apply_selection_to_lines(
     }
 }
 
-fn normalized_terminal_selection(
+pub(crate) fn normalized_terminal_selection(
     selection: &TerminalSelection,
 ) -> Option<(TerminalGridPosition, TerminalGridPosition)> {
     let (start, end) = if selection.anchor.line < selection.head.line
@@ -224,7 +226,7 @@ fn normalized_terminal_selection(
     Some((start, end))
 }
 
-fn cells_from_runs(runs: &[TerminalStyledRun]) -> Vec<TerminalStyledCell> {
+pub(crate) fn cells_from_runs(runs: &[TerminalStyledRun]) -> Vec<TerminalStyledCell> {
     let mut cells = Vec::new();
     let mut column = 0_usize;
     for run in runs {
@@ -241,7 +243,7 @@ fn cells_from_runs(runs: &[TerminalStyledRun]) -> Vec<TerminalStyledCell> {
     cells
 }
 
-fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
+pub(crate) fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
     let mut runs = Vec::new();
     let mut current_fg = None;
     let mut current_bg = None;
@@ -298,16 +300,18 @@ fn runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<TerminalStyledRun> {
 }
 
 #[derive(Clone)]
-struct PositionedTerminalRun {
-    text: String,
-    fg: u32,
-    bg: u32,
-    start_column: usize,
-    cell_count: usize,
-    force_cell_width: bool,
+pub(crate) struct PositionedTerminalRun {
+    pub(crate) text: String,
+    pub(crate) fg: u32,
+    pub(crate) bg: u32,
+    pub(crate) start_column: usize,
+    pub(crate) cell_count: usize,
+    pub(crate) force_cell_width: bool,
 }
 
-fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTerminalRun> {
+pub(crate) fn positioned_runs_from_cells(
+    cells: &[TerminalStyledCell],
+) -> Vec<PositionedTerminalRun> {
     let mut runs = Vec::new();
     let mut current_fg: Option<u32> = None;
     let mut current_bg: Option<u32> = None;
@@ -376,11 +380,14 @@ fn positioned_runs_from_cells(cells: &[TerminalStyledCell]) -> Vec<PositionedTer
     runs
 }
 
-fn is_terminal_powerline_character(ch: char) -> bool {
+pub(crate) fn is_terminal_powerline_character(ch: char) -> bool {
     matches!(ch as u32, 0xE0B0..=0xE0D7)
 }
 
-fn plain_lines_to_styled(lines: Vec<String>, theme: ThemePalette) -> Vec<TerminalStyledLine> {
+pub(crate) fn plain_lines_to_styled(
+    lines: Vec<String>,
+    theme: ThemePalette,
+) -> Vec<TerminalStyledLine> {
     lines
         .into_iter()
         .map(|line| {
@@ -410,7 +417,7 @@ fn plain_lines_to_styled(lines: Vec<String>, theme: ThemePalette) -> Vec<Termina
         .collect()
 }
 
-fn render_terminal_line(
+pub(crate) fn render_terminal_line(
     line: TerminalStyledLine,
     theme: ThemePalette,
     cell_width: f32,
@@ -520,7 +527,7 @@ fn render_terminal_line(
         )
 }
 
-fn should_force_powerline(run: &PositionedTerminalRun) -> bool {
+pub(crate) fn should_force_powerline(run: &PositionedTerminalRun) -> bool {
     run.text.chars().count() == 1
         && run
             .text
@@ -529,7 +536,7 @@ fn should_force_powerline(run: &PositionedTerminalRun) -> bool {
             .is_some_and(is_terminal_powerline_character)
 }
 
-fn snap_pixels_floor(value: Pixels, scale_factor: f32) -> Pixels {
+pub(crate) fn snap_pixels_floor(value: Pixels, scale_factor: f32) -> Pixels {
     if !(scale_factor.is_finite() && scale_factor > 0.) {
         return value.floor();
     }
@@ -538,7 +545,7 @@ fn snap_pixels_floor(value: Pixels, scale_factor: f32) -> Pixels {
     px(scaled.floor() / scale_factor)
 }
 
-fn snap_pixels_ceil(value: Pixels, scale_factor: f32) -> Pixels {
+pub(crate) fn snap_pixels_ceil(value: Pixels, scale_factor: f32) -> Pixels {
     if !(scale_factor.is_finite() && scale_factor > 0.) {
         return value.ceil();
     }
@@ -547,7 +554,7 @@ fn snap_pixels_ceil(value: Pixels, scale_factor: f32) -> Pixels {
     px(scaled.ceil() / scale_factor)
 }
 
-fn lines_for_display(text: &str) -> Vec<String> {
+pub(crate) fn lines_for_display(text: &str) -> Vec<String> {
     if text.is_empty() {
         return vec!["<no output yet>".to_owned()];
     }
@@ -555,7 +562,7 @@ fn lines_for_display(text: &str) -> Vec<String> {
     text.lines().map(ToOwned::to_owned).collect()
 }
 
-fn terminal_display_lines(session: &TerminalSession) -> Vec<String> {
+pub(crate) fn terminal_display_lines(session: &TerminalSession) -> Vec<String> {
     if !session.styled_output.is_empty() {
         return session
             .styled_output
@@ -571,7 +578,7 @@ fn terminal_display_lines(session: &TerminalSession) -> Vec<String> {
     session.output.lines().map(ToOwned::to_owned).collect()
 }
 
-fn styled_line_to_string(line: &TerminalStyledLine) -> String {
+pub(crate) fn styled_line_to_string(line: &TerminalStyledLine) -> String {
     let mut cells = if line.cells.is_empty() {
         cells_from_runs(&line.runs)
     } else {
@@ -597,7 +604,7 @@ fn styled_line_to_string(line: &TerminalStyledLine) -> String {
     output
 }
 
-fn terminal_grid_position_from_pointer(
+pub(crate) fn terminal_grid_position_from_pointer(
     position: gpui::Point<Pixels>,
     bounds: Bounds<Pixels>,
     scroll_offset: gpui::Point<Pixels>,
@@ -620,7 +627,7 @@ fn terminal_grid_position_from_pointer(
     Some(TerminalGridPosition { line, column })
 }
 
-fn terminal_token_bounds(
+pub(crate) fn terminal_token_bounds(
     lines: &[String],
     point: TerminalGridPosition,
 ) -> Option<(TerminalGridPosition, TerminalGridPosition)> {
@@ -660,7 +667,7 @@ fn terminal_token_bounds(
     ))
 }
 
-fn terminal_line_bounds(
+pub(crate) fn terminal_line_bounds(
     lines: &[String],
     point: TerminalGridPosition,
 ) -> Option<(TerminalGridPosition, TerminalGridPosition)> {
@@ -682,7 +689,7 @@ fn terminal_line_bounds(
     ))
 }
 
-fn terminal_selection_text(lines: &[String], selection: &TerminalSelection) -> String {
+pub(crate) fn terminal_selection_text(lines: &[String], selection: &TerminalSelection) -> String {
     let Some((start, end)) = normalized_terminal_selection(selection) else {
         return String::new();
     };
@@ -715,7 +722,7 @@ fn terminal_selection_text(lines: &[String], selection: &TerminalSelection) -> S
     output
 }
 
-fn trim_to_last_lines(text: String, max_lines: usize) -> String {
+pub(crate) fn trim_to_last_lines(text: String, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max_lines {
         return text;
@@ -730,7 +737,7 @@ fn trim_to_last_lines(text: String, max_lines: usize) -> String {
     trimmed
 }
 
-fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bool {
+pub(crate) fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bool {
     let max_offset = scroll_handle.max_offset();
     if max_offset.height <= px(0.) {
         return true;
@@ -741,7 +748,7 @@ fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bool {
     distance_from_bottom <= px(6.)
 }
 
-fn terminal_grid_size_from_scroll_handle(
+pub(crate) fn terminal_grid_size_from_scroll_handle(
     scroll_handle: &ScrollHandle,
     cx: &App,
 ) -> Option<(u16, u16, u16, u16)> {
@@ -756,7 +763,7 @@ fn terminal_grid_size_from_scroll_handle(
     Some((rows, cols, pixel_width, pixel_height))
 }
 
-fn terminal_cell_width_px(cx: &App) -> f32 {
+pub(crate) fn terminal_cell_width_px(cx: &App) -> f32 {
     let text_system = cx.text_system();
     let mono_font = terminal_mono_font(cx);
     let font_id = text_system.resolve_font(&mono_font);
@@ -769,7 +776,7 @@ fn terminal_cell_width_px(cx: &App) -> f32 {
         .unwrap_or(TERMINAL_CELL_WIDTH_PX)
 }
 
-fn diff_cell_width_px(cx: &App) -> f32 {
+pub(crate) fn diff_cell_width_px(cx: &App) -> f32 {
     let text_system = cx.text_system();
     let mono_font = terminal_mono_font(cx);
     let font_id = text_system.resolve_font(&mono_font);
@@ -783,7 +790,7 @@ fn diff_cell_width_px(cx: &App) -> f32 {
         .unwrap_or(fallback)
 }
 
-fn terminal_line_height_px(cx: &App) -> f32 {
+pub(crate) fn terminal_line_height_px(cx: &App) -> f32 {
     let text_system = cx.text_system();
     let mono_font = terminal_mono_font(cx);
     let font_id = text_system.resolve_font(&mono_font);
@@ -804,7 +811,7 @@ fn terminal_line_height_px(cx: &App) -> f32 {
     TERMINAL_CELL_HEIGHT_PX
 }
 
-fn terminal_grid_size_for_viewport(
+pub(crate) fn terminal_grid_size_for_viewport(
     width: f32,
     height: f32,
     cell_width: f32,
@@ -825,6 +832,6 @@ fn terminal_grid_size_for_viewport(
     Some((rows, cols))
 }
 
-fn should_auto_follow_terminal_output(changed: bool, was_near_bottom: bool) -> bool {
+pub(crate) fn should_auto_follow_terminal_output(changed: bool, was_near_bottom: bool) -> bool {
     changed && was_near_bottom
 }

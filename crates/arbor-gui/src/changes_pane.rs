@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_right_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
         let content: Div = match self.right_pane_tab {
             RightPaneTab::Changes => self.render_changes_content(cx),
@@ -51,78 +53,80 @@ impl ArborWindow {
                         .child(procfile_hint),
                 )
             })
-            .when(show_search, |this| this.child(
-                div()
-                    .id("right-pane-search")
-                    .h(px(28.))
-                    .mx_1()
-                    .my(px(4.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(if search_active {
-                        theme.accent
-                    } else {
-                        theme.border
-                    }))
-                    .bg(rgb(theme.panel_bg))
-                    .cursor_text()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.right_pane_search_active = true;
-                            this.right_pane_search_cursor = char_count(&this.right_pane_search);
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        div()
-                            .font_family(FONT_MONO)
-                            .text_xs()
-                            .min_w_0()
-                            .flex_1()
-                            .child(if search_active {
-                                if search_text.is_empty() {
-                                    active_input_display(
-                                        theme,
-                                        "",
-                                        search_placeholder,
-                                        theme.text_disabled,
-                                        self.right_pane_search_cursor,
-                                        28,
-                                    )
-                                } else {
-                                    active_input_display(
-                                        theme,
-                                        &search_text,
-                                        search_placeholder,
-                                        theme.text_primary,
-                                        self.right_pane_search_cursor,
-                                        28,
-                                    )
-                                }
-                            } else if search_text.is_empty() {
-                                div()
-                                    .text_color(rgb(theme.text_disabled))
-                                    .child(search_placeholder)
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_color(rgb(theme.text_primary))
-                                    .child(search_text)
-                                    .into_any_element()
+            .when(show_search, |this| {
+                this.child(
+                    div()
+                        .id("right-pane-search")
+                        .h(px(28.))
+                        .mx_1()
+                        .my(px(4.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(if search_active {
+                            theme.accent
+                        } else {
+                            theme.border
+                        }))
+                        .bg(rgb(theme.panel_bg))
+                        .cursor_text()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.right_pane_search_active = true;
+                                this.right_pane_search_cursor = char_count(&this.right_pane_search);
+                                cx.notify();
                             }),
-                    ),
-            ))
+                        )
+                        .child(
+                            div()
+                                .font_family(FONT_MONO)
+                                .text_xs()
+                                .min_w_0()
+                                .flex_1()
+                                .child(if search_active {
+                                    if search_text.is_empty() {
+                                        active_input_display(
+                                            theme,
+                                            "",
+                                            search_placeholder,
+                                            theme.text_disabled,
+                                            self.right_pane_search_cursor,
+                                            28,
+                                        )
+                                    } else {
+                                        active_input_display(
+                                            theme,
+                                            &search_text,
+                                            search_placeholder,
+                                            theme.text_primary,
+                                            self.right_pane_search_cursor,
+                                            28,
+                                        )
+                                    }
+                                } else if search_text.is_empty() {
+                                    div()
+                                        .text_color(rgb(theme.text_disabled))
+                                        .child(search_placeholder)
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(search_text)
+                                        .into_any_element()
+                                }),
+                        ),
+                )
+            })
             .child(content)
     }
 
-    fn render_right_pane_tabs(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_right_pane_tabs(&self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let active_tab = self.right_pane_tab;
         let procfile_count = self
@@ -205,11 +209,15 @@ impl ArborWindow {
             .border_color(rgb(theme.border))
             .child(tab_button("Changes", RightPaneTab::Changes, None))
             .child(tab_button("Files", RightPaneTab::FileTree, None))
-            .child(tab_button("Processes", RightPaneTab::Procfile, procfile_count))
+            .child(tab_button(
+                "Processes",
+                RightPaneTab::Procfile,
+                procfile_count,
+            ))
             .child(tab_button("Notes", RightPaneTab::Notes, None))
     }
 
-    fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_changes_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let selected_path = self.selected_changed_file.clone();
         let can_run_actions = self.can_run_local_git_actions();
@@ -433,7 +441,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_notes_content(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_notes_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
 
         let Some(notes_path) = self.worktree_notes_path.clone() else {
@@ -459,7 +467,10 @@ impl ArborWindow {
         let notes_active = self.worktree_notes_active;
         let notes_error = self.worktree_notes_error.clone();
         let notes_path_label = notes_path
-            .strip_prefix(self.selected_local_worktree_path().unwrap_or(notes_path.as_path()))
+            .strip_prefix(
+                self.selected_local_worktree_path()
+                    .unwrap_or(notes_path.as_path()),
+            )
             .unwrap_or(notes_path.as_path())
             .display()
             .to_string();
@@ -575,7 +586,10 @@ impl ArborWindow {
                                                     if line.is_empty() {
                                                         this.child(" ")
                                                     } else {
-                                                        this.flex().flex_wrap().w_full().child(line.clone())
+                                                        this.flex()
+                                                            .flex_wrap()
+                                                            .w_full()
+                                                            .child(line.clone())
                                                     }
                                                 }),
                                         )
@@ -585,7 +599,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_procfile_content(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_procfile_content(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
 
         let Some(worktree) = self.active_worktree().cloned() else {
@@ -619,11 +633,7 @@ impl ArborWindow {
         ));
 
         let worktree_path = worktree.path.clone();
-        let mut list = div()
-            .id("procfile-list")
-            .flex()
-            .flex_col()
-            .gap_2();
+        let mut list = div().id("procfile-list").flex().flex_col().gap_2();
         for (process_index, process) in worktree.managed_processes.iter().enumerate() {
             list = list.child(self.render_procfile_process_row(
                 worktree_path.as_path(),
@@ -679,7 +689,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_procfile_process_row(
+    pub(crate) fn render_procfile_process_row(
         &self,
         worktree_path: &Path,
         process: &ManagedWorktreeProcess,
@@ -715,7 +725,11 @@ impl ArborWindow {
                     true,
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.terminals.iter().any(|session| session.id == session_id) {
+                    if this
+                        .terminals
+                        .iter()
+                        .any(|session| session.id == session_id)
+                    {
                         this.select_terminal(session_id, window, cx);
                     }
                     cx.stop_propagation();
@@ -773,14 +787,20 @@ impl ArborWindow {
                     true,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.stop_managed_process_for_worktree(worktree_index, &process_id_for_stop, cx);
+                    this.stop_managed_process_for_worktree(
+                        worktree_index,
+                        &process_id_for_stop,
+                        cx,
+                    );
                     cx.stop_propagation();
                 })),
             );
         }
 
         div()
-            .id(ElementId::Name(format!("procfile-process-row-{process_index}").into()))
+            .id(ElementId::Name(
+                format!("procfile-process-row-{process_index}").into(),
+            ))
             .rounded_sm()
             .border_1()
             .border_color(rgb(theme.border))
@@ -814,26 +834,24 @@ impl ArborWindow {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(
-                                div()
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(rgb(status_color)),
-                            )
+                            .child(div().size(px(6.)).rounded_full().bg(rgb(status_color)))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(rgb(status_color))
                                     .child(status_label),
                             )
-                            .when_some(session.and_then(|session| session.root_pid), |this, pid| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(theme.text_disabled))
-                                        .child(format!("pid {pid}")),
-                                )
-                            }),
+                            .when_some(
+                                session.and_then(|session| session.root_pid),
+                                |this, pid| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(theme.text_disabled))
+                                            .child(format!("pid {pid}")),
+                                    )
+                                },
+                            ),
                     ),
             )
             .child(
@@ -849,7 +867,7 @@ impl ArborWindow {
             .child(actions)
     }
 
-    fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_file_tree(&self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme();
         let selected_entry = self.selected_file_tree_entry.clone();
         let expanded_dirs = &self.expanded_dirs;

@@ -1,5 +1,11 @@
+use super::*;
+
 impl ArborWindow {
-    fn handle_file_view_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn handle_file_view_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // Always handle Cmd+S for save, even when not in editing mode
         if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "s" {
             self.save_active_file_view(cx);
@@ -164,7 +170,7 @@ impl ArborWindow {
         false
     }
 
-    fn save_active_file_view(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_active_file_view(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.active_file_view_session_id else {
             return;
         };
@@ -231,7 +237,7 @@ impl ArborWindow {
     }
 }
 
-fn render_file_view_session(
+pub(crate) fn render_file_view_session(
     session: FileViewSession,
     theme: ThemePalette,
     scroll_handle: &UniformListScrollHandle,

@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn open_commit_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_commit_modal(&mut self, cx: &mut Context<Self>) {
         if self.git_action_in_flight.is_some() {
             return;
         }
@@ -32,20 +34,20 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_commit_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_commit_modal(&mut self, cx: &mut Context<Self>) {
         self.commit_modal = None;
         cx.notify();
     }
 
-    fn submit_commit_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_commit_modal(&mut self, cx: &mut Context<Self>) {
         self.submit_commit_modal_with_follow_up(false, cx);
     }
 
-    fn submit_commit_modal_and_create_pr(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_commit_modal_and_create_pr(&mut self, cx: &mut Context<Self>) {
         self.submit_commit_modal_with_follow_up(true, cx);
     }
 
-    fn submit_commit_modal_with_follow_up(
+    pub(crate) fn submit_commit_modal_with_follow_up(
         &mut self,
         create_pull_request: bool,
         cx: &mut Context<Self>,
@@ -267,7 +269,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn generate_commit_message_with_ai(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn generate_commit_message_with_ai(&mut self, cx: &mut Context<Self>) {
         if self.git_action_in_flight.is_some() {
             return;
         }
@@ -320,7 +322,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn run_push_action(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_push_action(&mut self, cx: &mut Context<Self>) {
         if self.git_action_in_flight.is_some() {
             return;
         }
@@ -363,7 +365,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn run_create_pr_action(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn run_create_pr_action(&mut self, cx: &mut Context<Self>) {
         if self.git_action_in_flight.is_some() {
             return;
         }
@@ -428,7 +430,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn render_commit_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_commit_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.commit_modal.clone() else {
             return div();
         };
@@ -546,11 +548,14 @@ impl ArborWindow {
                                             ActionButtonStyle::Secondary,
                                             !modal.generating,
                                         )
-                                        .when(!modal.generating, |this| {
-                                            this.on_click(cx.listener(|this, _, _, cx| {
-                                                this.generate_commit_message_with_ai(cx);
-                                            }))
-                                        }),
+                                        .when(
+                                            !modal.generating,
+                                            |this| {
+                                                this.on_click(cx.listener(|this, _, _, cx| {
+                                                    this.generate_commit_message_with_ai(cx);
+                                                }))
+                                            },
+                                        ),
                                     )
                                     .child(
                                         action_button(
@@ -560,15 +565,17 @@ impl ArborWindow {
                                             ActionButtonStyle::Secondary,
                                             true,
                                         )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Some(modal) = this.commit_modal.as_mut() {
-                                                modal.message = default_message.clone();
-                                                modal.message_cursor =
-                                                    char_count(&default_message);
-                                                modal.error = None;
-                                            }
-                                            cx.notify();
-                                        })),
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                if let Some(modal) = this.commit_modal.as_mut() {
+                                                    modal.message = default_message.clone();
+                                                    modal.message_cursor =
+                                                        char_count(&default_message);
+                                                    modal.error = None;
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
                                     ),
                             )
                             .child(
@@ -583,9 +590,11 @@ impl ArborWindow {
                                             ActionButtonStyle::Secondary,
                                             true,
                                         )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.close_commit_modal(cx);
-                                        })),
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.close_commit_modal(cx);
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         action_button(
@@ -595,11 +604,14 @@ impl ArborWindow {
                                             ActionButtonStyle::Primary,
                                             !modal.generating,
                                         )
-                                        .when(!modal.generating, |this| {
-                                            this.on_click(cx.listener(|this, _, _, cx| {
-                                                this.submit_commit_modal(cx);
-                                            }))
-                                        }),
+                                        .when(
+                                            !modal.generating,
+                                            |this| {
+                                                this.on_click(cx.listener(|this, _, _, cx| {
+                                                    this.submit_commit_modal(cx);
+                                                }))
+                                            },
+                                        ),
                                     )
                                     .child(
                                         action_button(
@@ -609,11 +621,14 @@ impl ArborWindow {
                                             ActionButtonStyle::Primary,
                                             !modal.generating && !has_existing_pull_request,
                                         )
-                                        .when(!modal.generating && !has_existing_pull_request, |this| {
-                                            this.on_click(cx.listener(|this, _, _, cx| {
-                                                this.submit_commit_modal_and_create_pr(cx);
-                                            }))
-                                        }),
+                                        .when(
+                                            !modal.generating && !has_existing_pull_request,
+                                            |this| {
+                                                this.on_click(cx.listener(|this, _, _, cx| {
+                                                    this.submit_commit_modal_and_create_pr(cx);
+                                                }))
+                                            },
+                                        ),
                                     ),
                             ),
                     ),
@@ -621,7 +636,7 @@ impl ArborWindow {
     }
 }
 
-enum StackedGitActionFailure {
+pub(crate) enum StackedGitActionFailure {
     Commit(String),
     Push {
         commit_message: String,
@@ -634,7 +649,7 @@ enum StackedGitActionFailure {
     },
 }
 
-fn generate_commit_message_with_ai(
+pub(crate) fn generate_commit_message_with_ai(
     worktree_path: &Path,
     changed_files: &[ChangedFile],
     preset: AgentPresetKind,
@@ -652,7 +667,7 @@ fn generate_commit_message_with_ai(
     )
 }
 
-fn build_commit_message_prompt(changed_files: &[ChangedFile]) -> String {
+pub(crate) fn build_commit_message_prompt(changed_files: &[ChangedFile]) -> String {
     let mut prompt = String::from(
         "Write a concise git commit message for these changes. Return only the commit message text.\n",
     );
@@ -679,7 +694,7 @@ fn build_commit_message_prompt(changed_files: &[ChangedFile]) -> String {
     prompt
 }
 
-fn run_git_commit_for_worktree(
+pub(crate) fn run_git_commit_for_worktree(
     worktree_path: &Path,
     changed_files: &[ChangedFile],
     message: &str,
@@ -745,7 +760,7 @@ fn run_git_commit_for_worktree(
     Ok(format!("commit complete: {subject}"))
 }
 
-fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, GitError> {
+pub(crate) fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, GitError> {
     let repo = git2::Repository::open(worktree_path).map_err(|error| {
         GitError::Operation(format!(
             "failed to open repository at `{}`: {error}",
@@ -764,9 +779,7 @@ fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, GitError> {
 
     let mut remote = repo
         .find_remote("origin")
-        .map_err(|error| {
-            GitError::Operation(format!("failed to find remote 'origin': {error}"))
-        })?;
+        .map_err(|error| GitError::Operation(format!("failed to find remote 'origin': {error}")))?;
 
     let mut callbacks = git2::RemoteCallbacks::new();
     callbacks.credentials(|_url, username_from_url, allowed_types| {
@@ -803,7 +816,7 @@ fn run_git_push_for_worktree(worktree_path: &Path) -> Result<String, GitError> {
     ))
 }
 
-fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, GitError> {
+pub(crate) fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, GitError> {
     let repo = gix::open(worktree_path).map_err(|error| {
         GitError::Operation(format!(
             "failed to open repository at `{}`: {error}",
@@ -831,7 +844,7 @@ fn git_branch_name_for_worktree(worktree_path: &Path) -> Result<String, GitError
     }
 }
 
-fn git_has_tracking_branch(worktree_path: &Path) -> bool {
+pub(crate) fn git_has_tracking_branch(worktree_path: &Path) -> bool {
     let Ok(repo) = gix::open(worktree_path) else {
         return false;
     };
@@ -849,7 +862,7 @@ fn git_has_tracking_branch(worktree_path: &Path) -> bool {
             .is_some()
 }
 
-fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
+pub(crate) fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
     let repo = gix::open(worktree_path).ok()?;
     let reference = repo.find_reference("refs/remotes/origin/HEAD").ok()?;
     let target = reference.target();
@@ -865,7 +878,7 @@ fn git_default_base_branch(worktree_path: &Path) -> Option<String> {
     Some(short.to_owned())
 }
 
-fn run_create_pr_for_worktree(
+pub(crate) fn run_create_pr_for_worktree(
     github_service: &dyn github_service::GitHubService,
     worktree_path: &Path,
     repo_slug: Option<&str>,
@@ -884,16 +897,12 @@ fn run_create_pr_for_worktree(
     let slug = repo_slug
         .map(str::to_owned)
         .or_else(|| github_repo_slug_for_repo(worktree_path))
-        .ok_or_else(|| {
-            GitHubError::Api("could not determine GitHub repository slug".to_owned())
-        })?;
+        .ok_or_else(|| GitHubError::Api("could not determine GitHub repository slug".to_owned()))?;
 
     let title = branch.replace(['-', '_'], " ");
 
     let token = resolve_github_access_token(github_token).ok_or_else(|| {
-        GitHubError::Auth(
-            "GitHub authentication required, click GitHub Sign in first".to_owned(),
-        )
+        GitHubError::Auth("GitHub authentication required, click GitHub Sign in first".to_owned())
     })?;
 
     if let Some(existing_pr_number) =
@@ -910,7 +919,7 @@ fn run_create_pr_for_worktree(
         .map_err(|error| GitHubError::Api(error.to_string()))
 }
 
-fn extract_first_url(text: &str) -> Option<String> {
+pub(crate) fn extract_first_url(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|token| {
         let trimmed =
             token.trim_matches(|character: char| matches!(character, '"' | '\'' | ',' | '.'));

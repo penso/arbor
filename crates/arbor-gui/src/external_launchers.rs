@@ -1,4 +1,6 @@
-fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, LaunchError> {
+use super::*;
+
+pub(crate) fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, LaunchError> {
     #[cfg(target_os = "macos")]
     {
         let mut command = create_command("open");
@@ -29,7 +31,7 @@ fn open_worktree_in_file_manager(worktree_path: &Path) -> Result<String, LaunchE
     ))
 }
 
-fn open_worktree_with_external_launcher(
+pub(crate) fn open_worktree_with_external_launcher(
     worktree_path: &Path,
     launcher: ExternalLauncher,
 ) -> Result<String, LaunchError> {
@@ -40,8 +42,7 @@ fn open_worktree_with_external_launcher(
             run_launch_command(
                 &mut command,
                 &format!("open worktree with {}", launcher.label),
-            )
-            ?;
+            )?;
         },
         ExternalLauncherKind::MacApp(app_name) => {
             let mut command = create_command("open");
@@ -49,15 +50,14 @@ fn open_worktree_with_external_launcher(
             run_launch_command(
                 &mut command,
                 &format!("open worktree in {}", launcher.label),
-            )
-            ?;
+            )?;
         },
     }
 
     Ok(format!("opened worktree in {}", launcher.label))
 }
 
-fn command_exists_on_path(command_name: &str) -> bool {
+pub(crate) fn command_exists_on_path(command_name: &str) -> bool {
     let path_env = AUGMENTED_PATH
         .get()
         .map(|path| std::ffi::OsString::from(path.as_str()))
@@ -71,7 +71,7 @@ fn command_exists_on_path(command_name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_app_bundle_exists(app_name: &str) -> bool {
+pub(crate) fn mac_app_bundle_exists(app_name: &str) -> bool {
     let bundle = format!("{app_name}.app");
     [
         "/Applications",
@@ -90,11 +90,11 @@ fn mac_app_bundle_exists(app_name: &str) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn mac_app_bundle_exists(_: &str) -> bool {
+pub(crate) fn mac_app_bundle_exists(_: &str) -> bool {
     false
 }
 
-fn detect_external_launcher(
+pub(crate) fn detect_external_launcher(
     label: &'static str,
     icon: &'static str,
     icon_color: u32,
@@ -126,7 +126,7 @@ fn detect_external_launcher(
     None
 }
 
-fn detect_ide_launchers() -> Vec<ExternalLauncher> {
+pub(crate) fn detect_ide_launchers() -> Vec<ExternalLauncher> {
     [
         (
             "VS Code",

@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn open_issue_details_modal_for_target(
+    pub(crate) fn open_issue_details_modal_for_target(
         &mut self,
         target: IssueTarget,
         source_label: String,
@@ -47,7 +49,11 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_issue_details_modal(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+    pub(crate) fn close_issue_details_modal(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         self.issue_details_modal = None;
         self.issue_details_scrollbar_drag_offset = None;
         if let Some(window) = window {
@@ -56,20 +62,15 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn open_create_modal_from_issue_details(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_create_modal_from_issue_details(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.issue_details_modal.clone() else {
             return;
         };
         self.issue_details_modal = None;
-        self.open_issue_create_modal_for_target(
-            modal.target,
-            modal.source_label,
-            modal.issue,
-            cx,
-        );
+        self.open_issue_create_modal_for_target(modal.target, modal.source_label, modal.issue, cx);
     }
 
-    fn render_issue_details_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_issue_details_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.issue_details_modal.clone() else {
             return div();
         };
@@ -100,11 +101,8 @@ impl ArborWindow {
                 }
             })
             .collect();
-        let mut description_body = div()
-            .relative()
-            .w_full()
-            .h_full()
-            .child(
+        let mut description_body =
+            div().relative().w_full().h_full().child(
                 div()
                     .id("issue-details-description-body")
                     .w_full()
@@ -132,11 +130,9 @@ impl ArborWindow {
                     )),
             );
 
-        if let Some(scrollbar) = issue_details_scrollbar_indicator(
-            &self.issue_details_scroll_handle,
-            theme,
-            cx,
-        ) {
+        if let Some(scrollbar) =
+            issue_details_scrollbar_indicator(&self.issue_details_scroll_handle, theme, cx)
+        {
             description_body = description_body.child(scrollbar);
         }
 
@@ -198,67 +194,62 @@ impl ArborWindow {
                         cx.stop_propagation();
                     })
                     .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_start()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(theme.text_muted))
-                                            .child(issue_heading),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_lg()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .line_clamp(3)
-                                            .text_color(rgb(theme.text_primary))
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .flex_wrap()
-                                            .child(issue_meta_chip(
-                                                issue_state,
-                                                theme.text_primary,
-                                                theme.panel_bg,
-                                                false,
-                                                None,
-                                                cx,
-                                            ))
-                                            .child(issue_meta_chip(
-                                                source_label,
+                        div().flex_none().flex().items_start().gap_3().child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme.text_muted))
+                                        .child(issue_heading),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_lg()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .line_clamp(3)
+                                        .text_color(rgb(theme.text_primary))
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .flex_wrap()
+                                        .child(issue_meta_chip(
+                                            issue_state,
+                                            theme.text_primary,
+                                            theme.panel_bg,
+                                            false,
+                                            None,
+                                            cx,
+                                        ))
+                                        .child(issue_meta_chip(
+                                            source_label,
+                                            theme.text_muted,
+                                            theme.panel_bg,
+                                            false,
+                                            None,
+                                            cx,
+                                        ))
+                                        .when_some(updated_at.clone(), |this, updated_at| {
+                                            this.child(issue_meta_chip(
+                                                issue_updated_label(&updated_at),
                                                 theme.text_muted,
                                                 theme.panel_bg,
                                                 false,
                                                 None,
                                                 cx,
                                             ))
-                                            .when_some(updated_at.clone(), |this, updated_at| {
-                                                this.child(issue_meta_chip(
-                                                    issue_updated_label(&updated_at),
-                                                    theme.text_muted,
-                                                    theme.panel_bg,
-                                                    false,
-                                                    None,
-                                                    cx,
-                                                ))
-                                            }),
-                                    ),
-                            ),
+                                        }),
+                                ),
+                        ),
                     )
                     .when(linked_review.is_some() || linked_branch.is_some(), |this| {
                         this.child(
@@ -373,7 +364,7 @@ impl ArborWindow {
     }
 }
 
-fn issue_details_scrollbar_indicator(
+pub(crate) fn issue_details_scrollbar_indicator(
     scroll_handle: &ScrollHandle,
     theme: ThemePalette,
     cx: &mut Context<ArborWindow>,
@@ -424,9 +415,8 @@ fn issue_details_scrollbar_indicator(
                                         cx.notify();
                                     });
                                 } else {
-                                    let centered_anchor = px(metrics.thumb_bounds.size.height
-                                        .to_f64() as f32
-                                        / 2.);
+                                    let centered_anchor =
+                                        px(metrics.thumb_bounds.size.height.to_f64() as f32 / 2.);
                                     issue_details_set_scroll_offset(
                                         &scroll_handle,
                                         metrics.track_bounds,
@@ -487,12 +477,12 @@ fn issue_details_scrollbar_indicator(
 }
 
 #[derive(Clone, Copy)]
-struct IssueDetailsScrollbarMetrics {
-    track_bounds: Bounds<Pixels>,
-    thumb_bounds: Bounds<Pixels>,
+pub(crate) struct IssueDetailsScrollbarMetrics {
+    pub(crate) track_bounds: Bounds<Pixels>,
+    pub(crate) thumb_bounds: Bounds<Pixels>,
 }
 
-fn issue_details_scrollbar_metrics(
+pub(crate) fn issue_details_scrollbar_metrics(
     scroll_handle: &ScrollHandle,
     bounds: Bounds<Pixels>,
 ) -> Option<IssueDetailsScrollbarMetrics> {
@@ -514,10 +504,10 @@ fn issue_details_scrollbar_metrics(
     let track_height_px = track_height.to_f64() as f32;
     let viewport_height_px = viewport_height.to_f64() as f32;
     let max_offset_px = max_offset.height.to_f64() as f32;
-    let thumb_height = px(
-        ((track_height_px * (viewport_height_px / (viewport_height_px + max_offset_px))).max(36.))
-            .min(track_height_px),
-    );
+    let thumb_height = px(((track_height_px
+        * (viewport_height_px / (viewport_height_px + max_offset_px)))
+        .max(36.))
+    .min(track_height_px));
     let thumb_travel = (track_height - thumb_height).max(px(0.));
     let current_offset_y = (-scroll_handle.offset().y).clamp(px(0.), max_offset.height);
     let thumb_top = if max_offset.height <= px(0.) || thumb_travel <= px(0.) {
@@ -527,7 +517,10 @@ fn issue_details_scrollbar_metrics(
             * ((current_offset_y.to_f64() as f32) / (max_offset.height.to_f64() as f32)))
     };
     let thumb_bounds = Bounds::new(
-        point(track_bounds.origin.x + px(1.), track_bounds.origin.y + thumb_top),
+        point(
+            track_bounds.origin.x + px(1.),
+            track_bounds.origin.y + thumb_top,
+        ),
         size((track_bounds.size.width - px(2.)).max(px(1.)), thumb_height),
     );
 
@@ -537,7 +530,7 @@ fn issue_details_scrollbar_metrics(
     })
 }
 
-fn issue_details_set_scroll_offset(
+pub(crate) fn issue_details_set_scroll_offset(
     scroll_handle: &ScrollHandle,
     track_bounds: Bounds<Pixels>,
     thumb_height: Pixels,
@@ -562,9 +555,10 @@ fn issue_details_set_scroll_offset(
     scroll_handle.set_offset(point(current_offset.x, -target_offset_y));
 }
 
-const ISSUE_DESCRIPTION_FALLBACK: &str = "No issue description is available for this issue.";
+pub(crate) const ISSUE_DESCRIPTION_FALLBACK: &str =
+    "No issue description is available for this issue.";
 
-fn issue_meta_chip(
+pub(crate) fn issue_meta_chip(
     label: String,
     text_color: u32,
     background: u32,
@@ -587,15 +581,18 @@ fn issue_meta_chip(
             this.cursor_pointer().hover(|this| this.opacity(0.9))
         })
         .when_some(url, |this, url| {
-            this.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                this.open_external_url(&url, cx);
-                cx.stop_propagation();
-            }))
+            this.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.open_external_url(&url, cx);
+                    cx.stop_propagation();
+                }),
+            )
         })
         .child(label)
 }
 
-fn issue_body_text(body: Option<&str>) -> String {
+pub(crate) fn issue_body_text(body: Option<&str>) -> String {
     let Some(body) = body else {
         return ISSUE_DESCRIPTION_FALLBACK.to_owned();
     };
@@ -608,7 +605,7 @@ fn issue_body_text(body: Option<&str>) -> String {
     }
 }
 
-fn issue_body_log_preview(text: &str) -> String {
+pub(crate) fn issue_body_log_preview(text: &str) -> String {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut preview: String = normalized.chars().take(160).collect();
     if normalized.chars().count() > 160 {
@@ -617,7 +614,7 @@ fn issue_body_log_preview(text: &str) -> String {
     preview
 }
 
-fn issue_markdown_to_text(markdown: &str) -> String {
+pub(crate) fn issue_markdown_to_text(markdown: &str) -> String {
     let mut plain_lines = Vec::new();
     let mut in_code_block = false;
 
@@ -657,7 +654,7 @@ fn issue_markdown_to_text(markdown: &str) -> String {
     normalized.join("\n")
 }
 
-fn markdown_line_to_text(line: &str) -> String {
+pub(crate) fn markdown_line_to_text(line: &str) -> String {
     let mut text = line.trim_start();
 
     if let Some(stripped) = text.strip_prefix('>') {
@@ -685,8 +682,11 @@ fn markdown_line_to_text(line: &str) -> String {
     plain.trim().to_owned()
 }
 
-fn strip_markdown_heading(line: &str) -> Option<&str> {
-    let hashes = line.chars().take_while(|character| *character == '#').count();
+pub(crate) fn strip_markdown_heading(line: &str) -> Option<&str> {
+    let hashes = line
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
     if hashes == 0 {
         return None;
     }
@@ -694,14 +694,17 @@ fn strip_markdown_heading(line: &str) -> Option<&str> {
     line[hashes..].strip_prefix(' ').or(Some(&line[hashes..]))
 }
 
-fn strip_markdown_list_marker(line: &str) -> Option<&str> {
+pub(crate) fn strip_markdown_list_marker(line: &str) -> Option<&str> {
     for marker in ["- ", "* ", "+ "] {
         if let Some(stripped) = line.strip_prefix(marker) {
             return Some(stripped);
         }
     }
 
-    let digit_count = line.chars().take_while(|character| character.is_ascii_digit()).count();
+    let digit_count = line
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .count();
     if digit_count == 0 {
         return None;
     }
@@ -712,20 +715,21 @@ fn strip_markdown_list_marker(line: &str) -> Option<&str> {
         .or(None)
 }
 
-fn strip_markdown_task_marker(line: &str) -> Option<&str> {
+pub(crate) fn strip_markdown_task_marker(line: &str) -> Option<&str> {
     ["[ ] ", "[x] ", "[X] "]
         .into_iter()
         .find_map(|marker| line.strip_prefix(marker))
 }
 
-fn markdown_inline_to_text(text: &str) -> String {
+pub(crate) fn markdown_inline_to_text(text: &str) -> String {
     let mut output = String::new();
     let chars: Vec<char> = text.chars().collect();
     let mut index = 0;
 
     while index < chars.len() {
         let character = chars[index];
-        if character == '!' && chars.get(index + 1) == Some(&'[')
+        if character == '!'
+            && chars.get(index + 1) == Some(&'[')
             && let Some((alt_text, next_index)) =
                 markdown_bracket_and_url_to_text(&chars, index + 1, false)
         {
@@ -735,7 +739,8 @@ fn markdown_inline_to_text(text: &str) -> String {
         }
 
         if character == '['
-            && let Some((link_text, next_index)) = markdown_bracket_and_url_to_text(&chars, index, true)
+            && let Some((link_text, next_index)) =
+                markdown_bracket_and_url_to_text(&chars, index, true)
         {
             output.push_str(&link_text);
             index = next_index;
@@ -743,7 +748,9 @@ fn markdown_inline_to_text(text: &str) -> String {
         }
 
         if character == '<'
-            && let Some(close_index) = chars[index + 1..].iter().position(|candidate| *candidate == '>')
+            && let Some(close_index) = chars[index + 1..]
+                .iter()
+                .position(|candidate| *candidate == '>')
         {
             let end = index + 1 + close_index;
             let inner: String = chars[index + 1..end].iter().collect();
@@ -761,7 +768,7 @@ fn markdown_inline_to_text(text: &str) -> String {
     output
 }
 
-fn markdown_bracket_and_url_to_text(
+pub(crate) fn markdown_bracket_and_url_to_text(
     chars: &[char],
     bracket_index: usize,
     include_url: bool,
@@ -778,8 +785,12 @@ fn markdown_bracket_and_url_to_text(
         .iter()
         .position(|character| *character == ')')?;
     let close_paren_index = close_bracket_index + 2 + close_paren_offset;
-    let label: String = chars[bracket_index + 1..close_bracket_index].iter().collect();
-    let url: String = chars[close_bracket_index + 2..close_paren_index].iter().collect();
+    let label: String = chars[bracket_index + 1..close_bracket_index]
+        .iter()
+        .collect();
+    let url: String = chars[close_bracket_index + 2..close_paren_index]
+        .iter()
+        .collect();
 
     let rendered = if include_url && !url.trim().is_empty() && label.trim() != url.trim() {
         format!("{label} ({url})")
@@ -789,10 +800,10 @@ fn markdown_bracket_and_url_to_text(
     Some((rendered, close_paren_index + 1))
 }
 
-fn issue_updated_label(updated_at: &str) -> String {
+pub(crate) fn issue_updated_label(updated_at: &str) -> String {
     format!("updated {updated_at}")
 }
 
-fn issue_modal_source_label(source: &terminal_daemon_http::IssueSourceDto) -> String {
+pub(crate) fn issue_modal_source_label(source: &terminal_daemon_http::IssueSourceDto) -> String {
     source.provider.clone()
 }

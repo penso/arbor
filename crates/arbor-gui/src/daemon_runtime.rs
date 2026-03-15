@@ -1,4 +1,6 @@
-fn local_embedded_runtime(runtime: EmbeddedTerminal) -> SharedTerminalRuntime {
+use {super::*, serde::Deserialize};
+
+pub(crate) fn local_embedded_runtime(runtime: EmbeddedTerminal) -> SharedTerminalRuntime {
     Arc::new(EmulatorTerminalRuntime {
         backend: runtime,
         kind: TerminalRuntimeKind::Local,
@@ -11,7 +13,7 @@ fn local_embedded_runtime(runtime: EmbeddedTerminal) -> SharedTerminalRuntime {
     })
 }
 
-fn local_daemon_runtime(
+pub(crate) fn local_daemon_runtime(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
     rows: u16,
@@ -37,7 +39,7 @@ fn local_daemon_runtime(
     })
 }
 
-fn outpost_ssh_runtime(ssh: SshTerminalShell) -> SharedTerminalRuntime {
+pub(crate) fn outpost_ssh_runtime(ssh: SshTerminalShell) -> SharedTerminalRuntime {
     Arc::new(EmulatorTerminalRuntime {
         backend: ssh,
         kind: TerminalRuntimeKind::Outpost,
@@ -50,7 +52,7 @@ fn outpost_ssh_runtime(ssh: SshTerminalShell) -> SharedTerminalRuntime {
     })
 }
 
-fn outpost_mosh_runtime(mosh: arbor_mosh::MoshShell) -> SharedTerminalRuntime {
+pub(crate) fn outpost_mosh_runtime(mosh: arbor_mosh::MoshShell) -> SharedTerminalRuntime {
     Arc::new(EmulatorTerminalRuntime {
         backend: mosh,
         kind: TerminalRuntimeKind::Outpost,
@@ -63,11 +65,11 @@ fn outpost_mosh_runtime(mosh: arbor_mosh::MoshShell) -> SharedTerminalRuntime {
     })
 }
 
-const DAEMON_TERMINAL_WS_MAX_LINES: usize = 220;
+pub(crate) const DAEMON_TERMINAL_WS_MAX_LINES: usize = 220;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-enum DaemonTerminalWsServerEvent {
+pub(crate) enum DaemonTerminalWsServerEvent {
     Snapshot {
         output_tail: String,
         state: TerminalSessionState,
@@ -83,7 +85,7 @@ enum DaemonTerminalWsServerEvent {
     },
 }
 
-fn apply_terminal_emulator_snapshot(
+pub(crate) fn apply_terminal_emulator_snapshot(
     session: &mut TerminalSession,
     snapshot: arbor_terminal_emulator::TerminalSnapshot,
 ) -> bool {
@@ -111,7 +113,7 @@ fn apply_terminal_emulator_snapshot(
     changed
 }
 
-fn trim_terminal_snapshot(
+pub(crate) fn trim_terminal_snapshot(
     mut snapshot: arbor_terminal_emulator::TerminalSnapshot,
     max_lines: usize,
 ) -> arbor_terminal_emulator::TerminalSnapshot {
@@ -132,7 +134,10 @@ fn trim_terminal_snapshot(
     snapshot
 }
 
-fn track_terminal_command_keystroke(session: &mut TerminalSession, keystroke: &Keystroke) {
+pub(crate) fn track_terminal_command_keystroke(
+    session: &mut TerminalSession,
+    keystroke: &Keystroke,
+) {
     if keystroke.modifiers.platform {
         return;
     }
@@ -174,7 +179,10 @@ fn track_terminal_command_keystroke(session: &mut TerminalSession, keystroke: &K
     }
 }
 
-fn daemon_terminal_sync_interval(is_active: bool, session_state: TerminalState) -> Duration {
+pub(crate) fn daemon_terminal_sync_interval(
+    is_active: bool,
+    session_state: TerminalState,
+) -> Duration {
     if is_active {
         return ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL;
     }
@@ -185,7 +193,7 @@ fn daemon_terminal_sync_interval(is_active: bool, session_state: TerminalState) 
     }
 }
 
-fn runtime_sync_interval_elapsed(
+pub(crate) fn runtime_sync_interval_elapsed(
     last_runtime_sync_at: Option<Instant>,
     sync_interval: Duration,
     now: Instant,
@@ -200,7 +208,7 @@ fn runtime_sync_interval_elapsed(
     }
 }
 
-fn daemon_websocket_request(
+pub(crate) fn daemon_websocket_request(
     connect_config: &terminal_daemon_http::WebsocketConnectConfig,
 ) -> Result<tungstenite::http::Request<()>, ConnectionError> {
     use tungstenite::client::IntoClientRequest;
@@ -228,7 +236,7 @@ fn daemon_websocket_request(
 
 /// Set `TCP_NODELAY` and a short read timeout on the WebSocket's underlying TCP stream
 /// so the read loop can periodically check the write channel without blocking forever.
-fn configure_ws_socket_for_low_latency(
+pub(crate) fn configure_ws_socket_for_low_latency(
     socket: &tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
 ) {
     if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
@@ -237,7 +245,7 @@ fn configure_ws_socket_for_low_latency(
     }
 }
 
-fn spawn_daemon_terminal_ws_watcher(
+pub(crate) fn spawn_daemon_terminal_ws_watcher(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
     ws_state: &Arc<DaemonTerminalWsState>,
@@ -402,26 +410,21 @@ fn spawn_daemon_terminal_ws_watcher(
     });
 }
 
-fn daemon_terminal_ws_next_backoff(current: Duration) -> Duration {
+pub(crate) fn daemon_terminal_ws_next_backoff(current: Duration) -> Duration {
     current
         .checked_mul(2)
         .unwrap_or(DAEMON_TERMINAL_WS_RECONNECT_MAX_DELAY)
         .min(DAEMON_TERMINAL_WS_RECONNECT_MAX_DELAY)
 }
 
-fn request_async_daemon_snapshot(
+pub(crate) fn request_async_daemon_snapshot(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
     ws_state: Arc<DaemonTerminalWsState>,
     in_flight: Arc<AtomicBool>,
 ) {
     if in_flight
-        .compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return;
@@ -461,7 +464,7 @@ fn request_async_daemon_snapshot(
     });
 }
 
-fn ordered_terminal_sync_indices(
+pub(crate) fn ordered_terminal_sync_indices(
     terminals: &[TerminalSession],
     active_terminal_id: Option<u64>,
 ) -> Vec<usize> {
@@ -470,7 +473,7 @@ fn ordered_terminal_sync_indices(
     indices
 }
 
-fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
+pub(crate) fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionState {
     match state {
         TerminalState::Running => TerminalSessionState::Running,
         TerminalState::Completed => TerminalSessionState::Completed,
@@ -479,7 +482,7 @@ fn daemon_state_from_terminal_state(state: TerminalState) -> TerminalSessionStat
 }
 
 #[cfg(test)]
-fn emulate_raw_output(
+pub(crate) fn emulate_raw_output(
     raw: &str,
     rows: u16,
     cols: u16,
@@ -498,7 +501,9 @@ fn emulate_raw_output(
 }
 
 #[cfg(test)]
-fn daemon_cursor_to_terminal_cursor(cursor: daemon::DaemonTerminalCursor) -> TerminalCursor {
+pub(crate) fn daemon_cursor_to_terminal_cursor(
+    cursor: daemon::DaemonTerminalCursor,
+) -> TerminalCursor {
     TerminalCursor {
         line: cursor.line,
         column: cursor.column,
@@ -506,7 +511,7 @@ fn daemon_cursor_to_terminal_cursor(cursor: daemon::DaemonTerminalCursor) -> Ter
 }
 
 #[cfg(test)]
-fn daemon_modes_to_terminal_modes(modes: daemon::DaemonTerminalModes) -> TerminalModes {
+pub(crate) fn daemon_modes_to_terminal_modes(modes: daemon::DaemonTerminalModes) -> TerminalModes {
     TerminalModes {
         app_cursor: modes.app_cursor,
         alt_screen: modes.alt_screen,
@@ -514,7 +519,7 @@ fn daemon_modes_to_terminal_modes(modes: daemon::DaemonTerminalModes) -> Termina
 }
 
 #[cfg(test)]
-fn daemon_styled_line_to_terminal_line(
+pub(crate) fn daemon_styled_line_to_terminal_line(
     line: daemon::DaemonTerminalStyledLine,
 ) -> TerminalStyledLine {
     TerminalStyledLine {
@@ -541,7 +546,7 @@ fn daemon_styled_line_to_terminal_line(
 }
 
 #[cfg(test)]
-fn apply_daemon_snapshot(
+pub(crate) fn apply_daemon_snapshot(
     session: &mut TerminalSession,
     snapshot: &daemon::TerminalSnapshot,
 ) -> bool {
@@ -582,7 +587,7 @@ fn apply_daemon_snapshot(
     changed
 }
 
-fn terminal_state_from_daemon_state(state: TerminalSessionState) -> TerminalState {
+pub(crate) fn terminal_state_from_daemon_state(state: TerminalSessionState) -> TerminalState {
     match state {
         TerminalSessionState::Running => TerminalState::Running,
         TerminalSessionState::Completed => TerminalState::Completed,
@@ -590,7 +595,7 @@ fn terminal_state_from_daemon_state(state: TerminalSessionState) -> TerminalStat
     }
 }
 
-fn terminal_state_from_daemon_record(record: &DaemonSessionRecord) -> TerminalState {
+pub(crate) fn terminal_state_from_daemon_record(record: &DaemonSessionRecord) -> TerminalState {
     if let Some(state) = record.state {
         return terminal_state_from_daemon_state(state);
     }
@@ -602,7 +607,7 @@ fn terminal_state_from_daemon_record(record: &DaemonSessionRecord) -> TerminalSt
     }
 }
 
-fn cleanup_orphaned_daemon_session(
+pub(crate) fn cleanup_orphaned_daemon_session(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     record: DaemonSessionRecord,
 ) -> Result<(), ConnectionError> {
@@ -624,11 +629,11 @@ fn cleanup_orphaned_daemon_session(
     })
 }
 
-fn orphaned_daemon_session_should_kill(record: &DaemonSessionRecord) -> bool {
+pub(crate) fn orphaned_daemon_session_should_kill(record: &DaemonSessionRecord) -> bool {
     terminal_state_from_daemon_record(record) == TerminalState::Running
 }
 
-fn schedule_orphaned_daemon_session_cleanup<C>(
+pub(crate) fn schedule_orphaned_daemon_session_cleanup<C>(
     cx: &C,
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     record: DaemonSessionRecord,
@@ -648,7 +653,7 @@ fn schedule_orphaned_daemon_session_cleanup<C>(
     .detach();
 }
 
-fn terminal_output_tail_for_metadata(
+pub(crate) fn terminal_output_tail_for_metadata(
     session: &TerminalSession,
     max_lines: usize,
     max_chars: usize,
@@ -676,11 +681,11 @@ fn terminal_output_tail_for_metadata(
     tail
 }
 
-fn current_unix_timestamp_millis() -> Option<u64> {
+pub(crate) fn current_unix_timestamp_millis() -> Option<u64> {
     daemon::current_unix_timestamp_millis()
 }
 
-fn daemon_base_url_from_config(raw: Option<&str>) -> String {
+pub(crate) fn daemon_base_url_from_config(raw: Option<&str>) -> String {
     if let Ok(env_url) = env::var("ARBOR_DAEMON_URL") {
         let trimmed = env_url.trim().to_owned();
         if !trimmed.is_empty() {
@@ -693,7 +698,7 @@ fn daemon_base_url_from_config(raw: Option<&str>) -> String {
         .to_owned()
 }
 
-fn parse_connect_host_target(raw: &str) -> Result<ConnectHostTarget, ConnectionError> {
+pub(crate) fn parse_connect_host_target(raw: &str) -> Result<ConnectHostTarget, ConnectionError> {
     let value = raw.trim();
     if value.is_empty() {
         return Err(ConnectionError::Parse("Address cannot be empty".to_owned()));
@@ -737,7 +742,7 @@ fn parse_connect_host_target(raw: &str) -> Result<ConnectHostTarget, ConnectionE
     })
 }
 
-fn parse_ssh_daemon_target(raw: &str) -> Result<SshDaemonTarget, ConnectionError> {
+pub(crate) fn parse_ssh_daemon_target(raw: &str) -> Result<SshDaemonTarget, ConnectionError> {
     let Some(without_scheme) = raw.trim().strip_prefix("ssh://") else {
         return Err(ConnectionError::Parse(
             "ssh address must start with ssh://".to_owned(),
@@ -771,7 +776,9 @@ fn parse_ssh_daemon_target(raw: &str) -> Result<SshDaemonTarget, ConnectionError
     })
 }
 
-fn parse_ssh_authority(authority: &str) -> Result<(Option<String>, String, u16), ConnectionError> {
+pub(crate) fn parse_ssh_authority(
+    authority: &str,
+) -> Result<(Option<String>, String, u16), ConnectionError> {
     let (user, host_port) = match authority.rsplit_once('@') {
         Some((candidate_user, host_port))
             if !candidate_user.trim().is_empty() && !host_port.trim().is_empty() =>
@@ -781,7 +788,7 @@ fn parse_ssh_authority(authority: &str) -> Result<(Option<String>, String, u16),
         Some(_) => {
             return Err(ConnectionError::Parse(
                 "invalid ssh address: malformed user@host section".to_owned(),
-            ))
+            ));
         },
         None => (None, authority.trim()),
     };
@@ -790,7 +797,7 @@ fn parse_ssh_authority(authority: &str) -> Result<(Option<String>, String, u16),
     Ok((user, host, port))
 }
 
-fn parse_ssh_daemon_port(path_tail: &str) -> Result<u16, ConnectionError> {
+pub(crate) fn parse_ssh_daemon_port(path_tail: &str) -> Result<u16, ConnectionError> {
     let trimmed = path_tail.trim_matches('/');
     if trimmed.is_empty() {
         return Ok(DEFAULT_DAEMON_PORT);
@@ -802,12 +809,12 @@ fn parse_ssh_daemon_port(path_tail: &str) -> Result<u16, ConnectionError> {
         ));
     }
 
-    trimmed
-        .parse::<u16>()
-        .map_err(|error| ConnectionError::Parse(format!("invalid daemon port `{trimmed}`: {error}")))
+    trimmed.parse::<u16>().map_err(|error| {
+        ConnectionError::Parse(format!("invalid daemon port `{trimmed}`: {error}"))
+    })
 }
 
-fn parse_host_and_optional_port(
+pub(crate) fn parse_host_and_optional_port(
     value: &str,
     default_port: u16,
 ) -> Result<(String, u16), ConnectionError> {
@@ -828,9 +835,9 @@ fn parse_host_and_optional_port(
                 "invalid host: unexpected characters after IPv6 address".to_owned(),
             ));
         };
-        let port = port_text
-            .parse::<u16>()
-            .map_err(|error| ConnectionError::Parse(format!("invalid port `{port_text}`: {error}")))?;
+        let port = port_text.parse::<u16>().map_err(|error| {
+            ConnectionError::Parse(format!("invalid port `{port_text}`: {error}"))
+        })?;
         return Ok((host.to_owned(), port));
     }
 
@@ -852,7 +859,7 @@ fn parse_host_and_optional_port(
     Ok((host.to_owned(), port))
 }
 
-fn format_ssh_auth_key(target: &SshDaemonTarget) -> String {
+pub(crate) fn format_ssh_auth_key(target: &SshDaemonTarget) -> String {
     let host = if target.host.contains(':') {
         format!("[{}]", target.host)
     } else {
@@ -868,7 +875,7 @@ fn format_ssh_auth_key(target: &SshDaemonTarget) -> String {
     format!("ssh://{authority}/{}", target.daemon_port)
 }
 
-fn reserve_local_loopback_port() -> Result<u16, ConnectionError> {
+pub(crate) fn reserve_local_loopback_port() -> Result<u16, ConnectionError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| ConnectionError::Io(format!("failed to reserve local port: {error}")))?;
     listener
@@ -879,11 +886,11 @@ fn reserve_local_loopback_port() -> Result<u16, ConnectionError> {
         })
 }
 
-fn paths_equivalent(left: &Path, right: &Path) -> bool {
+pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
     worktree::paths_equivalent(left, right)
 }
 
-fn porcelain_status_to_change_kind(xy: &str) -> ChangeKind {
+pub(crate) fn porcelain_status_to_change_kind(xy: &str) -> ChangeKind {
     let bytes = xy.as_bytes();
     let x = bytes.first().copied().unwrap_or(b' ');
     let y = bytes.get(1).copied().unwrap_or(b' ');
@@ -901,7 +908,7 @@ fn porcelain_status_to_change_kind(xy: &str) -> ChangeKind {
     }
 }
 
-fn parse_remote_numstat_output(output: &str) -> HashMap<PathBuf, (usize, usize)> {
+pub(crate) fn parse_remote_numstat_output(output: &str) -> HashMap<PathBuf, (usize, usize)> {
     let mut map = HashMap::new();
     for line in output.lines() {
         let mut columns = line.split('\t');
@@ -923,14 +930,14 @@ fn parse_remote_numstat_output(output: &str) -> HashMap<PathBuf, (usize, usize)>
     map
 }
 
-fn daemon_error_is_connection_refused(message: &str) -> bool {
+pub(crate) fn daemon_error_is_connection_refused(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("connection refused")
         || lower.contains("failed to connect")
         || lower.contains("actively refused")
 }
 
-fn daemon_url_is_local(url: &str) -> bool {
+pub(crate) fn daemon_url_is_local(url: &str) -> bool {
     let authority = url
         .strip_prefix("http://")
         .unwrap_or(url)
@@ -947,7 +954,7 @@ fn daemon_url_is_local(url: &str) -> bool {
 /// If the running daemon's version differs from the GUI, shut it down and
 /// restart a fresh one. Returns `Some((records, new_daemon))` when a restart
 /// happened, or `None` when versions match (caller keeps the original daemon).
-fn check_daemon_version_and_restart(
+pub(crate) fn check_daemon_version_and_restart(
     daemon: &terminal_daemon_http::SharedTerminalDaemonClient,
     daemon_base_url: &str,
 ) -> Option<(
@@ -995,7 +1002,7 @@ fn check_daemon_version_and_restart(
 /// Attempt to locate and spawn `arbor-httpd` as a detached background process,
 /// then poll until it becomes reachable. Returns `Some(daemon)` on success.
 /// Only works for localhost URLs — auto-starting a remote daemon makes no sense.
-fn try_auto_start_daemon(
+pub(crate) fn try_auto_start_daemon(
     daemon_base_url: &str,
 ) -> Option<terminal_daemon_http::SharedTerminalDaemonClient> {
     if !is_localhost_url(daemon_base_url) {
@@ -1078,7 +1085,7 @@ fn try_auto_start_daemon(
 
 /// Search for the `arbor-httpd` binary next to the current executable,
 /// then fall back to `PATH` lookup.
-fn find_arbor_httpd_binary() -> Option<PathBuf> {
+pub(crate) fn find_arbor_httpd_binary() -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         let sibling = exe.with_file_name("arbor-httpd");
         if sibling.is_file() {
@@ -1093,7 +1100,7 @@ fn find_arbor_httpd_binary() -> Option<PathBuf> {
     })
 }
 
-fn is_localhost_url(url: &str) -> bool {
+pub(crate) fn is_localhost_url(url: &str) -> bool {
     let host = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
@@ -1102,7 +1109,7 @@ fn is_localhost_url(url: &str) -> bool {
     host == "127.0.0.1" || host == "localhost" || host == "[::1]"
 }
 
-fn load_outpost_summaries(
+pub(crate) fn load_outpost_summaries(
     store: &dyn arbor_core::outpost_store::OutpostStore,
     remote_hosts: &[arbor_core::outpost::RemoteHost],
 ) -> Vec<OutpostSummary> {

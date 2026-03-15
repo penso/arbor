@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn preset_command_for_kind(&self, kind: AgentPresetKind) -> String {
+    pub(crate) fn preset_command_for_kind(&self, kind: AgentPresetKind) -> String {
         self.agent_presets
             .iter()
             .find(|preset| preset.kind == kind)
@@ -7,7 +9,7 @@ impl ArborWindow {
             .unwrap_or_else(|| kind.default_command().to_owned())
     }
 
-    fn set_preset_command_for_kind(&mut self, kind: AgentPresetKind, command: String) {
+    pub(crate) fn set_preset_command_for_kind(&mut self, kind: AgentPresetKind, command: String) {
         if let Some(preset) = self
             .agent_presets
             .iter_mut()
@@ -26,7 +28,7 @@ impl ArborWindow {
         });
     }
 
-    fn save_agent_presets(&self) -> Result<(), StoreError> {
+    pub(crate) fn save_agent_presets(&self) -> Result<(), StoreError> {
         let presets = self
             .agent_presets
             .iter()
@@ -38,7 +40,7 @@ impl ArborWindow {
         self.app_config_store.save_agent_presets(&presets)
     }
 
-    fn open_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
         let active_preset = self.selected_agent_preset_or_default();
         let command = self.preset_command_for_kind(active_preset);
         self.manage_presets_modal = Some(ManagePresetsModal {
@@ -50,12 +52,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
         self.manage_presets_modal = None;
         cx.notify();
     }
 
-    fn update_manage_presets_modal_input(
+    pub(crate) fn update_manage_presets_modal_input(
         &mut self,
         input: PresetsModalInputEvent,
         cx: &mut Context<Self>,
@@ -91,7 +93,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn submit_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_manage_presets_modal(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.manage_presets_modal.clone() else {
             return;
         };
@@ -121,7 +123,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn launch_agent_preset(
+    pub(crate) fn launch_agent_preset(
         &mut self,
         preset: AgentPresetKind,
         window: &mut Window,
@@ -179,7 +181,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn set_execution_mode(
+    pub(crate) fn set_execution_mode(
         &mut self,
         mode: ExecutionMode,
         window: &mut Window,
@@ -190,12 +192,16 @@ impl ArborWindow {
         }
 
         self.execution_mode = mode;
-        if let Some(session_id) = self.active_center_tab_for_selected_worktree().and_then(|tab| {
-            match tab {
+        if let Some(session_id) = self
+            .active_center_tab_for_selected_worktree()
+            .and_then(|tab| match tab {
                 CenterTab::Terminal(session_id) => Some(session_id),
                 _ => None,
-            }
-        }) && let Some(session) = self.terminals.iter_mut().find(|session| session.id == session_id)
+            })
+            && let Some(session) = self
+                .terminals
+                .iter_mut()
+                .find(|session| session.id == session_id)
         {
             session.execution_mode = Some(mode);
         }
@@ -205,7 +211,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn render_manage_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_manage_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_presets_modal.clone() else {
             return div();
         };
@@ -349,12 +355,14 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.update_manage_presets_modal_input(
-                                        PresetsModalInputEvent::RestoreDefault,
-                                        cx,
-                                    );
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.update_manage_presets_modal_input(
+                                            PresetsModalInputEvent::RestoreDefault,
+                                            cx,
+                                        );
+                                    },
+                                )),
                             )
                             .child(
                                 action_button(
@@ -364,9 +372,11 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_manage_presets_modal(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_manage_presets_modal(cx);
+                                    },
+                                )),
                             )
                             .child(
                                 action_button(

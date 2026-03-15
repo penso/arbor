@@ -1,15 +1,17 @@
+use super::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PromptExecutionMode {
+pub(crate) enum PromptExecutionMode {
     CaptureOutput,
     TerminalSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PromptExecutionPlan {
-    shell_command: String,
+pub(crate) struct PromptExecutionPlan {
+    pub(crate) shell_command: String,
 }
 
-fn command_for_execution_mode(
+pub(crate) fn command_for_execution_mode(
     preset: AgentPresetKind,
     configured_command: &str,
     execution_mode: ExecutionMode,
@@ -70,14 +72,15 @@ fn command_for_execution_mode(
     Ok(join_shell_tokens(&tokens))
 }
 
-fn build_prompt_execution_plan(
+pub(crate) fn build_prompt_execution_plan(
     preset: AgentPresetKind,
     configured_command: &str,
     prompt: &str,
     execution_mode: ExecutionMode,
     mode: PromptExecutionMode,
 ) -> Result<PromptExecutionPlan, PromptError> {
-    let configured_command = command_for_execution_mode(preset, configured_command, execution_mode)?;
+    let configured_command =
+        command_for_execution_mode(preset, configured_command, execution_mode)?;
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err(PromptError::Execution("prompt cannot be empty".to_owned()));
@@ -112,7 +115,7 @@ fn build_prompt_execution_plan(
     Ok(PromptExecutionPlan { shell_command })
 }
 
-fn run_prompt_capture(
+pub(crate) fn run_prompt_capture(
     worktree_path: &Path,
     preset: AgentPresetKind,
     configured_command: &str,
@@ -148,7 +151,7 @@ fn run_prompt_capture(
     Ok(text)
 }
 
-fn prompt_terminal_invocation(
+pub(crate) fn prompt_terminal_invocation(
     preset: AgentPresetKind,
     configured_command: &str,
     prompt: &str,
@@ -164,48 +167,39 @@ fn prompt_terminal_invocation(
     .map(|plan| plan.shell_command)
 }
 
-fn strip_execution_mode_flags(preset: AgentPresetKind, tokens: &mut Vec<String>) {
+pub(crate) fn strip_execution_mode_flags(preset: AgentPresetKind, tokens: &mut Vec<String>) {
     match preset {
         AgentPresetKind::Claude => {
-            *tokens = strip_tokens(
-                tokens,
-                &[
-                    ("--permission-mode", true),
-                    ("--dangerously-skip-permissions", false),
-                    ("--allow-dangerously-skip-permissions", false),
-                ],
-            );
+            *tokens = strip_tokens(tokens, &[
+                ("--permission-mode", true),
+                ("--dangerously-skip-permissions", false),
+                ("--allow-dangerously-skip-permissions", false),
+            ]);
         },
         AgentPresetKind::Codex => {
-            *tokens = strip_tokens(
-                tokens,
-                &[
-                    ("--dangerously-bypass-approvals-and-sandbox", false),
-                    ("--full-auto", false),
-                    ("-a", true),
-                    ("--ask-for-approval", true),
-                    ("-s", true),
-                    ("--sandbox", true),
-                ],
-            );
+            *tokens = strip_tokens(tokens, &[
+                ("--dangerously-bypass-approvals-and-sandbox", false),
+                ("--full-auto", false),
+                ("-a", true),
+                ("--ask-for-approval", true),
+                ("-s", true),
+                ("--sandbox", true),
+            ]);
         },
         AgentPresetKind::Copilot => {
-            *tokens = strip_tokens(
-                tokens,
-                &[
-                    ("--yolo", false),
-                    ("--allow-all", false),
-                    ("--allow-all-tools", false),
-                    ("--allow-all-paths", false),
-                    ("--allow-all-urls", false),
-                ],
-            );
+            *tokens = strip_tokens(tokens, &[
+                ("--yolo", false),
+                ("--allow-all", false),
+                ("--allow-all-tools", false),
+                ("--allow-all-paths", false),
+                ("--allow-all-urls", false),
+            ]);
         },
         AgentPresetKind::Pi | AgentPresetKind::OpenCode => {},
     }
 }
 
-fn strip_tokens(tokens: &[String], flags: &[(&str, bool)]) -> Vec<String> {
+pub(crate) fn strip_tokens(tokens: &[String], flags: &[(&str, bool)]) -> Vec<String> {
     let mut stripped = Vec::with_capacity(tokens.len());
     let mut index = 0usize;
 
@@ -236,7 +230,7 @@ fn strip_tokens(tokens: &[String], flags: &[(&str, bool)]) -> Vec<String> {
     stripped
 }
 
-fn join_shell_tokens(tokens: &[String]) -> String {
+pub(crate) fn join_shell_tokens(tokens: &[String]) -> String {
     tokens
         .iter()
         .map(|token| shell_quote(token))
@@ -245,14 +239,14 @@ fn join_shell_tokens(tokens: &[String]) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn shell_expression_command(expression: &str) -> Command {
+pub(crate) fn shell_expression_command(expression: &str) -> Command {
     let mut command = create_command("cmd");
     command.arg("/C").arg(expression);
     command
 }
 
 #[cfg(not(target_os = "windows"))]
-fn shell_expression_command(expression: &str) -> Command {
+pub(crate) fn shell_expression_command(expression: &str) -> Command {
     let mut command = create_command("sh");
     command.arg("-lc").arg(expression);
     command
@@ -296,9 +290,11 @@ mod prompt_runner_tests {
         .err()
         .unwrap_or_else(|| panic!("pi capture should be unsupported"));
 
-        assert!(error
-            .to_string()
-            .contains("Pi does not support non-interactive prompt execution yet"));
+        assert!(
+            error
+                .to_string()
+                .contains("Pi does not support non-interactive prompt execution yet")
+        );
     }
 
     #[test]

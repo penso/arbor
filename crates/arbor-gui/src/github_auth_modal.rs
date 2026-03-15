@@ -1,12 +1,14 @@
+use super::*;
+
 impl ArborWindow {
-    fn close_github_auth_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_github_auth_modal(&mut self, cx: &mut Context<Self>) {
         self.github_auth_copy_feedback_active = false;
         if self.github_auth_modal.take().is_some() {
             cx.notify();
         }
     }
 
-    fn copy_github_auth_code_to_clipboard(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn copy_github_auth_code_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.github_auth_modal.as_ref() else {
             return;
         };
@@ -37,7 +39,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn open_github_auth_verification_page(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_github_auth_verification_page(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.github_auth_modal.as_ref() else {
             return;
         };
@@ -46,7 +48,7 @@ impl ArborWindow {
         self.open_external_url(&url, cx);
     }
 
-    fn render_github_auth_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_github_auth_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.github_auth_modal.clone() else {
             return div();
         };

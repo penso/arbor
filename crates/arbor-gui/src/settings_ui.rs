@@ -1,18 +1,20 @@
-fn background_config_save_has_work(pending_app_config_save_count: usize) -> bool {
+use super::*;
+
+pub(crate) fn background_config_save_has_work(pending_app_config_save_count: usize) -> bool {
     pending_app_config_save_count > 0
 }
 
 impl ArborWindow {
-    fn begin_background_config_save(&mut self) {
+    pub(crate) fn begin_background_config_save(&mut self) {
         self.pending_app_config_save_count = self.pending_app_config_save_count.saturating_add(1);
     }
 
-    fn finish_background_config_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn finish_background_config_save(&mut self, cx: &mut Context<Self>) {
         self.pending_app_config_save_count = self.pending_app_config_save_count.saturating_sub(1);
         self.maybe_finish_quit_after_persistence_flush(cx);
     }
 
-    fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
         self.settings_modal = Some(SettingsModal {
             active_control: SettingsControl::DaemonBindMode,
             daemon_bind_mode: DaemonBindMode::AllInterfaces,
@@ -58,12 +60,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_settings_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_settings_modal(&mut self, cx: &mut Context<Self>) {
         self.settings_modal = None;
         cx.notify();
     }
 
-    fn update_settings_modal_input(
+    pub(crate) fn update_settings_modal_input(
         &mut self,
         input: SettingsModalInputEvent,
         cx: &mut Context<Self>,
@@ -102,7 +104,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn submit_settings_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_settings_modal(&mut self, cx: &mut Context<Self>) {
         let Some(mut modal) = self.settings_modal.clone() else {
             return;
         };
@@ -113,7 +115,11 @@ impl ArborWindow {
         self.settings_modal = Some(modal.clone());
         cx.notify();
 
-        let notifications_str = if modal.notifications { "true" } else { "false" };
+        let notifications_str = if modal.notifications {
+            "true"
+        } else {
+            "false"
+        };
         let theme_slug = self.theme_kind.slug();
         let daemon_bind_changed = modal.daemon_bind_mode != modal.initial_daemon_bind_mode;
         let store = self.app_config_store.clone();
@@ -198,7 +204,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn restart_local_daemon_after_settings_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restart_local_daemon_after_settings_save(&mut self, cx: &mut Context<Self>) {
         let Some(daemon) = self.terminal_daemon.clone() else {
             self.notice = Some("Settings saved".to_owned());
             cx.notify();
@@ -236,7 +242,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn render_settings_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_settings_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.settings_modal.clone() else {
             return div();
         };
@@ -569,7 +575,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_about_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_about_modal(&mut self, cx: &mut Context<Self>) -> Div {
         if !self.show_about {
             return div();
         }
@@ -638,10 +644,12 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_about = false;
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_about = false;
+                                        cx.notify();
+                                    },
+                                )),
                             ),
                     )
                     .child(

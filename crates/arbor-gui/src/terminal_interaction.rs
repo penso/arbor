@@ -1,13 +1,15 @@
-fn should_queue_terminal_input(session: &TerminalSession) -> bool {
+use super::*;
+
+pub(crate) fn should_queue_terminal_input(session: &TerminalSession) -> bool {
     session.runtime.is_none() && session.is_initializing
 }
 
-fn terminal_input_unavailable_error(session: &TerminalSession) -> TerminalError {
+pub(crate) fn terminal_input_unavailable_error(session: &TerminalSession) -> TerminalError {
     TerminalError::Pty(format!("terminal `{}` is not available", session.title))
 }
 
 impl ArborWindow {
-    fn active_terminal(&self) -> Option<&TerminalSession> {
+    pub(crate) fn active_terminal(&self) -> Option<&TerminalSession> {
         let worktree_path = self.selected_worktree_path()?;
         let session_id = self.active_terminal_id_for_worktree(worktree_path)?;
 
@@ -16,7 +18,11 @@ impl ArborWindow {
         })
     }
 
-    fn write_input_to_terminal(&mut self, session_id: u64, input: &[u8]) -> Result<(), TerminalError> {
+    pub(crate) fn write_input_to_terminal(
+        &mut self,
+        session_id: u64,
+        input: &[u8],
+    ) -> Result<(), TerminalError> {
         if input.is_empty() {
             return Ok(());
         }
@@ -47,7 +53,10 @@ impl ArborWindow {
         Ok(())
     }
 
-    fn flush_queued_input_for_terminal(&mut self, session_id: u64) -> Result<(), TerminalError> {
+    pub(crate) fn flush_queued_input_for_terminal(
+        &mut self,
+        session_id: u64,
+    ) -> Result<(), TerminalError> {
         let Some(index) = self
             .terminals
             .iter()
@@ -74,12 +83,12 @@ impl ArborWindow {
         Ok(())
     }
 
-    fn clear_terminal_selection(&mut self) {
+    pub(crate) fn clear_terminal_selection(&mut self) {
         self.terminal_selection = None;
         self.terminal_selection_drag_anchor = None;
     }
 
-    fn clear_terminal_selection_for_session(&mut self, session_id: u64) {
+    pub(crate) fn clear_terminal_selection_for_session(&mut self, session_id: u64) {
         if self
             .terminal_selection
             .as_ref()
@@ -89,7 +98,7 @@ impl ArborWindow {
         }
     }
 
-    fn terminal_display_lines_for_session(&self, session_id: u64) -> Vec<String> {
+    pub(crate) fn terminal_display_lines_for_session(&self, session_id: u64) -> Vec<String> {
         let Some(session) = self
             .terminals
             .iter()
@@ -101,13 +110,16 @@ impl ArborWindow {
         terminal_display_lines(session)
     }
 
-    fn terminal_selection_for_session(&self, session_id: u64) -> Option<&TerminalSelection> {
+    pub(crate) fn terminal_selection_for_session(
+        &self,
+        session_id: u64,
+    ) -> Option<&TerminalSelection> {
         self.terminal_selection
             .as_ref()
             .filter(|selection| selection.session_id == session_id)
     }
 
-    fn handle_terminal_output_mouse_down(
+    pub(crate) fn handle_terminal_output_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
@@ -173,7 +185,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn handle_terminal_output_mouse_move(
+    pub(crate) fn handle_terminal_output_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         _: &mut Window,
@@ -212,7 +224,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn handle_terminal_output_mouse_up(
+    pub(crate) fn handle_terminal_output_mouse_up(
         &mut self,
         event: &MouseUpEvent,
         _: &mut Window,
@@ -223,7 +235,7 @@ impl ArborWindow {
         }
     }
 
-    fn track_terminal_command_input(&mut self, session_id: u64, keystroke: &Keystroke) {
+    pub(crate) fn track_terminal_command_input(&mut self, session_id: u64, keystroke: &Keystroke) {
         let Some(session) = self
             .terminals
             .iter_mut()
@@ -235,7 +247,11 @@ impl ArborWindow {
         track_terminal_command_keystroke(session, keystroke);
     }
 
-    fn copy_terminal_content_to_clipboard(&mut self, session_id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn copy_terminal_content_to_clipboard(
+        &mut self,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self
             .terminals
             .iter()
@@ -269,7 +285,7 @@ impl ArborWindow {
         cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text));
     }
 
-    fn append_pasted_text_to_pending_command(&mut self, session_id: u64, text: &str) {
+    pub(crate) fn append_pasted_text_to_pending_command(&mut self, session_id: u64, text: &str) {
         let Some(session) = self
             .terminals
             .iter_mut()
@@ -281,7 +297,11 @@ impl ArborWindow {
         session.pending_command.push_str(text);
     }
 
-    fn paste_clipboard_into_terminal(&mut self, session_id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn paste_clipboard_into_terminal(
+        &mut self,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(clipboard_item) = cx.read_from_clipboard() else {
             return;
         };
@@ -298,7 +318,7 @@ impl ArborWindow {
         }
     }
 
-    fn handle_terminal_key_down(
+    pub(crate) fn handle_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
         _: &mut Window,
@@ -393,7 +413,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn focus_terminal_panel(
+    pub(crate) fn focus_terminal_panel(
         &mut self,
         _: &MouseDownEvent,
         window: &mut Window,

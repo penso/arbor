@@ -1,5 +1,7 @@
+use super::*;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum TopBarIconKind {
+pub(crate) enum TopBarIconKind {
     RemoteControl,
     GitHub,
     WorktreeActions,
@@ -7,7 +9,7 @@ enum TopBarIconKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum TopBarIconTone {
+pub(crate) enum TopBarIconTone {
     Muted,
     Disabled,
     Connected,
@@ -15,7 +17,7 @@ enum TopBarIconTone {
 }
 
 impl ArborWindow {
-    fn render_top_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_top_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme();
         let repository = self.selected_repository_label();
         let branch = self
@@ -201,14 +203,16 @@ impl ArborWindow {
                                 ))
                                 .child("Remote Control"),
                         )
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            if this.terminal_daemon.is_some() {
-                                this.open_external_url(&web_ui_url, cx);
-                            } else {
-                                this.start_daemon_modal = true;
-                                cx.notify();
-                            }
-                        }))
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                if this.terminal_daemon.is_some() {
+                                    this.open_external_url(&web_ui_url, cx);
+                                } else {
+                                    this.start_daemon_modal = true;
+                                    cx.notify();
+                                }
+                            },
+                        ))
                     })
                     .child(
                         top_bar_button(
@@ -233,7 +237,8 @@ impl ArborWindow {
                                                     TopBarIconKind::GitHub,
                                                     if github_auth_busy {
                                                         TopBarIconTone::Busy
-                                                    } else if github_saved_token || github_env_token {
+                                                    } else if github_saved_token || github_env_token
+                                                    {
                                                         TopBarIconTone::Connected
                                                     } else {
                                                         TopBarIconTone::Muted
@@ -297,16 +302,13 @@ impl ArborWindow {
                                     "\u{f0e7}",
                                 ))
                                 .child(div().text_size(px(11.)).child("Action"))
-                                .child(
-                                    div()
-                                        .font_family(FONT_MONO)
-                                        .text_size(px(9.))
-                                        .child(if worktree_quick_actions_open {
-                                            "\u{f077}"
-                                        } else {
-                                            "\u{f078}"
-                                        }),
-                                ),
+                                .child(div().font_family(FONT_MONO).text_size(px(9.)).child(
+                                    if worktree_quick_actions_open {
+                                        "\u{f077}"
+                                    } else {
+                                        "\u{f078}"
+                                    },
+                                )),
                         )
                         .when(worktree_quick_actions_enabled, |this| {
                             this.on_click(cx.listener(|this, _, _, cx| {
@@ -342,7 +344,10 @@ impl ArborWindow {
             )
     }
 
-    fn render_top_bar_worktree_quick_actions_menu(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_top_bar_worktree_quick_actions_menu(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = self.theme();
         let menu_open =
             self.top_bar_quick_actions_open && self.selected_local_worktree_path().is_some();
@@ -564,7 +569,7 @@ impl ArborWindow {
     }
 }
 
-fn top_bar_button(
+pub(crate) fn top_bar_button(
     theme: ThemePalette,
     id: impl Into<ElementId>,
     enabled: bool,
@@ -599,7 +604,10 @@ fn top_bar_button(
         .child(content)
 }
 
-fn top_bar_icon_asset_path(kind: TopBarIconKind, tone: TopBarIconTone) -> Option<PathBuf> {
+pub(crate) fn top_bar_icon_asset_path(
+    kind: TopBarIconKind,
+    tone: TopBarIconTone,
+) -> Option<PathBuf> {
     let file_name = match (kind, tone) {
         (TopBarIconKind::RemoteControl, TopBarIconTone::Connected) => {
             "remote-control-connected.svg"
@@ -619,7 +627,7 @@ fn top_bar_icon_asset_path(kind: TopBarIconKind, tone: TopBarIconTone) -> Option
     find_top_bar_icons_dir().map(|dir| dir.join(file_name))
 }
 
-fn top_bar_icon_size_px(kind: TopBarIconKind) -> f32 {
+pub(crate) fn top_bar_icon_size_px(kind: TopBarIconKind) -> f32 {
     match kind {
         TopBarIconKind::GitHub => 10.5,
         TopBarIconKind::RemoteControl
@@ -628,7 +636,7 @@ fn top_bar_icon_size_px(kind: TopBarIconKind) -> f32 {
     }
 }
 
-fn top_bar_icon_element(
+pub(crate) fn top_bar_icon_element(
     kind: TopBarIconKind,
     tone: TopBarIconTone,
     fallback_color: u32,

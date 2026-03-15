@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn render_terminal_panel(
+    pub(crate) fn render_terminal_panel(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
@@ -644,7 +646,11 @@ impl ArborWindow {
             )
     }
 
-    fn render_center_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_center_pane(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = self.theme();
         div()
             .flex_1()

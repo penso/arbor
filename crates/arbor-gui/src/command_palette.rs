@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn open_command_palette(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_command_palette(&mut self, cx: &mut Context<Self>) {
         self.command_palette_modal = Some(CommandPaletteModal {
             scope: CommandPaletteScope::Actions,
             query: String::new(),
@@ -11,12 +13,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_command_palette(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_command_palette(&mut self, cx: &mut Context<Self>) {
         self.command_palette_modal = None;
         cx.notify();
     }
 
-    fn command_palette_action_items(&self) -> Vec<CommandPaletteItem> {
+    pub(crate) fn command_palette_action_items(&self) -> Vec<CommandPaletteItem> {
         let mut items = vec![
             CommandPaletteItem {
                 title: "New Worktree".to_owned(),
@@ -162,7 +164,7 @@ impl ArborWindow {
         items
     }
 
-    fn command_palette_issue_items(&self) -> Vec<CommandPaletteItem> {
+    pub(crate) fn command_palette_issue_items(&self) -> Vec<CommandPaletteItem> {
         let Some(target) = self.issue_target_for_current_selection() else {
             return Vec::new();
         };
@@ -210,7 +212,7 @@ impl ArborWindow {
             .collect()
     }
 
-    fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
+    pub(crate) fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
         let Some(modal) = self.command_palette_modal.as_ref() else {
             return Vec::new();
         };
@@ -232,28 +234,30 @@ impl ArborWindow {
                     .map(|score| (self.command_palette_sort_rank(&item), score, item))
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|(left_rank, left_score, left_item), (right_rank, right_score, right_item)| {
-            left_rank
-                .cmp(right_rank)
-                .then_with(|| left_score.cmp(right_score))
+        matches.sort_by(
+            |(left_rank, left_score, left_item), (right_rank, right_score, right_item)| {
+                left_rank
+                    .cmp(right_rank)
+                    .then_with(|| left_score.cmp(right_score))
                     .then_with(|| {
                         left_item
                             .title
                             .to_ascii_lowercase()
                             .cmp(&right_item.title.to_ascii_lowercase())
                     })
-        });
+            },
+        );
         matches.into_iter().map(|(_, _, item)| item).collect()
     }
 
-    fn command_palette_sort_rank(&self, item: &CommandPaletteItem) -> (usize, usize) {
+    pub(crate) fn command_palette_sort_rank(&self, item: &CommandPaletteItem) -> (usize, usize) {
         (
             self.command_palette_recent_rank(item),
             self.command_palette_context_rank(item),
         )
     }
 
-    fn command_palette_recent_rank(&self, item: &CommandPaletteItem) -> usize {
+    pub(crate) fn command_palette_recent_rank(&self, item: &CommandPaletteItem) -> usize {
         let action_key = command_palette_action_key(item);
         self.command_palette_recent_actions
             .iter()
@@ -261,7 +265,7 @@ impl ArborWindow {
             .unwrap_or(usize::MAX)
     }
 
-    fn command_palette_context_rank(&self, item: &CommandPaletteItem) -> usize {
+    pub(crate) fn command_palette_context_rank(&self, item: &CommandPaletteItem) -> usize {
         match &item.action {
             CommandPaletteAction::SelectWorktree(index) => {
                 if self.active_worktree_index == Some(*index) {
@@ -298,7 +302,7 @@ impl ArborWindow {
         }
     }
 
-    fn show_command_palette_issues(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn show_command_palette_issues(&mut self, cx: &mut Context<Self>) {
         if let Some(modal) = self.command_palette_modal.as_mut() {
             modal.scope = CommandPaletteScope::Issues;
             modal.query.clear();
@@ -318,7 +322,7 @@ impl ArborWindow {
         }
     }
 
-    fn command_palette_has_issue_snapshot_for_current_selection(&self) -> bool {
+    pub(crate) fn command_palette_has_issue_snapshot_for_current_selection(&self) -> bool {
         let Some(target) = self.issue_target_for_current_selection() else {
             return false;
         };
@@ -332,7 +336,7 @@ impl ArborWindow {
         })
     }
 
-    fn remember_command_palette_action(&mut self, item: &CommandPaletteItem) {
+    pub(crate) fn remember_command_palette_action(&mut self, item: &CommandPaletteItem) {
         let action_key = command_palette_action_key(item);
         self.command_palette_recent_actions
             .retain(|recent| recent != &action_key);
@@ -340,7 +344,11 @@ impl ArborWindow {
         self.command_palette_recent_actions.truncate(20);
     }
 
-    fn execute_command_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn execute_command_palette_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let selected_index = self
             .command_palette_modal
             .as_ref()
@@ -421,7 +429,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn move_command_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         let item_count = self.filtered_command_palette_items().len();
         let Some(modal) = self.command_palette_modal.as_mut() else {
             return;
@@ -439,7 +447,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn launch_task_template(
+    pub(crate) fn launch_task_template(
         &mut self,
         task: &TaskTemplate,
         window: &mut Window,
@@ -494,19 +502,15 @@ impl ArborWindow {
             return;
         }
 
-        let invocation = match prompt_terminal_invocation(
-            preset,
-            &command,
-            &task.prompt,
-            self.execution_mode,
-        ) {
-            Ok(invocation) => format!("{invocation}\n"),
-            Err(error) => {
-                self.notice = Some(format!("failed to run task {}: {error}", task.name));
-                cx.notify();
-                return;
-            },
-        };
+        let invocation =
+            match prompt_terminal_invocation(preset, &command, &task.prompt, self.execution_mode) {
+                Ok(invocation) => format!("{invocation}\n"),
+                Err(error) => {
+                    self.notice = Some(format!("failed to run task {}: {error}", task.name));
+                    cx.notify();
+                    return;
+                },
+            };
         let terminal_count_before = self.terminals.len();
         self.spawn_terminal_session(window, cx);
         if self.terminals.len() <= terminal_count_before {
@@ -540,7 +544,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn render_command_palette_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_command_palette_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.command_palette_modal.clone() else {
             return div();
         };
@@ -710,7 +714,7 @@ impl ArborWindow {
 }
 
 impl ArborWindow {
-    fn command_palette_empty_message(&self, modal: &CommandPaletteModal) -> String {
+    pub(crate) fn command_palette_empty_message(&self, modal: &CommandPaletteModal) -> String {
         match modal.scope {
             CommandPaletteScope::Actions => "No results".to_owned(),
             CommandPaletteScope::Issues => {
@@ -745,7 +749,10 @@ impl ArborWindow {
     }
 }
 
-fn command_palette_icon(action: &CommandPaletteAction, theme: ThemePalette) -> AnyElement {
+pub(crate) fn command_palette_icon(
+    action: &CommandPaletteAction,
+    theme: ThemePalette,
+) -> AnyElement {
     match action {
         CommandPaletteAction::OpenCreateWorktree => {
             command_palette_glyph_icon("\u{f055}", 0x98c379, theme)
@@ -790,7 +797,11 @@ fn command_palette_icon(action: &CommandPaletteAction, theme: ThemePalette) -> A
     }
 }
 
-fn command_palette_glyph_icon(glyph: &'static str, color: u32, _theme: ThemePalette) -> AnyElement {
+pub(crate) fn command_palette_glyph_icon(
+    glyph: &'static str,
+    color: u32,
+    _theme: ThemePalette,
+) -> AnyElement {
     div()
         .w(px(34.))
         .h(px(34.))
@@ -809,7 +820,10 @@ fn command_palette_glyph_icon(glyph: &'static str, color: u32, _theme: ThemePale
         .into_any_element()
 }
 
-fn command_palette_preset_icon(kind: AgentPresetKind, theme: ThemePalette) -> AnyElement {
+pub(crate) fn command_palette_preset_icon(
+    kind: AgentPresetKind,
+    theme: ThemePalette,
+) -> AnyElement {
     log_preset_icon_render_once(kind);
     let icon = preset_icon_image(kind);
     let icon_size = match kind {
@@ -848,7 +862,7 @@ fn command_palette_preset_icon(kind: AgentPresetKind, theme: ThemePalette) -> An
         .into_any_element()
 }
 
-fn command_palette_scrollbar_indicator(
+pub(crate) fn command_palette_scrollbar_indicator(
     theme: ThemePalette,
     item_count: usize,
     selected_index: usize,
@@ -896,7 +910,7 @@ fn command_palette_scrollbar_indicator(
     )
 }
 
-fn command_palette_action_key(item: &CommandPaletteItem) -> String {
+pub(crate) fn command_palette_action_key(item: &CommandPaletteItem) -> String {
     match &item.action {
         CommandPaletteAction::BrowseIssues => "command-palette:browse-issues".to_owned(),
         CommandPaletteAction::OpenIssueCreateModal(issue) => {
@@ -907,14 +921,14 @@ fn command_palette_action_key(item: &CommandPaletteItem) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CommandPaletteMatchScore {
-    bucket: u8,
-    title_position: usize,
-    search_position: usize,
-    title_len: usize,
+pub(crate) struct CommandPaletteMatchScore {
+    pub(crate) bucket: u8,
+    pub(crate) title_position: usize,
+    pub(crate) search_position: usize,
+    pub(crate) title_len: usize,
 }
 
-fn command_palette_match_score(
+pub(crate) fn command_palette_match_score(
     item: &CommandPaletteItem,
     query: &str,
 ) -> Option<CommandPaletteMatchScore> {
@@ -965,7 +979,7 @@ fn command_palette_match_score(
     })
 }
 
-fn command_palette_query_tokens(query: &str) -> Vec<&str> {
+pub(crate) fn command_palette_query_tokens(query: &str) -> Vec<&str> {
     query
         .split_whitespace()
         .map(str::trim)
@@ -973,7 +987,7 @@ fn command_palette_query_tokens(query: &str) -> Vec<&str> {
         .collect()
 }
 
-fn command_palette_title_word_prefix_match(title: &str, tokens: &[&str]) -> bool {
+pub(crate) fn command_palette_title_word_prefix_match(title: &str, tokens: &[&str]) -> bool {
     if tokens.is_empty() {
         return true;
     }
@@ -1004,11 +1018,13 @@ fn command_palette_title_word_prefix_match(title: &str, tokens: &[&str]) -> bool
     true
 }
 
-fn command_palette_tokens_match(tokens: &[&str], fields: &[&str]) -> bool {
-    tokens.iter().all(|token| fields.iter().any(|field| field.contains(token)))
+pub(crate) fn command_palette_tokens_match(tokens: &[&str], fields: &[&str]) -> bool {
+    tokens
+        .iter()
+        .all(|token| fields.iter().any(|field| field.contains(token)))
 }
 
-fn command_palette_initialism(title: &str) -> String {
+pub(crate) fn command_palette_initialism(title: &str) -> String {
     title
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -1048,7 +1064,11 @@ mod command_palette_tests {
     #[test]
     fn command_palette_supports_initialism_matching() {
         let score = command_palette_match_score(
-            &palette_item("New Worktree", "Create a local worktree", "new worktree create"),
+            &palette_item(
+                "New Worktree",
+                "Create a local worktree",
+                "new worktree create",
+            ),
             "nw",
         );
         assert!(score.is_some());

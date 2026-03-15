@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.left_pane_visible {
             let theme = self.theme();
             let repositories = self.repositories.clone();
@@ -156,8 +158,8 @@ impl ArborWindow {
                         ));
                     } else {
                         pane = pane.child(cell.opacity(0.8));
-    }
-}
+                    }
+                }
             }
 
             return pane;
@@ -1044,7 +1046,11 @@ impl ArborWindow {
             )
     }
 
-    fn build_sidebar_order_for_group(&self, group_key: &str, repo_root: &Path) -> Vec<SidebarItemId> {
+    pub(crate) fn build_sidebar_order_for_group(
+        &self,
+        group_key: &str,
+        repo_root: &Path,
+    ) -> Vec<SidebarItemId> {
         let worktree_ids: Vec<SidebarItemId> = self
             .worktrees
             .iter()
@@ -1065,7 +1071,7 @@ impl ArborWindow {
         )
     }
 
-    fn handle_sidebar_item_drop(
+    pub(crate) fn handle_sidebar_item_drop(
         &mut self,
         source_id: &SidebarItemId,
         insert_before: usize,
@@ -1083,7 +1089,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn render_repository_worktree_sidebar(
+    pub(crate) fn render_repository_worktree_sidebar(
         &mut self,
         repository_index: usize,
         repository: &RepositorySummary,
@@ -1126,33 +1132,29 @@ impl ArborWindow {
                     let Some((index, worktree)) = worktree_map.get(&path).cloned() else {
                         continue;
                     };
-                    elements.push(
-                        self.render_repository_worktree_row(
-                            slot,
-                            group_key.as_str(),
-                            repo_root.as_path(),
-                            index,
-                            worktree,
-                            selection_epoch,
-                            compact_sidebar,
-                            cx,
-                        ),
-                    );
+                    elements.push(self.render_repository_worktree_row(
+                        slot,
+                        group_key.as_str(),
+                        repo_root.as_path(),
+                        index,
+                        worktree,
+                        selection_epoch,
+                        compact_sidebar,
+                        cx,
+                    ));
                 },
                 SidebarItemId::Outpost(outpost_id) => {
                     let Some((index, outpost)) = outpost_map.get(&outpost_id).cloned() else {
                         continue;
                     };
-                    elements.push(
-                        self.render_repository_outpost_row(
-                            slot,
-                            group_key.as_str(),
-                            repo_root.as_path(),
-                            index,
-                            outpost,
-                            cx,
-                        ),
-                    );
+                    elements.push(self.render_repository_outpost_row(
+                        slot,
+                        group_key.as_str(),
+                        repo_root.as_path(),
+                        index,
+                        outpost,
+                        cx,
+                    ));
                 },
             }
         }
@@ -1171,7 +1173,7 @@ impl ArborWindow {
         div().flex().flex_col().children(elements)
     }
 
-    fn render_repository_sidebar_drop_zone(
+    pub(crate) fn render_repository_sidebar_drop_zone(
         &self,
         repository_index: usize,
         slot: usize,
@@ -1198,20 +1200,22 @@ impl ArborWindow {
                 let accent = theme.accent;
                 move |style, _, _, _| style.bg(rgb(accent)).h(px(3.)).my(px(1.5))
             })
-            .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, _, cx| {
-                if dragged.group_key == drop_group_key {
-                    this.handle_sidebar_item_drop(
-                        &dragged.item_id,
-                        slot,
-                        &drop_group_key,
-                        &repo_root,
-                        cx,
-                    );
-                }
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSidebarItem, _, cx| {
+                    if dragged.group_key == drop_group_key {
+                        this.handle_sidebar_item_drop(
+                            &dragged.item_id,
+                            slot,
+                            &drop_group_key,
+                            &repo_root,
+                            cx,
+                        );
+                    }
+                }),
+            )
     }
 
-    fn render_repository_worktree_row(
+    pub(crate) fn render_repository_worktree_row(
         &self,
         slot: usize,
         group_key: &str,
@@ -1290,23 +1294,25 @@ impl ArborWindow {
                 let accent = theme.accent;
                 move |style, _, _, _| style.border_color(rgb(accent)).border_t_2()
             })
-            .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, _, cx| {
-                if dragged.group_key == drop_group_key {
-                    this.handle_sidebar_item_drop(
-                        &dragged.item_id,
-                        slot,
-                        &drop_group_key,
-                        &drop_repo_root,
-                        cx,
-                    );
-                }
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSidebarItem, _, cx| {
+                    if dragged.group_key == drop_group_key {
+                        this.handle_sidebar_item_drop(
+                            &dragged.item_id,
+                            slot,
+                            &drop_group_key,
+                            &drop_repo_root,
+                            cx,
+                        );
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
                 this.update_worktree_hover_mouse_position(event.position);
             }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_worktree(index, window, cx)
-            }))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.select_worktree(index, window, cx)),
+            )
             .when(
                 !is_primary || worktree.checkout_kind == CheckoutKind::DiscreteClone,
                 |this| {
@@ -1353,7 +1359,11 @@ impl ArborWindow {
                     }))
                     .bg(rgb(theme.panel_bg))
                     .px_2()
-                    .py(px(if compact_sidebar { 4. } else { 6. }))
+                    .py(px(if compact_sidebar {
+                        4.
+                    } else {
+                        6.
+                    }))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1434,11 +1444,8 @@ impl ArborWindow {
                                         let summary = diff_summary.unwrap_or_default();
                                         let show_diff_summary =
                                             summary.additions > 0 || summary.deletions > 0;
-                                        let mut right = div()
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1();
+                                        let mut right =
+                                            div().flex_none().flex().items_center().gap_1();
 
                                         if compact_sidebar {
                                             right = right.child(
@@ -1495,7 +1502,10 @@ impl ArborWindow {
                                                     div()
                                                         .text_xs()
                                                         .text_color(rgb(0x72d69c))
-                                                        .child(format!("\u{2191}{}", divergence.ahead)),
+                                                        .child(format!(
+                                                            "\u{2191}{}",
+                                                            divergence.ahead
+                                                        )),
                                                 );
                                             }
                                             if divergence.behind > 0 {
@@ -1503,7 +1513,10 @@ impl ArborWindow {
                                                     div()
                                                         .text_xs()
                                                         .text_color(rgb(0xe5c07b))
-                                                        .child(format!("\u{2193}{}", divergence.behind)),
+                                                        .child(format!(
+                                                            "\u{2193}{}",
+                                                            divergence.behind
+                                                        )),
                                                 );
                                             }
                                         }
@@ -1532,20 +1545,32 @@ impl ArborWindow {
                                                         .clone()
                                                         .unwrap_or_else(|| worktree.label.clone());
                                                     if activity_sparkline.is_empty() {
-                                                        format!("{} · {}", attention.label, task_or_label)
+                                                        format!(
+                                                            "{} · {}",
+                                                            attention.label, task_or_label
+                                                        )
                                                     } else {
                                                         format!(
                                                             "{} {} · {}",
-                                                            attention.label, activity_sparkline, task_or_label
+                                                            attention.label,
+                                                            activity_sparkline,
+                                                            task_or_label
                                                         )
                                                     }
                                                 }),
                                         )
                                         .when_some(pr_details.clone(), |this, pr| {
-                                            let (checks_icon, checks_color) = match pr.checks_status {
-                                                github_service::CheckStatus::Success => ("\u{f00c}", 0x72d69c_u32),
-                                                github_service::CheckStatus::Failure => ("\u{f00d}", 0xeb6f92_u32),
-                                                github_service::CheckStatus::Pending => ("\u{f192}", 0xe5c07b_u32),
+                                            let (checks_icon, checks_color) = match pr.checks_status
+                                            {
+                                                github_service::CheckStatus::Success => {
+                                                    ("\u{f00c}", 0x72d69c_u32)
+                                                },
+                                                github_service::CheckStatus::Failure => {
+                                                    ("\u{f00d}", 0xeb6f92_u32)
+                                                },
+                                                github_service::CheckStatus::Pending => {
+                                                    ("\u{f192}", 0xe5c07b_u32)
+                                                },
                                             };
                                             let (review_icon, _, review_color) =
                                                 review_status_presentation(pr.review_decision);
@@ -1588,8 +1613,10 @@ impl ArborWindow {
                                             let mut badges = badges;
                                             for port in detected_ports.iter().take(2) {
                                                 let port_url = worktree_port_url(port);
-                                                let port_id =
-                                                    format!("worktree-port-link-{index}-{}", port.port);
+                                                let port_id = format!(
+                                                    "worktree-port-link-{index}-{}",
+                                                    port.port
+                                                );
                                                 badges = badges.child(
                                                     div()
                                                         .id(ElementId::Name(port_id.into()))
@@ -1603,7 +1630,9 @@ impl ArborWindow {
                                                         .child(worktree_port_badge_text(port))
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
-                                                                this.open_external_url(&port_url, cx);
+                                                                this.open_external_url(
+                                                                    &port_url, cx,
+                                                                );
                                                                 cx.stop_propagation();
                                                             },
                                                         )),
@@ -1626,10 +1655,12 @@ impl ArborWindow {
                                                             this.text_color(rgb(theme.text_primary))
                                                         })
                                                         .child(pr_text)
-                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                            this.open_external_url(&pr_url, cx);
-                                                            cx.stop_propagation();
-                                                        })),
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.open_external_url(&pr_url, cx);
+                                                                cx.stop_propagation();
+                                                            },
+                                                        )),
                                                 )
                                             } else {
                                                 this.child(
@@ -1644,31 +1675,40 @@ impl ArborWindow {
                                         .when(
                                             pr_details.is_none() && !detected_ports.is_empty(),
                                             |this| {
-                                                detected_ports.iter().take(2).fold(this, |this, port| {
-                                                    let port_url = worktree_port_url(port);
-                                                    let port_id = format!(
-                                                        "worktree-port-link-{index}-{}",
-                                                        port.port
-                                                    );
-                                                    this.child(
-                                                        div()
-                                                            .id(ElementId::Name(port_id.into()))
-                                                            .cursor_pointer()
-                                                            .flex_none()
-                                                            .text_xs()
-                                                            .text_color(rgb(0x72d69c))
-                                                            .hover(|this| {
-                                                                this.text_color(rgb(theme.text_primary))
-                                                            })
-                                                            .child(worktree_port_badge_text(port))
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.open_external_url(&port_url, cx);
-                                                                    cx.stop_propagation();
-                                                                },
-                                                            )),
-                                                    )
-                                                })
+                                                detected_ports.iter().take(2).fold(
+                                                    this,
+                                                    |this, port| {
+                                                        let port_url = worktree_port_url(port);
+                                                        let port_id = format!(
+                                                            "worktree-port-link-{index}-{}",
+                                                            port.port
+                                                        );
+                                                        this.child(
+                                                            div()
+                                                                .id(ElementId::Name(port_id.into()))
+                                                                .cursor_pointer()
+                                                                .flex_none()
+                                                                .text_xs()
+                                                                .text_color(rgb(0x72d69c))
+                                                                .hover(|this| {
+                                                                    this.text_color(rgb(
+                                                                        theme.text_primary
+                                                                    ))
+                                                                })
+                                                                .child(worktree_port_badge_text(
+                                                                    port,
+                                                                ))
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.open_external_url(
+                                                                            &port_url, cx,
+                                                                        );
+                                                                        cx.stop_propagation();
+                                                                    },
+                                                                )),
+                                                        )
+                                                    },
+                                                )
                                             },
                                         ),
                                 )
@@ -1688,7 +1728,7 @@ impl ArborWindow {
         }
     }
 
-    fn render_repository_outpost_row(
+    pub(crate) fn render_repository_outpost_row(
         &self,
         slot: usize,
         group_key: &str,
@@ -1744,17 +1784,19 @@ impl ArborWindow {
                 let accent = theme.accent;
                 move |style, _, _, _| style.border_color(rgb(accent)).border_t_2()
             })
-            .on_drop(cx.listener(move |this, dragged: &DraggedSidebarItem, _, cx| {
-                if dragged.group_key == drop_group_key {
-                    this.handle_sidebar_item_drop(
-                        &dragged.item_id,
-                        slot,
-                        &drop_group_key,
-                        &drop_repo_root,
-                        cx,
-                    );
-                }
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSidebarItem, _, cx| {
+                    if dragged.group_key == drop_group_key {
+                        this.handle_sidebar_item_drop(
+                            &dragged.item_id,
+                            slot,
+                            &drop_group_key,
+                            &drop_repo_root,
+                            cx,
+                        );
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select_outpost(outpost_index, window, cx);
             }))
@@ -1838,14 +1880,14 @@ impl ArborWindow {
             .into_any_element()
     }
 
-    fn repository_sidebar_tab_for_group(&self, group_key: &str) -> RepositorySidebarTab {
+    pub(crate) fn repository_sidebar_tab_for_group(&self, group_key: &str) -> RepositorySidebarTab {
         self.repository_sidebar_tabs
             .get(group_key)
             .copied()
             .unwrap_or_default()
     }
 
-    fn set_repository_sidebar_tab_for_group(
+    pub(crate) fn set_repository_sidebar_tab_for_group(
         &mut self,
         group_key: &str,
         tab: RepositorySidebarTab,
@@ -1860,7 +1902,7 @@ impl ArborWindow {
         self.sync_repository_sidebar_tabs_store(cx);
     }
 
-    fn render_repository_sidebar_subtabs(
+    pub(crate) fn render_repository_sidebar_subtabs(
         &self,
         repository_index: usize,
         repository_group_key: String,
@@ -1881,88 +1923,88 @@ impl ArborWindow {
         });
         let tab_button =
             |label: &'static str, tab: RepositorySidebarTab, badge_label: Option<String>| {
-            let is_active = active_tab == tab;
-            let group_key = repository_group_key.clone();
-            let issue_target = issue_target.clone();
-            div()
-                .id(ElementId::Name(
-                    format!(
-                        "repository-sidebar-tab-{repository_index}-{}",
-                        label.to_ascii_lowercase()
-                    )
-                    .into(),
-                ))
-                .flex_1()
-                .h(px(24.))
-                .rounded_sm()
-                .cursor_pointer()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .bg(rgb(if is_active {
-                    theme.panel_active_bg
-                } else {
-                    theme.panel_bg
-                }))
-                .text_color(rgb(if is_active {
-                    theme.text_primary
-                } else {
-                    theme.text_muted
-                }))
-                .border_1()
-                .border_color(rgb(if is_active {
-                    theme.accent
-                } else {
-                    theme.border
-                }))
-                .hover(|this| this.text_color(rgb(theme.text_primary)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.active_repository_index != Some(repository_index) {
-                        this.select_repository(repository_index, cx);
-                    }
-                    this.set_repository_sidebar_tab_for_group(&group_key, tab, cx);
-                    if tab == RepositorySidebarTab::Issues {
-                        this.ensure_issues_loaded_for_target(issue_target.clone(), cx);
+                let is_active = active_tab == tab;
+                let group_key = repository_group_key.clone();
+                let issue_target = issue_target.clone();
+                div()
+                    .id(ElementId::Name(
+                        format!(
+                            "repository-sidebar-tab-{repository_index}-{}",
+                            label.to_ascii_lowercase()
+                        )
+                        .into(),
+                    ))
+                    .flex_1()
+                    .h(px(24.))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .bg(rgb(if is_active {
+                        theme.panel_active_bg
                     } else {
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(4.))
-                        .child(label)
-                        .when_some(badge_label, |this, badge_label| {
-                            this.child(
-                                div()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .bg(rgb(theme.panel_bg))
-                                    .min_w(px(14.))
-                                    .h(px(14.))
-                                    .px_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_size(px(10.))
-                                    .font_family(FONT_MONO)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(if is_active {
-                                        theme.text_muted
-                                    } else {
-                                        theme.text_disabled
-                                    }))
-                                    .child(badge_label),
-                            )
-                        }),
-                )
-        };
+                        theme.panel_bg
+                    }))
+                    .text_color(rgb(if is_active {
+                        theme.text_primary
+                    } else {
+                        theme.text_muted
+                    }))
+                    .border_1()
+                    .border_color(rgb(if is_active {
+                        theme.accent
+                    } else {
+                        theme.border
+                    }))
+                    .hover(|this| this.text_color(rgb(theme.text_primary)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.active_repository_index != Some(repository_index) {
+                            this.select_repository(repository_index, cx);
+                        }
+                        this.set_repository_sidebar_tab_for_group(&group_key, tab, cx);
+                        if tab == RepositorySidebarTab::Issues {
+                            this.ensure_issues_loaded_for_target(issue_target.clone(), cx);
+                        } else {
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(4.))
+                            .child(label)
+                            .when_some(badge_label, |this, badge_label| {
+                                this.child(
+                                    div()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .bg(rgb(theme.panel_bg))
+                                        .min_w(px(14.))
+                                        .h(px(14.))
+                                        .px_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(10.))
+                                        .font_family(FONT_MONO)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(if is_active {
+                                            theme.text_muted
+                                        } else {
+                                            theme.text_disabled
+                                        }))
+                                        .child(badge_label),
+                                )
+                            }),
+                    )
+            };
 
         div()
             .w_full()
@@ -1974,17 +2016,24 @@ impl ArborWindow {
                 RepositorySidebarTab::Worktrees,
                 Some(worktree_count.to_string()),
             ))
-            .child(tab_button("Issues", RepositorySidebarTab::Issues, issue_badge))
+            .child(tab_button(
+                "Issues",
+                RepositorySidebarTab::Issues,
+                issue_badge,
+            ))
     }
 
-    fn render_repository_issue_sidebar(
+    pub(crate) fn render_repository_issue_sidebar(
         &mut self,
         repository_index: usize,
         issue_target: IssueTarget,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = self.theme();
-        let issue_state = self.issue_list_state(&issue_target).cloned().unwrap_or_default();
+        let issue_state = self
+            .issue_list_state(&issue_target)
+            .cloned()
+            .unwrap_or_default();
         let issue_loading = issue_state.loading;
         let issue_error = issue_state.error.clone();
         let issue_notice = issue_state.notice.clone();
@@ -2035,8 +2084,7 @@ impl ArborWindow {
                     .text_color(rgb(theme.text_muted))
                     .child("Loading issues…"),
             );
-        } else if issue_error.is_none() && issue_notice.is_none() && issue_rows.is_empty()
-        {
+        } else if issue_error.is_none() && issue_notice.is_none() && issue_rows.is_empty() {
             content = content.child(
                 div()
                     .px_2()
@@ -2279,10 +2327,17 @@ impl ArborWindow {
             );
         }
 
-        div().w_full().min_w_0().flex().flex_1().flex_col().gap_1().child(content)
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_1()
+            .flex_col()
+            .gap_1()
+            .child(content)
     }
 
-    fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_repository_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(menu) = self.repository_context_menu.as_ref() else {
             return div();
         };
@@ -2378,7 +2433,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_worktree_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_worktree_context_menu(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(menu) = self.worktree_context_menu.as_ref() else {
             return div();
         };
@@ -2478,7 +2533,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_worktree_hover_popover(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_worktree_hover_popover(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(popover) = self.worktree_hover_popover.as_ref() else {
             return div();
         };
@@ -2664,7 +2719,10 @@ impl ArborWindow {
             card = card.child(div().h(px(1.)).bg(rgb(theme.border)).my_1());
 
             let heading = if worktree.stuck_turn_count >= 2 {
-                format!("Recent turns · stuck for {} turns", worktree.stuck_turn_count + 1)
+                format!(
+                    "Recent turns · stuck for {} turns",
+                    worktree.stuck_turn_count + 1
+                )
             } else {
                 "Recent turns".to_owned()
             };
@@ -2701,15 +2759,12 @@ impl ArborWindow {
                                 .child(summary_text),
                         )
                         .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme.text_disabled))
-                                .child(
-                                    snapshot
-                                        .timestamp_unix_ms
-                                        .map(format_relative_time)
-                                        .unwrap_or_else(|| "-".to_owned()),
-                                ),
+                            div().text_xs().text_color(rgb(theme.text_disabled)).child(
+                                snapshot
+                                    .timestamp_unix_ms
+                                    .map(format_relative_time)
+                                    .unwrap_or_else(|| "-".to_owned()),
+                            ),
                         ),
                 );
             }
@@ -2964,7 +3019,7 @@ impl ArborWindow {
     }
 }
 
-fn split_issue_title_badge(title: &str) -> (Option<String>, String) {
+pub(crate) fn split_issue_title_badge(title: &str) -> (Option<String>, String) {
     let trimmed = title.trim();
     let Some(rest) = trimmed.strip_prefix('[') else {
         return (None, trimmed.to_owned());
@@ -2989,14 +3044,14 @@ fn split_issue_title_badge(title: &str) -> (Option<String>, String) {
     (Some(badge.to_owned()), clean_title.to_owned())
 }
 
-fn normalize_issue_badge_key(value: &str) -> String {
+pub(crate) fn normalize_issue_badge_key(value: &str) -> String {
     value
         .trim()
         .to_ascii_lowercase()
         .replace([' ', '_', '-'], "")
 }
 
-fn issue_type_badge_colors(
+pub(crate) fn issue_type_badge_colors(
     theme: ThemePalette,
     label: &str,
     metadata_color: Option<&str>,
@@ -3014,7 +3069,10 @@ fn issue_type_badge_colors(
     }
 }
 
-fn issue_label_badge_colors(theme: ThemePalette, metadata_color: Option<&str>) -> (u32, u32, u32) {
+pub(crate) fn issue_label_badge_colors(
+    theme: ThemePalette,
+    metadata_color: Option<&str>,
+) -> (u32, u32, u32) {
     if let Some(color) = metadata_color.and_then(parse_issue_badge_hex_color) {
         return (color, color, theme.panel_bg);
     }
@@ -3022,7 +3080,7 @@ fn issue_label_badge_colors(theme: ThemePalette, metadata_color: Option<&str>) -
     (theme.text_muted, theme.border, theme.panel_bg)
 }
 
-fn parse_issue_badge_hex_color(value: &str) -> Option<u32> {
+pub(crate) fn parse_issue_badge_hex_color(value: &str) -> Option<u32> {
     let trimmed = value.trim().strip_prefix('#').unwrap_or(value.trim());
     if trimmed.len() != 6 {
         return None;
@@ -3030,7 +3088,7 @@ fn parse_issue_badge_hex_color(value: &str) -> Option<u32> {
     u32::from_str_radix(trimmed, 16).ok()
 }
 
-fn normalized_sidebar_order(
+pub(crate) fn normalized_sidebar_order(
     saved: Option<&[SidebarItemId]>,
     worktree_ids: Vec<SidebarItemId>,
     outpost_ids: Vec<SidebarItemId>,
@@ -3055,7 +3113,7 @@ fn normalized_sidebar_order(
     }
 }
 
-fn reordered_sidebar_items(
+pub(crate) fn reordered_sidebar_items(
     items: &[SidebarItemId],
     source_id: &SidebarItemId,
     insert_before: usize,
@@ -3078,7 +3136,7 @@ fn reordered_sidebar_items(
     Some(items)
 }
 
-fn repository_add_worktree_button<I>(theme: &ThemePalette, id: I) -> Stateful<Div>
+pub(crate) fn repository_add_worktree_button<I>(theme: &ThemePalette, id: I) -> Stateful<Div>
 where
     I: Into<ElementId>,
 {

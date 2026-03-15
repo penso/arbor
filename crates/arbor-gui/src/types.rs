@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use {
+    super::*,
+    serde::{Deserialize, Serialize},
+};
 
 /// Identifies a sidebar item for persisted UI ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,149 +73,149 @@ pub(crate) enum RepositorySidebarTab {
 }
 
 #[derive(Debug, Clone)]
-struct WorktreeSummary {
-    group_key: String,
-    checkout_kind: CheckoutKind,
-    repo_root: PathBuf,
-    path: PathBuf,
-    label: String,
-    branch: String,
-    is_primary_checkout: bool,
-    pr_loading: bool,
-    pr_loaded: bool,
-    pr_number: Option<u64>,
-    pr_url: Option<String>,
-    pr_details: Option<github_service::PrDetails>,
-    branch_divergence: Option<BranchDivergenceSummary>,
-    diff_summary: Option<changes::DiffLineSummary>,
-    detected_ports: Vec<DetectedPort>,
-    managed_processes: Vec<ManagedWorktreeProcess>,
-    recent_turns: Vec<AgentTurnSnapshot>,
-    stuck_turn_count: usize,
-    recent_agent_sessions: Vec<arbor_core::session::AgentSessionSummary>,
-    agent_state: Option<AgentState>,
-    agent_task: Option<String>,
-    last_activity_unix_ms: Option<u64>,
+pub(crate) struct WorktreeSummary {
+    pub(crate) group_key: String,
+    pub(crate) checkout_kind: CheckoutKind,
+    pub(crate) repo_root: PathBuf,
+    pub(crate) path: PathBuf,
+    pub(crate) label: String,
+    pub(crate) branch: String,
+    pub(crate) is_primary_checkout: bool,
+    pub(crate) pr_loading: bool,
+    pub(crate) pr_loaded: bool,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) pr_url: Option<String>,
+    pub(crate) pr_details: Option<github_service::PrDetails>,
+    pub(crate) branch_divergence: Option<BranchDivergenceSummary>,
+    pub(crate) diff_summary: Option<changes::DiffLineSummary>,
+    pub(crate) detected_ports: Vec<DetectedPort>,
+    pub(crate) managed_processes: Vec<ManagedWorktreeProcess>,
+    pub(crate) recent_turns: Vec<AgentTurnSnapshot>,
+    pub(crate) stuck_turn_count: usize,
+    pub(crate) recent_agent_sessions: Vec<arbor_core::session::AgentSessionSummary>,
+    pub(crate) agent_state: Option<AgentState>,
+    pub(crate) agent_task: Option<String>,
+    pub(crate) last_activity_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ManagedWorktreeProcess {
-    id: String,
-    name: String,
-    command: String,
-    working_dir: PathBuf,
-    source: ProcessSource,
+pub(crate) struct ManagedWorktreeProcess {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) working_dir: PathBuf,
+    pub(crate) source: ProcessSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BranchDivergenceSummary {
-    ahead: usize,
-    behind: usize,
+pub(crate) struct BranchDivergenceSummary {
+    pub(crate) ahead: usize,
+    pub(crate) behind: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DetectedPort {
-    port: u16,
-    pid: Option<u32>,
-    address: String,
-    process_name: String,
-    label: Option<String>,
+pub(crate) struct DetectedPort {
+    pub(crate) port: u16,
+    pub(crate) pid: Option<u32>,
+    pub(crate) address: String,
+    pub(crate) process_name: String,
+    pub(crate) label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AgentTurnSnapshot {
-    timestamp_unix_ms: Option<u64>,
-    diff_summary: Option<changes::DiffLineSummary>,
+pub(crate) struct AgentTurnSnapshot {
+    pub(crate) timestamp_unix_ms: Option<u64>,
+    pub(crate) diff_summary: Option<changes::DiffLineSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentActivitySessionRecord {
-    cwd: String,
-    state: AgentState,
-    updated_at_unix_ms: Option<u64>,
+pub(crate) struct AgentActivitySessionRecord {
+    pub(crate) cwd: String,
+    pub(crate) state: AgentState,
+    pub(crate) updated_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
-struct RepositorySummary {
-    group_key: String,
-    root: PathBuf,
-    checkout_roots: Vec<repository_store::RepositoryCheckoutRoot>,
-    label: String,
-    avatar_url: Option<String>,
-    github_repo_slug: Option<String>,
+pub(crate) struct RepositorySummary {
+    pub(crate) group_key: String,
+    pub(crate) root: PathBuf,
+    pub(crate) checkout_roots: Vec<repository_store::RepositoryCheckoutRoot>,
+    pub(crate) label: String,
+    pub(crate) avatar_url: Option<String>,
+    pub(crate) github_repo_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-enum ManagedDaemonTarget {
+pub(crate) enum ManagedDaemonTarget {
     Primary,
     Remote(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct IssueTarget {
-    daemon_target: ManagedDaemonTarget,
-    repo_root: String,
+pub(crate) struct IssueTarget {
+    pub(crate) daemon_target: ManagedDaemonTarget,
+    pub(crate) repo_root: String,
 }
 
 #[derive(Debug, Clone, Default)]
-struct IssueListState {
-    issues: Vec<terminal_daemon_http::IssueDto>,
-    source: Option<terminal_daemon_http::IssueSourceDto>,
-    notice: Option<String>,
-    error: Option<String>,
-    loading: bool,
-    loaded: bool,
-    refresh_generation: u64,
+pub(crate) struct IssueListState {
+    pub(crate) issues: Vec<terminal_daemon_http::IssueDto>,
+    pub(crate) source: Option<terminal_daemon_http::IssueSourceDto>,
+    pub(crate) notice: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) loading: bool,
+    pub(crate) loaded: bool,
+    pub(crate) refresh_generation: u64,
 }
 
 #[derive(Debug, Clone)]
-struct CreateModalIssueContext {
-    source_label: String,
-    display_id: String,
-    title: String,
-    url: Option<String>,
+pub(crate) struct CreateModalIssueContext {
+    pub(crate) source_label: String,
+    pub(crate) display_id: String,
+    pub(crate) title: String,
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct IssueDetailsModal {
-    target: IssueTarget,
-    source_label: String,
-    issue: terminal_daemon_http::IssueDto,
+pub(crate) struct IssueDetailsModal {
+    pub(crate) target: IssueTarget,
+    pub(crate) source_label: String,
+    pub(crate) issue: terminal_daemon_http::IssueDto,
 }
 
-type SharedTerminalRuntime = Arc<dyn TerminalRuntimeHandle>;
+pub(crate) type SharedTerminalRuntime = Arc<dyn TerminalRuntimeHandle>;
 
 #[derive(Clone)]
-struct TerminalSession {
-    id: u64,
-    daemon_session_id: String,
-    worktree_path: PathBuf,
-    managed_process_id: Option<String>,
-    title: String,
-    last_command: Option<String>,
-    pending_command: String,
-    command: String,
-    agent_preset: Option<AgentPresetKind>,
-    execution_mode: Option<ExecutionMode>,
-    state: TerminalState,
-    exit_code: Option<i32>,
-    updated_at_unix_ms: Option<u64>,
-    root_pid: Option<u32>,
-    cols: u16,
-    rows: u16,
-    generation: u64,
-    output: String,
-    styled_output: Vec<TerminalStyledLine>,
-    cursor: Option<TerminalCursor>,
-    modes: TerminalModes,
-    last_runtime_sync_at: Option<Instant>,
-    queued_input: Vec<u8>,
-    is_initializing: bool,
-    runtime: Option<SharedTerminalRuntime>,
+pub(crate) struct TerminalSession {
+    pub(crate) id: u64,
+    pub(crate) daemon_session_id: String,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) managed_process_id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) last_command: Option<String>,
+    pub(crate) pending_command: String,
+    pub(crate) command: String,
+    pub(crate) agent_preset: Option<AgentPresetKind>,
+    pub(crate) execution_mode: Option<ExecutionMode>,
+    pub(crate) state: TerminalState,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) updated_at_unix_ms: Option<u64>,
+    pub(crate) root_pid: Option<u32>,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) generation: u64,
+    pub(crate) output: String,
+    pub(crate) styled_output: Vec<TerminalStyledLine>,
+    pub(crate) cursor: Option<TerminalCursor>,
+    pub(crate) modes: TerminalModes,
+    pub(crate) last_runtime_sync_at: Option<Instant>,
+    pub(crate) queued_input: Vec<u8>,
+    pub(crate) is_initializing: bool,
+    pub(crate) runtime: Option<SharedTerminalRuntime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalState {
+pub(crate) enum TerminalState {
     Running,
     Completed,
     Failed,
@@ -222,14 +225,14 @@ enum TerminalState {
 /// a terminal emulator for rendering. Polling is done from the GUI timer
 /// since libssh's Channel is not Send/Sync.
 #[derive(Clone)]
-struct SshTerminalShell {
-    shell: Arc<Mutex<arbor_ssh::shell::SshShell>>,
-    emulator: Arc<Mutex<arbor_terminal_emulator::TerminalEmulator>>,
-    generation: Arc<std::sync::atomic::AtomicU64>,
+pub(crate) struct SshTerminalShell {
+    pub(crate) shell: Arc<Mutex<arbor_ssh::shell::SshShell>>,
+    pub(crate) emulator: Arc<Mutex<arbor_terminal_emulator::TerminalEmulator>>,
+    pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SshTerminalShell {
-    fn open(
+    pub(crate) fn open(
         connection: &arbor_ssh::connection::SshConnection,
         cols: u16,
         rows: u16,
@@ -256,7 +259,7 @@ impl SshTerminalShell {
         })
     }
 
-    fn write_input(&self, bytes: &[u8]) -> Result<(), TerminalError> {
+    pub(crate) fn write_input(&self, bytes: &[u8]) -> Result<(), TerminalError> {
         let shell = self
             .shell
             .lock()
@@ -268,7 +271,7 @@ impl SshTerminalShell {
 
     /// Poll the shell for new output and feed it to the terminal emulator.
     /// Called from the GUI polling timer. Returns true if new data was processed.
-    fn poll(&self) -> bool {
+    pub(crate) fn poll(&self) -> bool {
         let shell = match self.shell.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -288,7 +291,7 @@ impl SshTerminalShell {
         }
     }
 
-    fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+    pub(crate) fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
         let (output, styled_lines, cursor, modes) = match self.emulator.lock() {
             Ok(emulator) => (
                 emulator.snapshot_output(),
@@ -326,7 +329,7 @@ impl SshTerminalShell {
         }
     }
 
-    fn resize(&self, rows: u16, cols: u16) -> Result<(), TerminalError> {
+    pub(crate) fn resize(&self, rows: u16, cols: u16) -> Result<(), TerminalError> {
         let shell = self
             .shell
             .lock()
@@ -343,11 +346,11 @@ impl SshTerminalShell {
         Ok(())
     }
 
-    fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
 
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         if let Ok(shell) = self.shell.lock() {
             let _ = shell.close();
         }
@@ -355,27 +358,27 @@ impl SshTerminalShell {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalRuntimeKind {
+pub(crate) enum TerminalRuntimeKind {
     Local,
     Outpost,
 }
 
-struct RuntimeNotification {
-    title: String,
-    body: String,
-    play_sound: bool,
+pub(crate) struct RuntimeNotification {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) play_sound: bool,
 }
 
 #[derive(Default)]
-struct TerminalRuntimeSyncOutcome {
-    changed: bool,
-    close_session: bool,
-    clear_global_daemon: bool,
-    notice: Option<String>,
-    notification: Option<RuntimeNotification>,
+pub(crate) struct TerminalRuntimeSyncOutcome {
+    pub(crate) changed: bool,
+    pub(crate) close_session: bool,
+    pub(crate) clear_global_daemon: bool,
+    pub(crate) notice: Option<String>,
+    pub(crate) notification: Option<RuntimeNotification>,
 }
 
-trait EmulatorRuntimeBackend: Clone {
+pub(crate) trait EmulatorRuntimeBackend: Clone {
     fn poll(&self);
     fn write_input(&self, input: &[u8]) -> Result<(), TerminalError>;
     fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot;
@@ -390,7 +393,7 @@ trait EmulatorRuntimeBackend: Clone {
     fn close(&self);
 }
 
-trait TerminalRuntimeHandle {
+pub(crate) trait TerminalRuntimeHandle {
     fn kind(&self) -> TerminalRuntimeKind;
     fn sync_interval(&self, is_active: bool, session_state: TerminalState) -> Duration;
     fn should_sync(
@@ -417,37 +420,37 @@ trait TerminalRuntimeHandle {
 }
 
 #[derive(Clone, Copy)]
-struct RuntimeExitLabels {
-    completed_title: &'static str,
-    failed_title: &'static str,
-    failed_notice_prefix: &'static str,
+pub(crate) struct RuntimeExitLabels {
+    pub(crate) completed_title: &'static str,
+    pub(crate) failed_title: &'static str,
+    pub(crate) failed_notice_prefix: &'static str,
 }
 
 #[derive(Clone)]
-struct EmulatorTerminalRuntime<B> {
-    backend: B,
-    kind: TerminalRuntimeKind,
-    resize_error_label: &'static str,
-    exit_labels: RuntimeExitLabels,
+pub(crate) struct EmulatorTerminalRuntime<B> {
+    pub(crate) backend: B,
+    pub(crate) kind: TerminalRuntimeKind,
+    pub(crate) resize_error_label: &'static str,
+    pub(crate) exit_labels: RuntimeExitLabels,
 }
 
-struct DaemonTerminalRuntime {
-    daemon: terminal_daemon_http::SharedTerminalDaemonClient,
-    ws_state: Arc<DaemonTerminalWsState>,
-    last_synced_ws_generation: std::sync::atomic::AtomicU64,
-    snapshot_request_in_flight: Arc<AtomicBool>,
-    kind: TerminalRuntimeKind,
-    resize_error_label: &'static str,
-    exit_labels: Option<RuntimeExitLabels>,
-    clear_global_daemon_on_connection_refused: bool,
+pub(crate) struct DaemonTerminalRuntime {
+    pub(crate) daemon: terminal_daemon_http::SharedTerminalDaemonClient,
+    pub(crate) ws_state: Arc<DaemonTerminalWsState>,
+    pub(crate) last_synced_ws_generation: std::sync::atomic::AtomicU64,
+    pub(crate) snapshot_request_in_flight: Arc<AtomicBool>,
+    pub(crate) kind: TerminalRuntimeKind,
+    pub(crate) resize_error_label: &'static str,
+    pub(crate) exit_labels: Option<RuntimeExitLabels>,
+    pub(crate) clear_global_daemon_on_connection_refused: bool,
 }
 
 #[derive(Clone)]
-struct DaemonTerminalCachedSnapshot {
-    terminal: arbor_terminal_emulator::TerminalSnapshot,
-    state: TerminalState,
-    updated_at_unix_ms: Option<u64>,
-    ready: bool,
+pub(crate) struct DaemonTerminalCachedSnapshot {
+    pub(crate) terminal: arbor_terminal_emulator::TerminalSnapshot,
+    pub(crate) state: TerminalState,
+    pub(crate) updated_at_unix_ms: Option<u64>,
+    pub(crate) ready: bool,
 }
 
 impl Default for DaemonTerminalCachedSnapshot {
@@ -467,17 +470,17 @@ impl Default for DaemonTerminalCachedSnapshot {
     }
 }
 
-struct DaemonTerminalWsState {
-    event_generation: std::sync::atomic::AtomicU64,
-    closed: AtomicBool,
-    connection_refused: AtomicBool,
+pub(crate) struct DaemonTerminalWsState {
+    pub(crate) event_generation: std::sync::atomic::AtomicU64,
+    pub(crate) closed: AtomicBool,
+    pub(crate) connection_refused: AtomicBool,
     /// Channel to send keystroke bytes to the WS thread for low-latency binary transmission.
-    ws_writer: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
+    pub(crate) ws_writer: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     /// Channel to wake the terminal poller when new data arrives.
-    poll_notify: Option<std::sync::mpsc::Sender<()>>,
-    size: Mutex<(u16, u16)>,
-    emulator: Mutex<arbor_terminal_emulator::TerminalEmulator>,
-    snapshot: Mutex<DaemonTerminalCachedSnapshot>,
+    pub(crate) poll_notify: Option<std::sync::mpsc::Sender<()>>,
+    pub(crate) size: Mutex<(u16, u16)>,
+    pub(crate) emulator: Mutex<arbor_terminal_emulator::TerminalEmulator>,
+    pub(crate) snapshot: Mutex<DaemonTerminalCachedSnapshot>,
 }
 
 impl Default for DaemonTerminalWsState {
@@ -491,7 +494,11 @@ impl Default for DaemonTerminalWsState {
 }
 
 impl DaemonTerminalWsState {
-    fn new(poll_notify: Option<std::sync::mpsc::Sender<()>>, rows: u16, cols: u16) -> Self {
+    pub(crate) fn new(
+        poll_notify: Option<std::sync::mpsc::Sender<()>>,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(2);
         Self {
@@ -501,42 +508,44 @@ impl DaemonTerminalWsState {
             ws_writer: Mutex::new(None),
             poll_notify,
             size: Mutex::new((rows, cols)),
-            emulator: Mutex::new(arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols)),
+            emulator: Mutex::new(arbor_terminal_emulator::TerminalEmulator::with_size(
+                rows, cols,
+            )),
             snapshot: Mutex::new(DaemonTerminalCachedSnapshot::default()),
         }
     }
 
-    fn note_event(&self) {
+    pub(crate) fn note_event(&self) {
         self.event_generation.fetch_add(1, Ordering::Relaxed);
         if let Some(ref tx) = self.poll_notify {
             let _ = tx.send(());
         }
     }
 
-    fn event_generation(&self) -> u64 {
+    pub(crate) fn event_generation(&self) -> u64 {
         self.event_generation.load(Ordering::Relaxed)
     }
 
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
 
-    fn note_connection_refused(&self) {
+    pub(crate) fn note_connection_refused(&self) {
         self.connection_refused.store(true, Ordering::Relaxed);
         self.note_event();
     }
 
-    fn take_connection_refused(&self) -> bool {
+    pub(crate) fn take_connection_refused(&self) -> bool {
         self.connection_refused.swap(false, Ordering::Relaxed)
     }
 
-    fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
 
     /// Try to send keystroke bytes through the WebSocket channel.
     /// Returns true if sent, false if WS writer is not available.
-    fn try_write(&self, bytes: Vec<u8>) -> bool {
+    pub(crate) fn try_write(&self, bytes: Vec<u8>) -> bool {
         if let Ok(guard) = self.ws_writer.lock()
             && let Some(ref sender) = *guard
         {
@@ -545,27 +554,23 @@ impl DaemonTerminalWsState {
         false
     }
 
-    fn set_writer(&self, sender: Option<std::sync::mpsc::Sender<Vec<u8>>>) {
+    pub(crate) fn set_writer(&self, sender: Option<std::sync::mpsc::Sender<Vec<u8>>>) {
         if let Ok(mut guard) = self.ws_writer.lock() {
             *guard = sender;
         }
     }
 
-    fn apply_snapshot_text(
+    pub(crate) fn apply_snapshot_text(
         &self,
         ansi_output: &str,
         state: TerminalState,
         exit_code: Option<i32>,
         updated_at_unix_ms: Option<u64>,
     ) {
-        let (rows, cols) = self
-            .size
-            .lock()
-            .map(|guard| *guard)
-            .unwrap_or((
-                arbor_terminal_emulator::TERMINAL_ROWS,
-                arbor_terminal_emulator::TERMINAL_COLS,
-            ));
+        let (rows, cols) = self.size.lock().map(|guard| *guard).unwrap_or((
+            arbor_terminal_emulator::TERMINAL_ROWS,
+            arbor_terminal_emulator::TERMINAL_COLS,
+        ));
 
         let terminal_snapshot = {
             let mut emulator = match self.emulator.lock() {
@@ -594,7 +599,7 @@ impl DaemonTerminalWsState {
         self.note_event();
     }
 
-    fn apply_output_bytes(&self, bytes: &[u8]) {
+    pub(crate) fn apply_output_bytes(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -619,7 +624,7 @@ impl DaemonTerminalWsState {
         self.note_event();
     }
 
-    fn apply_exit(&self, state: TerminalState, exit_code: Option<i32>) {
+    pub(crate) fn apply_exit(&self, state: TerminalState, exit_code: Option<i32>) {
         let mut cached = match self.snapshot.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -632,7 +637,7 @@ impl DaemonTerminalWsState {
         self.note_event();
     }
 
-    fn resize_emulator(&self, rows: u16, cols: u16) {
+    pub(crate) fn resize_emulator(&self, rows: u16, cols: u16) {
         let rows = rows.max(1);
         let cols = cols.max(2);
         if let Ok(mut size) = self.size.lock() {
@@ -658,7 +663,7 @@ impl DaemonTerminalWsState {
         }
     }
 
-    fn snapshot(&self) -> Option<DaemonTerminalCachedSnapshot> {
+    pub(crate) fn snapshot(&self) -> Option<DaemonTerminalCachedSnapshot> {
         self.snapshot
             .lock()
             .ok()
@@ -865,9 +870,7 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
         }
 
         let current_generation = self.ws_state.event_generation();
-        let last_synced_generation = self
-            .last_synced_ws_generation
-            .load(Ordering::Relaxed);
+        let last_synced_generation = self.last_synced_ws_generation.load(Ordering::Relaxed);
         if current_generation > last_synced_generation {
             return is_active
                 || runtime_sync_interval_elapsed(
@@ -1020,7 +1023,7 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CenterTab {
+pub(crate) enum CenterTab {
     Terminal(u64),
     Diff(u64),
     FileView(u64),
@@ -1028,7 +1031,7 @@ enum CenterTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RightPaneTab {
+pub(crate) enum RightPaneTab {
     Changes,
     FileTree,
     Procfile,
@@ -1036,7 +1039,7 @@ enum RightPaneTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum AgentPresetKind {
+pub(crate) enum AgentPresetKind {
     Codex,
     Claude,
     Pi,
@@ -1045,16 +1048,16 @@ enum AgentPresetKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum ExecutionMode {
+pub(crate) enum ExecutionMode {
     Plan,
     Build,
     Yolo,
 }
 
 impl ExecutionMode {
-    const ORDER: [Self; 3] = [Self::Plan, Self::Build, Self::Yolo];
+    pub(crate) const ORDER: [Self; 3] = [Self::Plan, Self::Build, Self::Yolo];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Plan => "Plan",
             Self::Build => "Build",
@@ -1062,7 +1065,7 @@ impl ExecutionMode {
         }
     }
 
-    fn subtitle(self) -> &'static str {
+    pub(crate) fn subtitle(self) -> &'static str {
         match self {
             Self::Plan => "Minimal write access",
             Self::Build => "Normal autonomous work",
@@ -1072,7 +1075,7 @@ impl ExecutionMode {
 }
 
 impl AgentPresetKind {
-    const ORDER: [Self; 5] = [
+    pub(crate) const ORDER: [Self; 5] = [
         Self::Codex,
         Self::Claude,
         Self::Pi,
@@ -1080,7 +1083,7 @@ impl AgentPresetKind {
         Self::Copilot,
     ];
 
-    fn key(self) -> &'static str {
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
@@ -1090,7 +1093,7 @@ impl AgentPresetKind {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
@@ -1100,7 +1103,7 @@ impl AgentPresetKind {
         }
     }
 
-    fn fallback_icon(self) -> &'static str {
+    pub(crate) fn fallback_icon(self) -> &'static str {
         match self {
             Self::Codex => "\u{f121}",
             Self::Claude => "C",
@@ -1110,7 +1113,7 @@ impl AgentPresetKind {
         }
     }
 
-    fn default_command(self) -> &'static str {
+    pub(crate) fn default_command(self) -> &'static str {
         match self {
             Self::Codex => {
                 "codex -c model_reasoning_effort=\"high\" --dangerously-bypass-approvals-and-sandbox -c model_reasoning_summary=\"detailed\" -c model_supports_reasoning_summaries=true"
@@ -1122,11 +1125,11 @@ impl AgentPresetKind {
         }
     }
 
-    fn executable_name(self) -> &'static str {
+    pub(crate) fn executable_name(self) -> &'static str {
         self.key()
     }
 
-    fn from_key(key: &str) -> Option<Self> {
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key.trim().to_ascii_lowercase().as_str() {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
@@ -1137,7 +1140,7 @@ impl AgentPresetKind {
         }
     }
 
-    fn cycle(self, reverse: bool) -> Self {
+    pub(crate) fn cycle(self, reverse: bool) -> Self {
         let current = Self::ORDER
             .iter()
             .position(|candidate| *candidate == self)
@@ -1150,36 +1153,36 @@ impl AgentPresetKind {
     }
 
     /// Check if the default command for this preset is available in PATH.
-    fn is_installed(self) -> bool {
+    pub(crate) fn is_installed(self) -> bool {
         is_command_in_path(self.executable_name())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentPreset {
-    kind: AgentPresetKind,
-    command: String,
+pub(crate) struct AgentPreset {
+    pub(crate) kind: AgentPresetKind,
+    pub(crate) command: String,
 }
 
 #[derive(Debug, Clone)]
-struct SettingsModal {
-    active_control: SettingsControl,
-    daemon_bind_mode: DaemonBindMode,
-    initial_daemon_bind_mode: DaemonBindMode,
-    notifications: bool,
-    daemon_auth_token: String,
-    loading: bool,
-    error: Option<String>,
+pub(crate) struct SettingsModal {
+    pub(crate) active_control: SettingsControl,
+    pub(crate) daemon_bind_mode: DaemonBindMode,
+    pub(crate) initial_daemon_bind_mode: DaemonBindMode,
+    pub(crate) notifications: bool,
+    pub(crate) daemon_auth_token: String,
+    pub(crate) loading: bool,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsControl {
+pub(crate) enum SettingsControl {
     DaemonBindMode,
     Notifications,
 }
 
 impl SettingsControl {
-    fn cycle(self, reverse: bool) -> Self {
+    pub(crate) fn cycle(self, reverse: bool) -> Self {
         const ORDER: [SettingsControl; 2] = [
             SettingsControl::DaemonBindMode,
             SettingsControl::Notifications,
@@ -1197,13 +1200,13 @@ impl SettingsControl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DaemonBindMode {
+pub(crate) enum DaemonBindMode {
     Localhost,
     AllInterfaces,
 }
 
 impl DaemonBindMode {
-    fn from_config(raw: Option<&str>) -> Self {
+    pub(crate) fn from_config(raw: Option<&str>) -> Self {
         match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
             Some("localhost" | "local" | "loopback" | "127.0.0.1") => Self::Localhost,
             Some("all" | "all-interfaces" | "public" | "0.0.0.0") => Self::AllInterfaces,
@@ -1211,7 +1214,7 @@ impl DaemonBindMode {
         }
     }
 
-    fn as_config_value(self) -> &'static str {
+    pub(crate) fn as_config_value(self) -> &'static str {
         match self {
             Self::Localhost => "localhost",
             Self::AllInterfaces => "all-interfaces",
@@ -1219,7 +1222,7 @@ impl DaemonBindMode {
     }
 }
 
-enum SettingsModalInputEvent {
+pub(crate) enum SettingsModalInputEvent {
     CycleControl(bool),
     SelectDaemonBindMode(DaemonBindMode),
     ToggleActiveControl,
@@ -1227,14 +1230,14 @@ enum SettingsModalInputEvent {
 }
 
 #[derive(Debug, Clone)]
-struct ManagePresetsModal {
-    active_preset: AgentPresetKind,
-    command: String,
-    command_cursor: usize,
-    error: Option<String>,
+pub(crate) struct ManagePresetsModal {
+    pub(crate) active_preset: AgentPresetKind,
+    pub(crate) command: String,
+    pub(crate) command_cursor: usize,
+    pub(crate) error: Option<String>,
 }
 
-enum PresetsModalInputEvent {
+pub(crate) enum PresetsModalInputEvent {
     SetActivePreset(AgentPresetKind),
     CycleActivePreset(bool),
     Edit(TextEditAction),
@@ -1243,55 +1246,55 @@ enum PresetsModalInputEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RepoPreset {
-    name: String,
-    icon: String,
-    command: String,
+pub(crate) struct RepoPreset {
+    pub(crate) name: String,
+    pub(crate) icon: String,
+    pub(crate) command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RepoPresetModalField {
+pub(crate) enum RepoPresetModalField {
     Icon,
     Name,
     Command,
 }
 
 impl RepoPresetModalField {
-    const ORDER: [Self; 3] = [Self::Icon, Self::Name, Self::Command];
+    pub(crate) const ORDER: [Self; 3] = [Self::Icon, Self::Name, Self::Command];
 
-    fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         let index = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
         Self::ORDER[(index + 1) % Self::ORDER.len()]
     }
 
-    fn prev(self) -> Self {
+    pub(crate) fn prev(self) -> Self {
         let index = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
         Self::ORDER[(index + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
 }
 
 #[derive(Debug, Clone)]
-struct ManageRepoPresetsModal {
-    editing_index: Option<usize>,
-    icon: String,
-    icon_cursor: usize,
-    name: String,
-    name_cursor: usize,
-    command: String,
-    command_cursor: usize,
-    active_tab: RepoPresetModalTab,
-    active_field: RepoPresetModalField,
-    error: Option<String>,
-    saving: bool,
+pub(crate) struct ManageRepoPresetsModal {
+    pub(crate) editing_index: Option<usize>,
+    pub(crate) icon: String,
+    pub(crate) icon_cursor: usize,
+    pub(crate) name: String,
+    pub(crate) name_cursor: usize,
+    pub(crate) command: String,
+    pub(crate) command_cursor: usize,
+    pub(crate) active_tab: RepoPresetModalTab,
+    pub(crate) active_field: RepoPresetModalField,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RepoPresetModalTab {
+pub(crate) enum RepoPresetModalTab {
     Edit,
     LocalPreset,
 }
 
-enum RepoPresetsModalInputEvent {
+pub(crate) enum RepoPresetsModalInputEvent {
     SetActiveTab(RepoPresetModalTab),
     SetActiveField(RepoPresetModalField),
     MoveActiveField(bool),
@@ -1300,7 +1303,7 @@ enum RepoPresetsModalInputEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitActionKind {
+pub(crate) enum GitActionKind {
     Commit,
     CommitPushCreatePullRequest,
     Push,
@@ -1308,40 +1311,40 @@ enum GitActionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorktreeQuickAction {
+pub(crate) enum WorktreeQuickAction {
     OpenFinder,
     CopyPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuickActionSubmenu {
+pub(crate) enum QuickActionSubmenu {
     Ide,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExternalLauncherKind {
+pub(crate) enum ExternalLauncherKind {
     Command(&'static str),
     MacApp(&'static str),
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ExternalLauncher {
-    label: &'static str,
-    icon: &'static str,
-    icon_color: u32,
-    kind: ExternalLauncherKind,
+pub(crate) struct ExternalLauncher {
+    pub(crate) label: &'static str,
+    pub(crate) icon: &'static str,
+    pub(crate) icon_color: u32,
+    pub(crate) kind: ExternalLauncherKind,
 }
 
 #[derive(Debug, Clone)]
-struct FileTreeEntry {
-    path: PathBuf,
-    name: String,
-    is_dir: bool,
-    depth: usize,
+pub(crate) struct FileTreeEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) is_dir: bool,
+    pub(crate) depth: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffLineKind {
+pub(crate) enum DiffLineKind {
     FileHeader,
     Context,
     Added,
@@ -1350,35 +1353,35 @@ enum DiffLineKind {
 }
 
 #[derive(Debug, Clone)]
-struct DiffLine {
-    left_line_number: Option<usize>,
-    right_line_number: Option<usize>,
-    left_text: String,
-    right_text: String,
-    kind: DiffLineKind,
+pub(crate) struct DiffLine {
+    pub(crate) left_line_number: Option<usize>,
+    pub(crate) right_line_number: Option<usize>,
+    pub(crate) left_text: String,
+    pub(crate) right_text: String,
+    pub(crate) kind: DiffLineKind,
 }
 
 #[derive(Debug, Clone)]
-struct DiffSession {
-    id: u64,
-    worktree_path: PathBuf,
-    title: String,
-    raw_lines: Arc<[DiffLine]>,
-    raw_file_row_indices: HashMap<PathBuf, usize>,
-    lines: Arc<[DiffLine]>,
-    file_row_indices: HashMap<PathBuf, usize>,
-    wrapped_columns: usize,
-    is_loading: bool,
+pub(crate) struct DiffSession {
+    pub(crate) id: u64,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) title: String,
+    pub(crate) raw_lines: Arc<[DiffLine]>,
+    pub(crate) raw_file_row_indices: HashMap<PathBuf, usize>,
+    pub(crate) lines: Arc<[DiffLine]>,
+    pub(crate) file_row_indices: HashMap<PathBuf, usize>,
+    pub(crate) wrapped_columns: usize,
+    pub(crate) is_loading: bool,
 }
 
 #[derive(Debug, Clone)]
-struct FileViewSpan {
-    text: String,
-    color: u32,
+pub(crate) struct FileViewSpan {
+    pub(crate) text: String,
+    pub(crate) color: u32,
 }
 
 #[derive(Debug, Clone)]
-enum FileViewContent {
+pub(crate) enum FileViewContent {
     Text {
         highlighted: Arc<[Vec<FileViewSpan>]>,
         raw_lines: Vec<String>,
@@ -1388,24 +1391,24 @@ enum FileViewContent {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FileViewCursor {
-    line: usize,
-    col: usize,
+pub(crate) struct FileViewCursor {
+    pub(crate) line: usize,
+    pub(crate) col: usize,
 }
 
 #[derive(Debug, Clone)]
-struct FileViewSession {
-    id: u64,
-    worktree_path: PathBuf,
-    file_path: PathBuf,
-    title: String,
-    content: FileViewContent,
-    is_loading: bool,
-    cursor: FileViewCursor,
+pub(crate) struct FileViewSession {
+    pub(crate) id: u64,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) file_path: PathBuf,
+    pub(crate) title: String,
+    pub(crate) content: FileViewContent,
+    pub(crate) is_loading: bool,
+    pub(crate) cursor: FileViewCursor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DraggedPaneDivider {
+pub(crate) enum DraggedPaneDivider {
     Left,
     Right,
 }
@@ -1417,117 +1420,117 @@ impl Render for DraggedPaneDivider {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TerminalGridPosition {
-    line: usize,
-    column: usize,
+pub(crate) struct TerminalGridPosition {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TerminalSelection {
-    session_id: u64,
-    anchor: TerminalGridPosition,
-    head: TerminalGridPosition,
+pub(crate) struct TerminalSelection {
+    pub(crate) session_id: u64,
+    pub(crate) anchor: TerminalGridPosition,
+    pub(crate) head: TerminalGridPosition,
 }
 
 #[derive(Debug, Clone)]
-struct OutpostSummary {
-    outpost_id: String,
-    repo_root: PathBuf,
-    remote_path: String,
-    label: String,
-    branch: String,
-    host_name: String,
-    hostname: String,
-    status: arbor_core::outpost::OutpostStatus,
+pub(crate) struct OutpostSummary {
+    pub(crate) outpost_id: String,
+    pub(crate) repo_root: PathBuf,
+    pub(crate) remote_path: String,
+    pub(crate) label: String,
+    pub(crate) branch: String,
+    pub(crate) host_name: String,
+    pub(crate) hostname: String,
+    pub(crate) status: arbor_core::outpost::OutpostStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreateModalTab {
+pub(crate) enum CreateModalTab {
     LocalWorktree,
     ReviewPullRequest,
     RemoteOutpost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreateOutpostField {
+pub(crate) enum CreateOutpostField {
     HostSelector,
     CloneUrl,
     OutpostName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreateWorktreeField {
+pub(crate) enum CreateWorktreeField {
     RepositoryPath,
     WorktreeName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreateReviewPrField {
+pub(crate) enum CreateReviewPrField {
     RepositoryPath,
     PullRequestReference,
     WorktreeName,
 }
 
 #[derive(Debug, Clone)]
-struct CreateModal {
-    instance_id: u64,
-    tab: CreateModalTab,
+pub(crate) struct CreateModal {
+    pub(crate) instance_id: u64,
+    pub(crate) tab: CreateModalTab,
     // Worktree fields
-    repository_path: String,
-    repository_path_cursor: usize,
-    worktree_name: String,
-    worktree_name_cursor: usize,
-    checkout_kind: CheckoutKind,
-    worktree_active_field: CreateWorktreeField,
+    pub(crate) repository_path: String,
+    pub(crate) repository_path_cursor: usize,
+    pub(crate) worktree_name: String,
+    pub(crate) worktree_name_cursor: usize,
+    pub(crate) checkout_kind: CheckoutKind,
+    pub(crate) worktree_active_field: CreateWorktreeField,
     // Review PR fields
-    pr_reference: String,
-    pr_reference_cursor: usize,
-    review_active_field: CreateReviewPrField,
+    pub(crate) pr_reference: String,
+    pub(crate) pr_reference_cursor: usize,
+    pub(crate) review_active_field: CreateReviewPrField,
     // Outpost fields
-    host_index: usize,
-    host_dropdown_open: bool,
-    clone_url: String,
-    clone_url_cursor: usize,
-    outpost_name: String,
-    outpost_name_cursor: usize,
-    outpost_active_field: CreateOutpostField,
-    daemon_managed_target: Option<ManagedDaemonTarget>,
-    managed_preview: Option<terminal_daemon_http::ManagedWorktreePreviewDto>,
-    managed_preview_loading: bool,
-    managed_preview_error: Option<String>,
-    managed_preview_generation: u64,
-    branch_preview_generation: u64,
-    local_branch_preview: String,
-    review_branch_preview: String,
-    outpost_branch_preview: String,
-    issue_context: Option<CreateModalIssueContext>,
+    pub(crate) host_index: usize,
+    pub(crate) host_dropdown_open: bool,
+    pub(crate) clone_url: String,
+    pub(crate) clone_url_cursor: usize,
+    pub(crate) outpost_name: String,
+    pub(crate) outpost_name_cursor: usize,
+    pub(crate) outpost_active_field: CreateOutpostField,
+    pub(crate) daemon_managed_target: Option<ManagedDaemonTarget>,
+    pub(crate) managed_preview: Option<terminal_daemon_http::ManagedWorktreePreviewDto>,
+    pub(crate) managed_preview_loading: bool,
+    pub(crate) managed_preview_error: Option<String>,
+    pub(crate) managed_preview_generation: u64,
+    pub(crate) branch_preview_generation: u64,
+    pub(crate) local_branch_preview: String,
+    pub(crate) review_branch_preview: String,
+    pub(crate) outpost_branch_preview: String,
+    pub(crate) issue_context: Option<CreateModalIssueContext>,
     // Shared
-    is_creating: bool,
-    creating_status: Option<String>,
-    error: Option<String>,
+    pub(crate) is_creating: bool,
+    pub(crate) creating_status: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct GitHubAuthModal {
-    user_code: String,
-    verification_url: String,
+pub(crate) struct GitHubAuthModal {
+    pub(crate) user_code: String,
+    pub(crate) verification_url: String,
 }
 
-enum ModalInputEvent {
+pub(crate) enum ModalInputEvent {
     SetActiveField(CreateWorktreeField),
     MoveActiveField,
     Edit(TextEditAction),
     ClearError,
 }
 
-enum ReviewPrModalInputEvent {
+pub(crate) enum ReviewPrModalInputEvent {
     SetActiveField(CreateReviewPrField),
     MoveActiveField,
     Edit(TextEditAction),
     ClearError,
 }
 
-enum OutpostModalInputEvent {
+pub(crate) enum OutpostModalInputEvent {
     SetActiveField(CreateOutpostField),
     MoveActiveField(bool),
     CycleHost(bool),
@@ -1538,27 +1541,27 @@ enum OutpostModalInputEvent {
 }
 
 #[derive(Clone)]
-struct ManageHostsModal {
-    adding: bool,
-    name: String,
-    name_cursor: usize,
-    hostname: String,
-    hostname_cursor: usize,
-    user: String,
-    user_cursor: usize,
-    active_field: ManageHostsField,
-    error: Option<String>,
-    saving: bool,
+pub(crate) struct ManageHostsModal {
+    pub(crate) adding: bool,
+    pub(crate) name: String,
+    pub(crate) name_cursor: usize,
+    pub(crate) hostname: String,
+    pub(crate) hostname_cursor: usize,
+    pub(crate) user: String,
+    pub(crate) user_cursor: usize,
+    pub(crate) active_field: ManageHostsField,
+    pub(crate) error: Option<String>,
+    pub(crate) saving: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ManageHostsField {
+pub(crate) enum ManageHostsField {
     Name,
     Hostname,
     User,
 }
 
-enum HostsModalInputEvent {
+pub(crate) enum HostsModalInputEvent {
     SetActiveField(ManageHostsField),
     MoveActiveField(bool),
     Edit(TextEditAction),
@@ -1566,68 +1569,68 @@ enum HostsModalInputEvent {
 }
 
 #[derive(Debug, Clone)]
-enum DeleteTarget {
+pub(crate) enum DeleteTarget {
     Worktree(usize),
     Outpost(usize),
     Repository(usize),
 }
 
 #[derive(Debug, Clone)]
-struct DeleteModal {
-    target: DeleteTarget,
-    label: String,
-    branch: String,
-    has_unpushed: Option<bool>,
-    delete_branch: bool,
-    is_deleting: bool,
-    error: Option<String>,
+pub(crate) struct DeleteModal {
+    pub(crate) target: DeleteTarget,
+    pub(crate) label: String,
+    pub(crate) branch: String,
+    pub(crate) has_unpushed: Option<bool>,
+    pub(crate) delete_branch: bool,
+    pub(crate) is_deleting: bool,
+    pub(crate) error: Option<String>,
 }
 
-struct DaemonAuthModal {
-    daemon_url: String,
-    token: String,
-    token_cursor: usize,
-    error: Option<String>,
+pub(crate) struct DaemonAuthModal {
+    pub(crate) daemon_url: String,
+    pub(crate) token: String,
+    pub(crate) token_cursor: usize,
+    pub(crate) error: Option<String>,
 }
 
-struct ConnectToHostModal {
-    address: String,
-    address_cursor: usize,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct CommitModal {
-    message: String,
-    message_cursor: usize,
-    generating: bool,
-    error: Option<String>,
+pub(crate) struct ConnectToHostModal {
+    pub(crate) address: String,
+    pub(crate) address_cursor: usize,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct CommandPaletteModal {
-    scope: CommandPaletteScope,
-    query: String,
-    query_cursor: usize,
-    selected_index: usize,
+pub(crate) struct CommitModal {
+    pub(crate) message: String,
+    pub(crate) message_cursor: usize,
+    pub(crate) generating: bool,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommandPaletteModal {
+    pub(crate) scope: CommandPaletteScope,
+    pub(crate) query: String,
+    pub(crate) query_cursor: usize,
+    pub(crate) selected_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandPaletteScope {
+pub(crate) enum CommandPaletteScope {
     Actions,
     Issues,
 }
 
 #[derive(Debug, Clone)]
-struct CommandPaletteItem {
-    title: String,
-    subtitle: String,
-    search_text: String,
-    action: CommandPaletteAction,
+pub(crate) struct CommandPaletteItem {
+    pub(crate) title: String,
+    pub(crate) subtitle: String,
+    pub(crate) search_text: String,
+    pub(crate) action: CommandPaletteAction,
 }
 
 #[derive(Debug, Clone)]
-enum CommandPaletteAction {
+pub(crate) enum CommandPaletteAction {
     OpenCreateWorktree,
     BrowseIssues,
     OpenReviewPullRequest,
@@ -1645,17 +1648,17 @@ enum CommandPaletteAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TaskTemplate {
-    name: String,
-    description: String,
-    prompt: String,
-    agent: Option<AgentPresetKind>,
-    path: PathBuf,
-    repo_root: PathBuf,
+pub(crate) struct TaskTemplate {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) prompt: String,
+    pub(crate) agent: Option<AgentPresetKind>,
+    pub(crate) path: PathBuf,
+    pub(crate) repo_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-enum TextEditAction {
+pub(crate) enum TextEditAction {
     Insert(String),
     Backspace,
     Delete,
@@ -1665,7 +1668,7 @@ enum TextEditAction {
     MoveEnd,
 }
 
-enum ConnectHostTarget {
+pub(crate) enum ConnectHostTarget {
     Http {
         url: String,
         auth_key: String,
@@ -1677,15 +1680,15 @@ enum ConnectHostTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SshDaemonTarget {
-    user: Option<String>,
-    host: String,
-    ssh_port: u16,
-    daemon_port: u16,
+pub(crate) struct SshDaemonTarget {
+    pub(crate) user: Option<String>,
+    pub(crate) host: String,
+    pub(crate) ssh_port: u16,
+    pub(crate) daemon_port: u16,
 }
 
 impl SshDaemonTarget {
-    fn ssh_destination(&self) -> String {
+    pub(crate) fn ssh_destination(&self) -> String {
         let host = if self.host.contains(':') {
             format!("[{}]", self.host)
         } else {
@@ -1699,13 +1702,13 @@ impl SshDaemonTarget {
     }
 }
 
-struct SshDaemonTunnel {
-    child: Child,
-    local_port: u16,
+pub(crate) struct SshDaemonTunnel {
+    pub(crate) child: Child,
+    pub(crate) local_port: u16,
 }
 
 impl SshDaemonTunnel {
-    fn start(target: &SshDaemonTarget) -> Result<Self, ConnectionError> {
+    pub(crate) fn start(target: &SshDaemonTarget) -> Result<Self, ConnectionError> {
         let local_port = reserve_local_loopback_port()?;
         let forward = format!("127.0.0.1:{local_port}:127.0.0.1:{}", target.daemon_port);
 
@@ -1742,11 +1745,11 @@ impl SshDaemonTunnel {
         Ok(Self { child, local_port })
     }
 
-    fn local_url(&self) -> String {
+    pub(crate) fn local_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.local_port)
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -1760,49 +1763,49 @@ impl Drop for SshDaemonTunnel {
     }
 }
 
-struct RepositoryContextMenu {
-    repository_index: usize,
-    position: gpui::Point<Pixels>,
+pub(crate) struct RepositoryContextMenu {
+    pub(crate) repository_index: usize,
+    pub(crate) position: gpui::Point<Pixels>,
 }
 
-struct WorktreeContextMenu {
-    worktree_index: usize,
-    position: gpui::Point<Pixels>,
+pub(crate) struct WorktreeContextMenu {
+    pub(crate) worktree_index: usize,
+    pub(crate) position: gpui::Point<Pixels>,
 }
 
-struct OutpostContextMenu {
-    outpost_index: usize,
-    position: gpui::Point<Pixels>,
+pub(crate) struct OutpostContextMenu {
+    pub(crate) outpost_index: usize,
+    pub(crate) position: gpui::Point<Pixels>,
 }
 
-struct WorktreeHoverPopover {
-    worktree_index: usize,
+pub(crate) struct WorktreeHoverPopover {
+    pub(crate) worktree_index: usize,
     /// Vertical position of the mouse when hover started (window coords).
-    mouse_y: Pixels,
-    checks_expanded: bool,
+    pub(crate) mouse_y: Pixels,
+    pub(crate) checks_expanded: bool,
 }
 
-struct CreatedWorktree {
-    worktree_name: String,
-    branch_name: String,
-    worktree_path: PathBuf,
-    checkout_kind: CheckoutKind,
-    source_repo_root: PathBuf,
-    review_pull_request_number: Option<u64>,
+pub(crate) struct CreatedWorktree {
+    pub(crate) worktree_name: String,
+    pub(crate) branch_name: String,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) checkout_kind: CheckoutKind,
+    pub(crate) source_repo_root: PathBuf,
+    pub(crate) review_pull_request_number: Option<u64>,
 }
 
 #[derive(Debug, Default)]
-struct PendingSave<T> {
-    pending: Option<T>,
-    in_flight: bool,
+pub(crate) struct PendingSave<T> {
+    pub(crate) pending: Option<T>,
+    pub(crate) in_flight: bool,
 }
 
 impl<T> PendingSave<T> {
-    fn queue(&mut self, value: T) {
+    pub(crate) fn queue(&mut self, value: T) {
         self.pending = Some(value);
     }
 
-    fn begin_next(&mut self) -> Option<T> {
+    pub(crate) fn begin_next(&mut self) -> Option<T> {
         if self.in_flight {
             return None;
         }
@@ -1812,235 +1815,236 @@ impl<T> PendingSave<T> {
         Some(value)
     }
 
-    fn finish(&mut self) {
+    pub(crate) fn finish(&mut self) {
         self.in_flight = false;
     }
 
-    fn has_work(&self) -> bool {
+    pub(crate) fn has_work(&self) -> bool {
         self.in_flight || self.pending.is_some()
     }
 }
 
-struct ArborWindow {
-    app_config_store: Arc<dyn app_config::AppConfigStore>,
-    repository_store: Arc<dyn repository_store::RepositoryStore>,
-    daemon_session_store: Arc<dyn daemon::DaemonSessionStore>,
-    terminal_daemon: Option<terminal_daemon_http::SharedTerminalDaemonClient>,
-    daemon_base_url: String,
-    ui_state_store: Arc<dyn ui_state_store::UiStateStore>,
-    issue_cache_store: Arc<dyn issue_cache_store::IssueCacheStore>,
-    github_auth_store: Arc<dyn github_auth_store::GithubAuthStore>,
-    github_service: Arc<dyn github_service::GitHubService>,
-    github_auth_state: github_auth_store::GithubAuthState,
-    github_auth_in_progress: bool,
-    github_auth_copy_feedback_active: bool,
-    github_auth_copy_feedback_generation: u64,
-    next_create_modal_instance_id: u64,
-    config_last_modified: Option<SystemTime>,
-    repositories: Vec<RepositorySummary>,
-    active_repository_index: Option<usize>,
-    repo_root: PathBuf,
-    github_repo_slug: Option<String>,
-    worktrees: Vec<WorktreeSummary>,
-    worktree_stats_loading: bool,
-    worktree_prs_loading: bool,
-    pending_startup_worktree_restore: bool,
-    loading_animation_active: bool,
-    loading_animation_frame: usize,
-    github_rate_limited_until: Option<SystemTime>,
-    expanded_pr_checks_worktree: Option<PathBuf>,
-    active_worktree_index: Option<usize>,
-    pending_local_worktree_selection: Option<PathBuf>,
-    worktree_selection_epoch: usize,
-    changed_files: Vec<ChangedFile>,
-    selected_changed_file: Option<PathBuf>,
-    terminals: Vec<TerminalSession>,
-    terminal_poll_tx: std::sync::mpsc::Sender<()>,
-    terminal_poll_rx: Option<std::sync::mpsc::Receiver<()>>,
-    diff_sessions: Vec<DiffSession>,
-    active_diff_session_id: Option<u64>,
-    file_view_sessions: Vec<FileViewSession>,
-    active_file_view_session_id: Option<u64>,
-    next_file_view_session_id: u64,
-    file_view_scroll_handle: UniformListScrollHandle,
-    file_view_editing: bool,
-    active_terminal_by_worktree: HashMap<PathBuf, u64>,
-    next_terminal_id: u64,
-    next_diff_session_id: u64,
-    active_backend_kind: TerminalBackendKind,
-    configured_embedded_shell: Option<String>,
-    theme_kind: ThemeKind,
-    left_pane_width: f32,
-    right_pane_width: f32,
-    terminal_focus: FocusHandle,
-    issue_details_focus: FocusHandle,
-    welcome_clone_focus: FocusHandle,
-    terminal_scroll_handle: ScrollHandle,
-    issue_details_scroll_handle: ScrollHandle,
-    issue_details_scrollbar_drag_offset: Option<Pixels>,
-    last_terminal_grid_size: Option<(u16, u16)>,
-    center_tabs_scroll_handle: ScrollHandle,
-    diff_scroll_handle: UniformListScrollHandle,
-    terminal_selection: Option<TerminalSelection>,
-    terminal_selection_drag_anchor: Option<TerminalGridPosition>,
-    create_modal: Option<CreateModal>,
-    issue_details_modal: Option<IssueDetailsModal>,
-    preferred_checkout_kind: CheckoutKind,
-    github_auth_modal: Option<GitHubAuthModal>,
-    delete_modal: Option<DeleteModal>,
-    commit_modal: Option<CommitModal>,
-    outposts: Vec<OutpostSummary>,
-    outpost_store: Arc<dyn arbor_core::outpost_store::OutpostStore>,
-    active_outpost_index: Option<usize>,
-    remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
-    ssh_connection_pool: Arc<arbor_ssh::connection::SshConnectionPool>,
-    ssh_daemon_tunnel: Option<SshDaemonTunnel>,
-    manage_hosts_modal: Option<ManageHostsModal>,
-    manage_presets_modal: Option<ManagePresetsModal>,
-    agent_presets: Vec<AgentPreset>,
-    active_preset_tab: Option<AgentPresetKind>,
-    repo_presets: Vec<RepoPreset>,
-    manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
-    show_about: bool,
-    show_theme_picker: bool,
-    theme_picker_selected_index: usize,
-    theme_picker_scroll_handle: ScrollHandle,
-    settings_modal: Option<SettingsModal>,
-    daemon_auth_modal: Option<DaemonAuthModal>,
+pub(crate) struct ArborWindow {
+    pub(crate) app_config_store: Arc<dyn app_config::AppConfigStore>,
+    pub(crate) repository_store: Arc<dyn repository_store::RepositoryStore>,
+    pub(crate) daemon_session_store: Arc<dyn daemon::DaemonSessionStore>,
+    pub(crate) terminal_daemon: Option<terminal_daemon_http::SharedTerminalDaemonClient>,
+    pub(crate) daemon_base_url: String,
+    pub(crate) ui_state_store: Arc<dyn ui_state_store::UiStateStore>,
+    pub(crate) issue_cache_store: Arc<dyn issue_cache_store::IssueCacheStore>,
+    pub(crate) github_auth_store: Arc<dyn github_auth_store::GithubAuthStore>,
+    pub(crate) github_service: Arc<dyn github_service::GitHubService>,
+    pub(crate) github_auth_state: github_auth_store::GithubAuthState,
+    pub(crate) github_auth_in_progress: bool,
+    pub(crate) github_auth_copy_feedback_active: bool,
+    pub(crate) github_auth_copy_feedback_generation: u64,
+    pub(crate) next_create_modal_instance_id: u64,
+    pub(crate) config_last_modified: Option<SystemTime>,
+    pub(crate) repositories: Vec<RepositorySummary>,
+    pub(crate) active_repository_index: Option<usize>,
+    pub(crate) repo_root: PathBuf,
+    pub(crate) github_repo_slug: Option<String>,
+    pub(crate) worktrees: Vec<WorktreeSummary>,
+    pub(crate) worktree_stats_loading: bool,
+    pub(crate) worktree_prs_loading: bool,
+    pub(crate) pending_startup_worktree_restore: bool,
+    pub(crate) loading_animation_active: bool,
+    pub(crate) loading_animation_frame: usize,
+    pub(crate) github_rate_limited_until: Option<SystemTime>,
+    pub(crate) expanded_pr_checks_worktree: Option<PathBuf>,
+    pub(crate) active_worktree_index: Option<usize>,
+    pub(crate) pending_local_worktree_selection: Option<PathBuf>,
+    pub(crate) worktree_selection_epoch: usize,
+    pub(crate) changed_files: Vec<ChangedFile>,
+    pub(crate) selected_changed_file: Option<PathBuf>,
+    pub(crate) terminals: Vec<TerminalSession>,
+    pub(crate) terminal_poll_tx: std::sync::mpsc::Sender<()>,
+    pub(crate) terminal_poll_rx: Option<std::sync::mpsc::Receiver<()>>,
+    pub(crate) diff_sessions: Vec<DiffSession>,
+    pub(crate) active_diff_session_id: Option<u64>,
+    pub(crate) file_view_sessions: Vec<FileViewSession>,
+    pub(crate) active_file_view_session_id: Option<u64>,
+    pub(crate) next_file_view_session_id: u64,
+    pub(crate) file_view_scroll_handle: UniformListScrollHandle,
+    pub(crate) file_view_editing: bool,
+    pub(crate) active_terminal_by_worktree: HashMap<PathBuf, u64>,
+    pub(crate) next_terminal_id: u64,
+    pub(crate) next_diff_session_id: u64,
+    pub(crate) active_backend_kind: TerminalBackendKind,
+    pub(crate) configured_embedded_shell: Option<String>,
+    pub(crate) theme_kind: ThemeKind,
+    pub(crate) left_pane_width: f32,
+    pub(crate) right_pane_width: f32,
+    pub(crate) terminal_focus: FocusHandle,
+    pub(crate) issue_details_focus: FocusHandle,
+    pub(crate) welcome_clone_focus: FocusHandle,
+    pub(crate) terminal_scroll_handle: ScrollHandle,
+    pub(crate) issue_details_scroll_handle: ScrollHandle,
+    pub(crate) issue_details_scrollbar_drag_offset: Option<Pixels>,
+    pub(crate) last_terminal_grid_size: Option<(u16, u16)>,
+    pub(crate) center_tabs_scroll_handle: ScrollHandle,
+    pub(crate) diff_scroll_handle: UniformListScrollHandle,
+    pub(crate) terminal_selection: Option<TerminalSelection>,
+    pub(crate) terminal_selection_drag_anchor: Option<TerminalGridPosition>,
+    pub(crate) create_modal: Option<CreateModal>,
+    pub(crate) issue_details_modal: Option<IssueDetailsModal>,
+    pub(crate) preferred_checkout_kind: CheckoutKind,
+    pub(crate) github_auth_modal: Option<GitHubAuthModal>,
+    pub(crate) delete_modal: Option<DeleteModal>,
+    pub(crate) commit_modal: Option<CommitModal>,
+    pub(crate) outposts: Vec<OutpostSummary>,
+    pub(crate) outpost_store: Arc<dyn arbor_core::outpost_store::OutpostStore>,
+    pub(crate) active_outpost_index: Option<usize>,
+    pub(crate) remote_hosts: Vec<arbor_core::outpost::RemoteHost>,
+    pub(crate) ssh_connection_pool: Arc<arbor_ssh::connection::SshConnectionPool>,
+    pub(crate) ssh_daemon_tunnel: Option<SshDaemonTunnel>,
+    pub(crate) manage_hosts_modal: Option<ManageHostsModal>,
+    pub(crate) manage_presets_modal: Option<ManagePresetsModal>,
+    pub(crate) agent_presets: Vec<AgentPreset>,
+    pub(crate) active_preset_tab: Option<AgentPresetKind>,
+    pub(crate) repo_presets: Vec<RepoPreset>,
+    pub(crate) manage_repo_presets_modal: Option<ManageRepoPresetsModal>,
+    pub(crate) show_about: bool,
+    pub(crate) show_theme_picker: bool,
+    pub(crate) theme_picker_selected_index: usize,
+    pub(crate) theme_picker_scroll_handle: ScrollHandle,
+    pub(crate) settings_modal: Option<SettingsModal>,
+    pub(crate) daemon_auth_modal: Option<DaemonAuthModal>,
     /// When set, a successful auth submission should retry fetching for this remote daemon index.
-    pending_remote_daemon_auth: Option<usize>,
-    pending_remote_create_repo_root: Option<String>,
-    start_daemon_modal: bool,
-    connect_to_host_modal: Option<ConnectToHostModal>,
-    command_palette_modal: Option<CommandPaletteModal>,
-    command_palette_scroll_handle: ScrollHandle,
-    command_palette_recent_actions: Vec<String>,
-    command_palette_task_templates: Vec<TaskTemplate>,
-    compact_sidebar: bool,
-    execution_mode: ExecutionMode,
-    connection_history: Vec<connection_history::ConnectionHistoryEntry>,
-    connection_history_save: PendingSave<Vec<connection_history::ConnectionHistoryEntry>>,
-    repository_entries_save: PendingSave<Vec<repository_store::StoredRepositoryEntry>>,
-    daemon_auth_tokens: HashMap<String, String>,
-    daemon_auth_tokens_save: PendingSave<HashMap<String, String>>,
-    github_auth_state_save: PendingSave<github_auth_store::GithubAuthState>,
-    pending_app_config_save_count: usize,
-    connected_daemon_label: Option<String>,
-    daemon_connect_epoch: u64,
-    pending_diff_scroll_to_file: Option<PathBuf>,
-    focus_terminal_on_next_render: bool,
-    git_action_in_flight: Option<GitActionKind>,
-    top_bar_quick_actions_open: bool,
-    top_bar_quick_actions_submenu: Option<QuickActionSubmenu>,
-    ide_launchers: Vec<ExternalLauncher>,
-    last_persisted_ui_state: ui_state_store::UiState,
-    pending_ui_state_save: Option<ui_state_store::UiState>,
-    ui_state_save_in_flight: Option<ui_state_store::UiState>,
-    last_persisted_issue_cache: issue_cache_store::IssueCache,
-    pending_issue_cache_save: Option<issue_cache_store::IssueCache>,
-    issue_cache_save_in_flight: Option<issue_cache_store::IssueCache>,
-    daemon_session_store_save: PendingSave<Vec<DaemonSessionRecord>>,
-    last_ui_state_error: Option<String>,
-    last_issue_cache_error: Option<String>,
-    notification_service: Box<dyn notifications::NotificationService>,
-    notifications_enabled: bool,
-    agent_activity_sessions: HashMap<String, AgentActivitySessionRecord>,
-    last_agent_finished_notifications: HashMap<PathBuf, u64>,
-    auto_checkpoint_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
-    agent_activity_epochs: Arc<Mutex<HashMap<PathBuf, u64>>>,
-    window_is_active: bool,
-    notice: Option<String>,
-    theme_toast: Option<String>,
-    theme_toast_generation: u64,
-    right_pane_tab: RightPaneTab,
-    right_pane_search: String,
-    right_pane_search_cursor: usize,
-    right_pane_search_active: bool,
-    sidebar_order: HashMap<String, Vec<SidebarItemId>>,
-    repository_sidebar_tabs: HashMap<String, RepositorySidebarTab>,
-    issue_lists: HashMap<IssueTarget, IssueListState>,
-    worktree_notes_lines: Vec<String>,
-    worktree_notes_cursor: FileViewCursor,
-    worktree_notes_path: Option<PathBuf>,
-    worktree_notes_active: bool,
-    worktree_notes_error: Option<String>,
-    worktree_notes_save_pending: bool,
-    worktree_notes_edit_generation: u64,
-    _worktree_notes_save_task: Option<gpui::Task<()>>,
-    file_tree_entries: Vec<FileTreeEntry>,
-    file_tree_loading: bool,
-    expanded_dirs: HashSet<PathBuf>,
-    selected_file_tree_entry: Option<PathBuf>,
-    left_pane_visible: bool,
-    collapsed_repositories: HashSet<usize>,
-    repository_context_menu: Option<RepositoryContextMenu>,
-    worktree_context_menu: Option<WorktreeContextMenu>,
-    worktree_hover_popover: Option<WorktreeHoverPopover>,
-    _hover_show_task: Option<gpui::Task<()>>,
-    _hover_dismiss_task: Option<gpui::Task<()>>,
-    _worktree_refresh_task: Option<gpui::Task<()>>,
-    _changed_files_refresh_task: Option<gpui::Task<()>>,
-    _config_refresh_task: Option<gpui::Task<()>>,
-    _repo_metadata_refresh_task: Option<gpui::Task<()>>,
-    _launcher_refresh_task: Option<gpui::Task<()>>,
-    _connection_history_save_task: Option<gpui::Task<()>>,
-    _repository_entries_save_task: Option<gpui::Task<()>>,
-    _daemon_auth_tokens_save_task: Option<gpui::Task<()>>,
-    _github_auth_state_save_task: Option<gpui::Task<()>>,
-    _ui_state_save_task: Option<gpui::Task<()>>,
-    _issue_cache_save_task: Option<gpui::Task<()>>,
-    _daemon_session_store_save_task: Option<gpui::Task<()>>,
-    _create_modal_preview_task: Option<gpui::Task<()>>,
-    _file_tree_refresh_task: Option<gpui::Task<()>>,
-    worktree_refresh_epoch: u64,
-    config_refresh_epoch: u64,
-    repo_metadata_refresh_epoch: u64,
-    launcher_refresh_epoch: u64,
-    last_mouse_position: gpui::Point<Pixels>,
-    outpost_context_menu: Option<OutpostContextMenu>,
-    discovered_daemons: Vec<mdns_browser::DiscoveredDaemon>,
-    mdns_browser: Option<Box<dyn mdns_browser::MdnsDiscovery>>,
-    active_discovered_daemon: Option<usize>,
-    worktree_nav_back: Vec<usize>,
-    worktree_nav_forward: Vec<usize>,
-    log_buffer: log_layer::LogBuffer,
-    log_entries: Vec<log_layer::LogEntry>,
-    log_generation: u64,
-    log_scroll_handle: ScrollHandle,
-    log_auto_scroll: bool,
-    logs_tab_open: bool,
-    logs_tab_active: bool,
-    quit_overlay_until: Option<Instant>,
-    quit_after_persistence_flush: bool,
-    ime_marked_text: Option<String>,
-    welcome_clone_url: String,
-    welcome_clone_url_cursor: usize,
-    welcome_clone_url_active: bool,
-    welcome_cloning: bool,
-    welcome_clone_error: Option<String>,
+    pub(crate) pending_remote_daemon_auth: Option<usize>,
+    pub(crate) pending_remote_create_repo_root: Option<String>,
+    pub(crate) start_daemon_modal: bool,
+    pub(crate) connect_to_host_modal: Option<ConnectToHostModal>,
+    pub(crate) command_palette_modal: Option<CommandPaletteModal>,
+    pub(crate) command_palette_scroll_handle: ScrollHandle,
+    pub(crate) command_palette_recent_actions: Vec<String>,
+    pub(crate) command_palette_task_templates: Vec<TaskTemplate>,
+    pub(crate) compact_sidebar: bool,
+    pub(crate) execution_mode: ExecutionMode,
+    pub(crate) connection_history: Vec<connection_history::ConnectionHistoryEntry>,
+    pub(crate) connection_history_save:
+        PendingSave<Vec<connection_history::ConnectionHistoryEntry>>,
+    pub(crate) repository_entries_save: PendingSave<Vec<repository_store::StoredRepositoryEntry>>,
+    pub(crate) daemon_auth_tokens: HashMap<String, String>,
+    pub(crate) daemon_auth_tokens_save: PendingSave<HashMap<String, String>>,
+    pub(crate) github_auth_state_save: PendingSave<github_auth_store::GithubAuthState>,
+    pub(crate) pending_app_config_save_count: usize,
+    pub(crate) connected_daemon_label: Option<String>,
+    pub(crate) daemon_connect_epoch: u64,
+    pub(crate) pending_diff_scroll_to_file: Option<PathBuf>,
+    pub(crate) focus_terminal_on_next_render: bool,
+    pub(crate) git_action_in_flight: Option<GitActionKind>,
+    pub(crate) top_bar_quick_actions_open: bool,
+    pub(crate) top_bar_quick_actions_submenu: Option<QuickActionSubmenu>,
+    pub(crate) ide_launchers: Vec<ExternalLauncher>,
+    pub(crate) last_persisted_ui_state: ui_state_store::UiState,
+    pub(crate) pending_ui_state_save: Option<ui_state_store::UiState>,
+    pub(crate) ui_state_save_in_flight: Option<ui_state_store::UiState>,
+    pub(crate) last_persisted_issue_cache: issue_cache_store::IssueCache,
+    pub(crate) pending_issue_cache_save: Option<issue_cache_store::IssueCache>,
+    pub(crate) issue_cache_save_in_flight: Option<issue_cache_store::IssueCache>,
+    pub(crate) daemon_session_store_save: PendingSave<Vec<DaemonSessionRecord>>,
+    pub(crate) last_ui_state_error: Option<String>,
+    pub(crate) last_issue_cache_error: Option<String>,
+    pub(crate) notification_service: Box<dyn notifications::NotificationService>,
+    pub(crate) notifications_enabled: bool,
+    pub(crate) agent_activity_sessions: HashMap<String, AgentActivitySessionRecord>,
+    pub(crate) last_agent_finished_notifications: HashMap<PathBuf, u64>,
+    pub(crate) auto_checkpoint_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    pub(crate) agent_activity_epochs: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    pub(crate) window_is_active: bool,
+    pub(crate) notice: Option<String>,
+    pub(crate) theme_toast: Option<String>,
+    pub(crate) theme_toast_generation: u64,
+    pub(crate) right_pane_tab: RightPaneTab,
+    pub(crate) right_pane_search: String,
+    pub(crate) right_pane_search_cursor: usize,
+    pub(crate) right_pane_search_active: bool,
+    pub(crate) sidebar_order: HashMap<String, Vec<SidebarItemId>>,
+    pub(crate) repository_sidebar_tabs: HashMap<String, RepositorySidebarTab>,
+    pub(crate) issue_lists: HashMap<IssueTarget, IssueListState>,
+    pub(crate) worktree_notes_lines: Vec<String>,
+    pub(crate) worktree_notes_cursor: FileViewCursor,
+    pub(crate) worktree_notes_path: Option<PathBuf>,
+    pub(crate) worktree_notes_active: bool,
+    pub(crate) worktree_notes_error: Option<String>,
+    pub(crate) worktree_notes_save_pending: bool,
+    pub(crate) worktree_notes_edit_generation: u64,
+    pub(crate) _worktree_notes_save_task: Option<gpui::Task<()>>,
+    pub(crate) file_tree_entries: Vec<FileTreeEntry>,
+    pub(crate) file_tree_loading: bool,
+    pub(crate) expanded_dirs: HashSet<PathBuf>,
+    pub(crate) selected_file_tree_entry: Option<PathBuf>,
+    pub(crate) left_pane_visible: bool,
+    pub(crate) collapsed_repositories: HashSet<usize>,
+    pub(crate) repository_context_menu: Option<RepositoryContextMenu>,
+    pub(crate) worktree_context_menu: Option<WorktreeContextMenu>,
+    pub(crate) worktree_hover_popover: Option<WorktreeHoverPopover>,
+    pub(crate) _hover_show_task: Option<gpui::Task<()>>,
+    pub(crate) _hover_dismiss_task: Option<gpui::Task<()>>,
+    pub(crate) _worktree_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) _changed_files_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) _config_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) _repo_metadata_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) _launcher_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) _connection_history_save_task: Option<gpui::Task<()>>,
+    pub(crate) _repository_entries_save_task: Option<gpui::Task<()>>,
+    pub(crate) _daemon_auth_tokens_save_task: Option<gpui::Task<()>>,
+    pub(crate) _github_auth_state_save_task: Option<gpui::Task<()>>,
+    pub(crate) _ui_state_save_task: Option<gpui::Task<()>>,
+    pub(crate) _issue_cache_save_task: Option<gpui::Task<()>>,
+    pub(crate) _daemon_session_store_save_task: Option<gpui::Task<()>>,
+    pub(crate) _create_modal_preview_task: Option<gpui::Task<()>>,
+    pub(crate) _file_tree_refresh_task: Option<gpui::Task<()>>,
+    pub(crate) worktree_refresh_epoch: u64,
+    pub(crate) config_refresh_epoch: u64,
+    pub(crate) repo_metadata_refresh_epoch: u64,
+    pub(crate) launcher_refresh_epoch: u64,
+    pub(crate) last_mouse_position: gpui::Point<Pixels>,
+    pub(crate) outpost_context_menu: Option<OutpostContextMenu>,
+    pub(crate) discovered_daemons: Vec<mdns_browser::DiscoveredDaemon>,
+    pub(crate) mdns_browser: Option<Box<dyn mdns_browser::MdnsDiscovery>>,
+    pub(crate) active_discovered_daemon: Option<usize>,
+    pub(crate) worktree_nav_back: Vec<usize>,
+    pub(crate) worktree_nav_forward: Vec<usize>,
+    pub(crate) log_buffer: log_layer::LogBuffer,
+    pub(crate) log_entries: Vec<log_layer::LogEntry>,
+    pub(crate) log_generation: u64,
+    pub(crate) log_scroll_handle: ScrollHandle,
+    pub(crate) log_auto_scroll: bool,
+    pub(crate) logs_tab_open: bool,
+    pub(crate) logs_tab_active: bool,
+    pub(crate) quit_overlay_until: Option<Instant>,
+    pub(crate) quit_after_persistence_flush: bool,
+    pub(crate) ime_marked_text: Option<String>,
+    pub(crate) welcome_clone_url: String,
+    pub(crate) welcome_clone_url_cursor: usize,
+    pub(crate) welcome_clone_url_active: bool,
+    pub(crate) welcome_cloning: bool,
+    pub(crate) welcome_clone_error: Option<String>,
     /// Remote daemons that have been expanded in the sidebar.
-    remote_daemon_states: HashMap<usize, RemoteDaemonState>,
+    pub(crate) remote_daemon_states: HashMap<usize, RemoteDaemonState>,
     /// Currently selected remote worktree (if any). The window stays connected
     /// to the local daemon; only terminal sessions use the remote client.
-    active_remote_worktree: Option<ActiveRemoteWorktree>,
+    pub(crate) active_remote_worktree: Option<ActiveRemoteWorktree>,
 }
 
 #[derive(Debug, Clone)]
-struct RemoteDaemonState {
-    client: terminal_daemon_http::SharedTerminalDaemonClient,
-    hostname: String,
-    repositories: Vec<terminal_daemon_http::RemoteRepositoryDto>,
-    worktrees: Vec<terminal_daemon_http::RemoteWorktreeDto>,
-    loading: bool,
-    expanded: bool,
-    error: Option<String>,
+pub(crate) struct RemoteDaemonState {
+    pub(crate) client: terminal_daemon_http::SharedTerminalDaemonClient,
+    pub(crate) hostname: String,
+    pub(crate) repositories: Vec<terminal_daemon_http::RemoteRepositoryDto>,
+    pub(crate) worktrees: Vec<terminal_daemon_http::RemoteWorktreeDto>,
+    pub(crate) loading: bool,
+    pub(crate) expanded: bool,
+    pub(crate) error: Option<String>,
 }
 
 /// Tracks which remote worktree is currently selected in the sidebar,
 /// without switching the window's primary daemon connection.
 #[derive(Debug, Clone)]
-struct ActiveRemoteWorktree {
-    daemon_index: usize,
-    worktree_path: PathBuf,
-    repo_root: String,
+pub(crate) struct ActiveRemoteWorktree {
+    pub(crate) daemon_index: usize,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) repo_root: String,
 }

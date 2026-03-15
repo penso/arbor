@@ -1,11 +1,13 @@
+use super::*;
+
 impl ArborWindow {
-    fn persist_connection_history(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn persist_connection_history(&mut self, cx: &mut Context<Self>) {
         self.connection_history_save
             .queue(self.connection_history.clone());
         self.start_pending_connection_history_save(cx);
     }
 
-    fn record_connection_history_entry(
+    pub(crate) fn record_connection_history_entry(
         &mut self,
         address: &str,
         label: Option<&str>,
@@ -16,19 +18,19 @@ impl ArborWindow {
         self.persist_connection_history(cx);
     }
 
-    fn persist_daemon_auth_tokens(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn persist_daemon_auth_tokens(&mut self, cx: &mut Context<Self>) {
         self.daemon_auth_tokens_save
             .queue(self.daemon_auth_tokens.clone());
         self.start_pending_daemon_auth_tokens_save(cx);
     }
 
-    fn begin_daemon_connect_attempt(&mut self) -> u64 {
+    pub(crate) fn begin_daemon_connect_attempt(&mut self) -> u64 {
         let connect_epoch = self.daemon_connect_epoch.wrapping_add(1);
         self.daemon_connect_epoch = connect_epoch;
         connect_epoch
     }
 
-    fn start_pending_connection_history_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_connection_history_save(&mut self, cx: &mut Context<Self>) {
         let Some(history) = self.connection_history_save.begin_next() else {
             self.maybe_finish_quit_after_persistence_flush(cx);
             return;
@@ -51,7 +53,7 @@ impl ArborWindow {
         }));
     }
 
-    fn start_pending_daemon_auth_tokens_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_pending_daemon_auth_tokens_save(&mut self, cx: &mut Context<Self>) {
         let Some(tokens) = self.daemon_auth_tokens_save.begin_next() else {
             self.maybe_finish_quit_after_persistence_flush(cx);
             return;
@@ -74,7 +76,7 @@ impl ArborWindow {
         }));
     }
 
-    fn open_remote_create_modal(
+    pub(crate) fn open_remote_create_modal(
         &mut self,
         daemon_url: String,
         hostname: String,
@@ -100,7 +102,11 @@ impl ArborWindow {
         );
     }
 
-    fn open_create_modal_for_connected_repo(&mut self, repo_root: &str, cx: &mut Context<Self>) {
+    pub(crate) fn open_create_modal_for_connected_repo(
+        &mut self,
+        repo_root: &str,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(repo_index) = self
             .repositories
             .iter()
@@ -114,7 +120,7 @@ impl ArborWindow {
         }
     }
 
-    fn select_remote_worktree(
+    pub(crate) fn select_remote_worktree(
         &mut self,
         daemon_index: usize,
         worktree_path: String,
@@ -127,7 +133,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn activate_remote_worktree(
+    pub(crate) fn activate_remote_worktree(
         &mut self,
         daemon_index: usize,
         worktree_path: String,
@@ -235,13 +241,8 @@ impl ArborWindow {
                         .iter_mut()
                         .find(|session| session.id == session_id)
                     else {
-                        if let Some((client, daemon_session)) = orphaned_daemon_session_for_update
-                        {
-                            schedule_orphaned_daemon_session_cleanup(
-                                cx,
-                                client,
-                                daemon_session,
-                            );
+                        if let Some((client, daemon_session)) = orphaned_daemon_session_for_update {
+                            schedule_orphaned_daemon_session_cleanup(cx, client, daemon_session);
                         }
                         return;
                     };
@@ -256,8 +257,7 @@ impl ArborWindow {
                                 .unwrap_or_else(|| session.title.clone());
                             session.last_command = daemon_session.last_command.clone();
                             session.command = daemon_session.shell.clone();
-                            session.output =
-                                daemon_session.output_tail.clone().unwrap_or_default();
+                            session.output = daemon_session.output_tail.clone().unwrap_or_default();
                             session.state = terminal_state_from_daemon_record(&daemon_session);
                             session.exit_code = daemon_session.exit_code;
                             session.updated_at_unix_ms = daemon_session.updated_at_unix_ms;
@@ -272,12 +272,9 @@ impl ArborWindow {
                                 Some(poll_tx.clone()),
                             ));
                             session.is_initializing = false;
-                            if let Err(error) =
-                                this.flush_queued_input_for_terminal(session_id)
-                            {
-                                this.notice = Some(format!(
-                                    "failed to write queued terminal input: {error}"
-                                ));
+                            if let Err(error) = this.flush_queued_input_for_terminal(session_id) {
+                                this.notice =
+                                    Some(format!("failed to write queued terminal input: {error}"));
                             }
                         },
                         Err(error) => {
@@ -302,7 +299,7 @@ impl ArborWindow {
         }
     }
 
-    fn toggle_discovered_daemon(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_discovered_daemon(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(state) = self.remote_daemon_states.get(&index) {
             if state.expanded {
                 if let Some(state) = self.remote_daemon_states.get_mut(&index) {
@@ -328,12 +325,12 @@ impl ArborWindow {
 
         let client: terminal_daemon_http::SharedTerminalDaemonClient =
             match terminal_daemon_http::HttpTerminalDaemon::new(&url) {
-            Ok(client) => Arc::new(client),
-            Err(error) => {
-                tracing::error!(%error, %url, "failed to create HTTP client for LAN daemon");
-                return;
-            },
-        };
+                Ok(client) => Arc::new(client),
+                Err(error) => {
+                    tracing::error!(%error, %url, "failed to create HTTP client for LAN daemon");
+                    return;
+                },
+            };
 
         if let Some(token) = self.daemon_auth_tokens.get(&url) {
             client.set_auth_token(Some(token.clone()));
@@ -360,9 +357,7 @@ impl ArborWindow {
                     let repositories = client_clone.list_repositories();
                     let worktrees = client_clone.list_worktrees();
                     match (repositories, worktrees) {
-                        (Ok(repositories), Ok(worktrees)) => {
-                            (repositories, worktrees, None, false)
-                        },
+                        (Ok(repositories), Ok(worktrees)) => (repositories, worktrees, None, false),
                         (Err(error), _) | (_, Err(error)) => {
                             let needs_auth = error.is_unauthorized();
                             tracing::warn!(%error, needs_auth, "failed to fetch from LAN daemon");
@@ -396,7 +391,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn connect_to_ssh_daemon(
+    pub(crate) fn connect_to_ssh_daemon(
         &mut self,
         target: SshDaemonTarget,
         label: Option<String>,
@@ -427,17 +422,17 @@ impl ArborWindow {
 
                     match tunnel_result {
                         Ok(tunnel) => {
-                        let local_url = tunnel.local_url();
-                        let local_port = tunnel.local_port;
-                        tracing::info!(
-                            remote = %ssh_destination,
-                            ssh_port = ssh_port,
-                            daemon_port = daemon_port,
-                            local_url = %local_url,
-                            "connecting to daemon through ssh tunnel"
-                        );
-                        this.ssh_daemon_tunnel = Some(tunnel);
-                        Some((local_url, local_port))
+                            let local_url = tunnel.local_url();
+                            let local_port = tunnel.local_port;
+                            tracing::info!(
+                                remote = %ssh_destination,
+                                ssh_port = ssh_port,
+                                daemon_port = daemon_port,
+                                local_url = %local_url,
+                                "connecting to daemon through ssh tunnel"
+                            );
+                            this.ssh_daemon_tunnel = Some(tunnel);
+                            Some((local_url, local_port))
                         },
                         Err(error) => {
                             this.notice = Some(error.to_string());
@@ -497,7 +492,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn connect_to_daemon_endpoint(
+    pub(crate) fn connect_to_daemon_endpoint(
         &mut self,
         url: &str,
         label: Option<String>,
@@ -598,7 +593,7 @@ impl ArborWindow {
         .detach();
     }
 
-    fn try_start_and_connect_daemon(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn try_start_and_connect_daemon(&mut self, cx: &mut Context<Self>) {
         let daemon_base_url = self.daemon_base_url.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -642,11 +637,11 @@ impl ArborWindow {
         .detach();
     }
 
-    fn stop_active_ssh_daemon_tunnel(&mut self) {
+    pub(crate) fn stop_active_ssh_daemon_tunnel(&mut self) {
         let _ = self.ssh_daemon_tunnel.take();
     }
 
-    fn submit_daemon_auth(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_daemon_auth(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.daemon_auth_modal.take() else {
             return;
         };
@@ -720,7 +715,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn submit_connect_to_host(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_connect_to_host(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.connect_to_host_modal.take() else {
             return;
         };
@@ -769,7 +764,7 @@ impl ArborWindow {
         }
     }
 
-    fn render_daemon_auth_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_daemon_auth_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.daemon_auth_modal.as_ref() else {
             return div();
         };
@@ -910,7 +905,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_start_daemon_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_start_daemon_modal(&mut self, cx: &mut Context<Self>) -> Div {
         if !self.start_daemon_modal {
             return div();
         }
@@ -994,7 +989,7 @@ impl ArborWindow {
             )
     }
 
-    fn render_connect_to_host_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_connect_to_host_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.connect_to_host_modal.as_ref() else {
             return div();
         };
@@ -1160,8 +1155,9 @@ impl ArborWindow {
                                                             &this.connection_history,
                                                             &remove_addr,
                                                         );
-                                                    this.daemon_auth_tokens
-                                                        .retain(|key, _| !key.contains(&*remove_addr));
+                                                    this.daemon_auth_tokens.retain(|key, _| {
+                                                        !key.contains(&*remove_addr)
+                                                    });
                                                     this.persist_connection_history(cx);
                                                     this.persist_daemon_auth_tokens(cx);
                                                     cx.stop_propagation();
@@ -1333,10 +1329,12 @@ impl ArborWindow {
                                     ActionButtonStyle::Secondary,
                                     true,
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.connect_to_host_modal = None;
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.connect_to_host_modal = None;
+                                        cx.notify();
+                                    },
+                                )),
                             )
                             .child(
                                 action_button(

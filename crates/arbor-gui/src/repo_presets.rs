@@ -1,5 +1,7 @@
+use super::*;
+
 impl ArborWindow {
-    fn open_manage_repo_presets_modal(
+    pub(crate) fn open_manage_repo_presets_modal(
         &mut self,
         editing_index: Option<usize>,
         cx: &mut Context<Self>,
@@ -34,12 +36,12 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn close_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
         self.manage_repo_presets_modal = None;
         cx.notify();
     }
 
-    fn update_manage_repo_presets_modal_input(
+    pub(crate) fn update_manage_repo_presets_modal_input(
         &mut self,
         input: RepoPresetsModalInputEvent,
         cx: &mut Context<Self>,
@@ -110,7 +112,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn submit_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.manage_repo_presets_modal.clone() else {
             return;
         };
@@ -202,7 +204,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn delete_repo_preset(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn delete_repo_preset(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.manage_repo_presets_modal.as_ref() else {
             return;
         };
@@ -223,9 +225,9 @@ impl ArborWindow {
         self.begin_background_config_save();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    store.remove_repo_preset(&save_dir, &name_for_delete)
-                })
+                .background_spawn(
+                    async move { store.remove_repo_preset(&save_dir, &name_for_delete) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match result {
@@ -252,7 +254,7 @@ impl ArborWindow {
         cx.notify();
     }
 
-    fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_manage_repo_presets_modal(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(modal) = self.manage_repo_presets_modal.clone() else {
             return div();
         };
@@ -505,11 +507,14 @@ impl ArborWindow {
                                         ActionButtonStyle::Secondary,
                                         !modal.saving,
                                     )
-                                    .when(!modal.saving, |this| {
-                                        this.on_click(cx.listener(|this, _, _, cx| {
-                                            this.open_manage_repo_presets_modal(None, cx);
-                                        }))
-                                    }),
+                                    .when(
+                                        !modal.saving,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                this.open_manage_repo_presets_modal(None, cx);
+                                            }))
+                                        },
+                                    ),
                                 )
                                 .child(
                                     action_button(
@@ -519,11 +524,14 @@ impl ArborWindow {
                                         ActionButtonStyle::Secondary,
                                         !modal.saving,
                                     )
-                                    .when(!modal.saving, |this| {
-                                        this.on_click(cx.listener(|this, _, _, cx| {
-                                            this.delete_repo_preset(cx);
-                                        }))
-                                    }),
+                                    .when(
+                                        !modal.saving,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                this.delete_repo_preset(cx);
+                                            }))
+                                        },
+                                    ),
                                 )
                             })
                             .child(
@@ -549,11 +557,14 @@ impl ArborWindow {
                                         ActionButtonStyle::Primary,
                                         !save_disabled && !modal.saving,
                                     )
-                                    .when(!save_disabled && !modal.saving, |this| {
-                                        this.on_click(cx.listener(|this, _, _, cx| {
-                                            this.submit_manage_repo_presets_modal(cx);
-                                        }))
-                                    }),
+                                    .when(
+                                        !save_disabled && !modal.saving,
+                                        |this| {
+                                            this.on_click(cx.listener(|this, _, _, cx| {
+                                                this.submit_manage_repo_presets_modal(cx);
+                                            }))
+                                        },
+                                    ),
                                 )
                             }),
                     ),
@@ -561,7 +572,10 @@ impl ArborWindow {
     }
 }
 
-fn load_repo_presets(store: &dyn app_config::AppConfigStore, repo_root: &Path) -> Vec<RepoPreset> {
+pub(crate) fn load_repo_presets(
+    store: &dyn app_config::AppConfigStore,
+    repo_root: &Path,
+) -> Vec<RepoPreset> {
     let Some(config) = store.load_repo_config(repo_root) else {
         return Vec::new();
     };
