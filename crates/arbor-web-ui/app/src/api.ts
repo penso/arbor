@@ -19,6 +19,8 @@ import type {
   ThemePalette,
   WsServerEvent,
   WsClientEvent,
+  AgentChatSession,
+  ChatMessage,
 } from "./types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -620,4 +622,75 @@ export function applyTheme(theme: ThemeResponse): void {
     ? p.sidebar_bg
     : `color-mix(in srgb, ${p.app_bg} 94%, transparent)`);
 
+}
+
+// ── Agent Chat API ───────────────────────────────────────────────────
+
+export async function createAgentChat(
+  workspacePath: string,
+  agentKind: string,
+  initialPrompt?: string,
+): Promise<{ sessionId: string }> {
+  const body: Record<string, string> = { workspace_path: workspacePath, agent_kind: agentKind };
+  if (initialPrompt !== undefined) {
+    body.initial_prompt = initialPrompt;
+  }
+  const response = await request("/api/v1/agent/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data: unknown = await response.json();
+  if (!isRecord(data) || typeof data.session_id !== "string") {
+    throw new Error("invalid create agent chat response");
+  }
+  return { sessionId: data.session_id };
+}
+
+export async function fetchAgentChats(): Promise<AgentChatSession[]> {
+  const raw = await fetchJson("/api/v1/agent/chat");
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isRecord).map((item) => ({
+    id: String(item.id ?? ""),
+    agent_kind: String(item.agent_kind ?? ""),
+    workspace_path: String(item.workspace_path ?? ""),
+    status: String(item.status ?? "idle") as AgentChatSession["status"],
+    input_tokens: Number(item.input_tokens ?? 0),
+    output_tokens: Number(item.output_tokens ?? 0),
+  }));
+}
+
+export async function sendAgentMessage(sessionId: string, message: string): Promise<void> {
+  await request(`/api/v1/agent/chat/${encodeURIComponent(sessionId)}/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+}
+
+export async function cancelAgentChat(sessionId: string): Promise<void> {
+  await request(`/api/v1/agent/chat/${encodeURIComponent(sessionId)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function killAgentChat(sessionId: string): Promise<void> {
+  await request(`/api/v1/agent/chat/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchAgentChatHistory(sessionId: string): Promise<ChatMessage[]> {
+  const raw = await fetchJson(`/api/v1/agent/chat/${encodeURIComponent(sessionId)}/history`);
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isRecord).map((item) => ({
+    role: String(item.role ?? ""),
+    content: String(item.content ?? ""),
+    tool_calls: Array.isArray(item.tool_calls) ? item.tool_calls.map(String) : [],
+  }));
+}
+
+export function buildAgentChatWsUrl(sessionId: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/v1/agent/chat/${encodeURIComponent(sessionId)}/ws`;
 }

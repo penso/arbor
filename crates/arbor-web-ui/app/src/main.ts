@@ -6,6 +6,7 @@ import "./styles/sidebar.css";
 import "./styles/terminal.css";
 import "./styles/changes.css";
 import "./styles/status-bar.css";
+import "./styles/agent-chat.css";
 import "./styles/mobile.css";
 
 import { createSidebar } from "./components/sidebar";

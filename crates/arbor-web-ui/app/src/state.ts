@@ -5,6 +5,7 @@ import type {
   ChangedFile,
   AgentSession,
   AgentActivityWsEvent,
+  AgentChatSession,
   Issue,
   IssueSource,
   RightPaneTab,
@@ -15,6 +16,7 @@ import {
   fetchTerminals,
   fetchChangedFiles,
   fetchIssues,
+  fetchAgentChats,
 } from "./api";
 
 type PersistedNavigationState = {
@@ -30,6 +32,7 @@ export type AppState = {
   sessions: TerminalSession[];
   changedFiles: ChangedFile[];
   agentSessions: AgentSession[];
+  agentChatSessions: AgentChatSession[];
   issues: Issue[];
   issueSource: IssueSource | null;
   issuesNotice: string | null;
@@ -56,6 +59,7 @@ export function createInitialState(): AppState {
     sessions: [],
     changedFiles: [],
     agentSessions: [],
+    agentChatSessions: [],
     issues: [],
     issueSource: null,
     issuesNotice: null,
@@ -117,10 +121,11 @@ export async function refresh(): Promise<void> {
     updateState({ loading: true, error: null });
 
     try {
-      const [repositories, worktrees, sessions] = await Promise.all([
+      const [repositories, worktrees, sessions, agentChatSessions] = await Promise.all([
         fetchRepositories(),
         fetchWorktrees(),
         fetchTerminals(),
+        fetchAgentChats(),
       ]);
 
       // Validate selections still exist, auto-select on first load
@@ -202,6 +207,7 @@ export async function refresh(): Promise<void> {
         repositories,
         worktrees,
         sessions,
+        agentChatSessions,
         selectedRepoRoot,
         selectedWorktreePath,
         activeSessionId,
@@ -408,6 +414,15 @@ export function filteredSessions(): TerminalSession[] {
   }
   return state.sessions.filter(
     (s) => s.workspace_id === state.selectedWorktreePath || s.cwd === state.selectedWorktreePath,
+  );
+}
+
+export function filteredAgentChatSessions(): AgentChatSession[] {
+  if (state.selectedWorktreePath === null) {
+    return state.agentChatSessions;
+  }
+  return state.agentChatSessions.filter(
+    (s) => s.workspace_path === state.selectedWorktreePath,
   );
 }
 

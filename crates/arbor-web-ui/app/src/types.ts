@@ -159,6 +159,38 @@ export type ThemeResponse = {
   palette: ThemePalette;
 };
 
+// ── Agent Chat types ─────────────────────────────────────────────────
+
+export type AgentChatStatus = "idle" | "working" | "exited";
+
+export type AgentChatSession = {
+  id: string;
+  agent_kind: string;
+  workspace_path: string;
+  status: AgentChatStatus;
+  input_tokens: number;
+  output_tokens: number;
+};
+
+export type ChatMessage = {
+  role: string;
+  content: string;
+  tool_calls: string[];
+};
+
+export type AgentChatEvent =
+  | { type: "message_chunk"; content: string }
+  | { type: "thought_chunk"; content: string }
+  | { type: "tool_call"; name: string; status: string }
+  | { type: "turn_started" }
+  | { type: "turn_completed" }
+  | { type: "usage_update"; input_tokens: number; output_tokens: number }
+  | { type: "error"; message: string }
+  | { type: "session_exited"; exit_code: number | null }
+  | { type: "snapshot"; messages: ChatMessage[]; status: AgentChatStatus; input_tokens: number; output_tokens: number }
+  | { type: "user_message"; content: string }
+  | { type: "status_update"; message: string };
+
 export type WsClientEvent =
   | { type: "resize"; cols: number; rows: number }
   | { type: "signal"; signal: "interrupt" | "terminate" | "kill" }

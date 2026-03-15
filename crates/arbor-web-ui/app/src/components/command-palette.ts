@@ -9,7 +9,7 @@ import {
   subscribe,
   updateState,
 } from "../state";
-import { createTerminal as apiCreateTerminal } from "../api";
+import { createTerminal as apiCreateTerminal, createAgentChat } from "../api";
 import type { Issue, RightPaneTab } from "../types";
 import { el, shortPath, titleFromPath } from "../utils";
 
@@ -297,12 +297,18 @@ async function openNewTerminal(): Promise<void> {
   }
 }
 
+const AGENT_CHAT_COMMANDS = new Set(["claude", "codex"]);
+
 async function launchAgent(command: string, label: string): Promise<void> {
   const worktreePath = state.selectedWorktreePath;
   if (worktreePath === null) return;
 
   try {
-    await apiCreateTerminal(worktreePath, 120, 35, label.toLowerCase(), command);
+    if (AGENT_CHAT_COMMANDS.has(command)) {
+      await createAgentChat(worktreePath, command);
+    } else {
+      await apiCreateTerminal(worktreePath, 120, 35, label.toLowerCase(), command);
+    }
     await refresh();
   } catch {
     // Silently ignore — terminal panel will show status

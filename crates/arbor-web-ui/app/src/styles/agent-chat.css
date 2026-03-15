@@ -1,0 +1,418 @@
+/* ── Agent Chat Panel ──────────────────────────────────────────────── */
+
+.agent-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.agent-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Message bubbles */
+
+.agent-msg {
+  max-width: 90%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.agent-msg-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 10px 10px 2px 10px;
+}
+
+.agent-msg-assistant {
+  align-self: flex-start;
+  background: var(--bg-surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 10px 2px;
+}
+
+.agent-msg-assistant p {
+  margin: 0 0 8px 0;
+}
+
+.agent-msg-assistant p:last-child {
+  margin-bottom: 0;
+}
+
+/* Inline code */
+
+.agent-msg-assistant code {
+  background: var(--bg-hover);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+
+/* Code blocks */
+
+.agent-code-block {
+  background: var(--terminal-bg, #0f1115);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+
+.agent-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.agent-code-header button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.agent-code-header button:hover {
+  background: var(--bg-surface2);
+  color: var(--text);
+}
+
+.agent-code-block pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* Thinking blocks */
+
+.agent-thought {
+  align-self: flex-start;
+  max-width: 90%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-surface);
+  border-left: 3px solid var(--text-faint);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.agent-thought-toggle {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.agent-thought-toggle:hover {
+  color: var(--text-muted);
+}
+
+.agent-thought-content {
+  display: none;
+  white-space: pre-wrap;
+}
+
+.agent-thought-content.open {
+  display: block;
+}
+
+/* Tool calls */
+
+.agent-tool-call {
+  align-self: flex-start;
+  max-width: 90%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 12.5px;
+}
+
+.agent-tool-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  user-select: none;
+}
+
+.agent-tool-header:hover {
+  background: var(--bg-hover);
+}
+
+.agent-tool-name {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-weight: 600;
+  color: var(--blue);
+}
+
+.agent-tool-status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.agent-tool-status.running {
+  color: var(--yellow);
+}
+
+.agent-tool-status.done {
+  color: var(--green);
+}
+
+.agent-tool-status.error {
+  color: var(--red);
+}
+
+.agent-tool-chevron {
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform 0.15s;
+}
+
+.agent-tool-chevron.open {
+  transform: rotate(90deg);
+}
+
+.agent-tool-body {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.agent-tool-body.open {
+  display: block;
+}
+
+/* Status indicator */
+
+.agent-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+}
+
+.agent-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.agent-status-dot.idle {
+  background: var(--green);
+}
+
+.agent-status-dot.working {
+  background: var(--yellow);
+  animation: agent-pulse 1.2s infinite;
+}
+
+.agent-status-dot.exited {
+  background: var(--red);
+}
+
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.agent-token-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  color: var(--text-faint);
+}
+
+/* Input area */
+
+.agent-input-area {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.agent-input-textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input-bg, var(--bg));
+  color: var(--text);
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  min-height: 38px;
+  max-height: 160px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.agent-input-textarea:focus {
+  border-color: var(--accent);
+}
+
+.agent-input-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agent-input-textarea::placeholder {
+  color: var(--text-faint);
+}
+
+.agent-send-btn,
+.agent-cancel-btn {
+  align-self: flex-end;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.agent-send-btn {
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-send-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.agent-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.agent-cancel-btn {
+  background: var(--red);
+  color: #fff;
+}
+
+.agent-cancel-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* Empty state */
+
+.agent-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.agent-empty-icon {
+  font-size: 32px;
+  opacity: 0.4;
+}
+
+/* Streaming cursor */
+
+.agent-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--accent);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: agent-blink 0.8s step-end infinite;
+}
+
+@keyframes agent-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Lists */
+.agent-msg-assistant ul,
+.agent-msg-assistant ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.agent-msg-assistant li {
+  margin-bottom: 2px;
+}
+
+/* Bold / italic */
+.agent-bold {
+  font-weight: 600;
+}
+
+.agent-italic {
+  font-style: italic;
+}
+
+/* Links */
+.agent-msg-assistant a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.agent-msg-assistant a:hover {
+  text-decoration: underline;
+}
+
+/* Status message */
+.agent-status-message {
+  align-self: center;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-faint);
+  font-style: italic;
+}
