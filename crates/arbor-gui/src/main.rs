@@ -6325,11 +6325,18 @@ fn read_head_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8
         )
     })?;
 
+    if object.kind != gix::object::Kind::Blob {
+        return Ok(Vec::new());
+    }
+
     Ok(object.data.to_vec())
 }
 
 fn read_worktree_file_bytes(worktree_path: &Path, file_path: &Path) -> Result<Vec<u8>, String> {
     let absolute = worktree_path.join(file_path);
+    if absolute.is_dir() {
+        return Ok(Vec::new());
+    }
     match fs::read(&absolute) {
         Ok(bytes) => Ok(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),

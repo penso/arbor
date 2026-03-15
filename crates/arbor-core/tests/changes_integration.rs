@@ -66,6 +66,38 @@ fn reports_line_level_diff_summary() {
     );
 }
 
+#[test]
+fn excludes_directory_entries_from_changed_files() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let repo_path = temp_dir.path().join("repo");
+
+    let repo = git2::Repository::init(&repo_path).expect("repo should be initialized");
+    setup_git2_config(&repo);
+
+    fs::write(repo_path.join("tracked.txt"), "hello\n").expect("tracked file should be written");
+    create_initial_commit(&repo, "initial commit");
+
+    // Create a nested git repo inside the worktree. This simulates the scenario
+    // where gix surfaces a directory path as a single status entry (e.g. submodules
+    // or nested git repositories). Previously, this directory entry would flow into
+    // the diff pipeline and cause `fs::read()` to fail with "Is a directory
+    // (os error 21)" when the user clicked on it.
+    let nested_dir = repo_path.join("nested-repo");
+    fs::create_dir_all(&nested_dir).expect("nested dir should be created");
+    git2::Repository::init(&nested_dir).expect("nested repo should be initialized");
+    fs::write(nested_dir.join("file.txt"), "inner\n").expect("nested file should be written");
+
+    let changes = changes::changed_files(&repo_path).expect("gix status should succeed");
+
+    assert!(
+        !changes
+            .iter()
+            .any(|change| change.path.as_path() == Path::new("nested-repo")),
+        "directory entries should be filtered out of changed files, but found 'nested-repo' in: {:?}",
+        changes.iter().map(|c| &c.path).collect::<Vec<_>>()
+    );
+}
+
 fn setup_git2_config(repo: &git2::Repository) {
     let mut config = repo.config().expect("config should be accessible");
     config

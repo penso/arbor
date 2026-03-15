@@ -90,6 +90,11 @@ pub fn changed_files(repo_path: &Path) -> Result<Vec<ChangedFile>, ChangesError>
 
         let rela_path_str = String::from_utf8_lossy(item.rela_path().as_ref()).into_owned();
         let path = PathBuf::from(&rela_path_str);
+
+        if repo_path.join(&path).is_dir() {
+            continue;
+        }
+
         let kind = summary_to_change_kind(summary);
 
         let line_summary =
