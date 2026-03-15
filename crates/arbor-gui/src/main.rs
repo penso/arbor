@@ -1,6 +1,7 @@
 mod actions;
 mod agent_activity;
 mod agent_presets;
+mod app_bootstrap;
 mod app_config;
 mod assets;
 mod background_pollers;
@@ -62,12 +63,12 @@ mod worktree_lifecycle;
 mod worktree_refresh;
 
 pub(crate) use {
-    actions::*, agent_activity::*, assets::*, config_refresh::*, constants::*, daemon_runtime::*,
-    diff_engine::*, diff_view::*, error::*, external_launchers::*, file_view::*, git_actions::*,
-    github_helpers::*, github_oauth::*, github_pr_refresh::*, helpers::*, issue_details_modal::*,
-    port_detection::*, pr_summary_ui::*, prompt_runner::*, repo_presets::*, settings_ui::*,
-    terminal_rendering::*, theme_picker::*, types::*, ui_widgets::*, workspace_layout::*,
-    worktree_refresh::*,
+    actions::*, agent_activity::*, app_bootstrap::*, assets::*, config_refresh::*, constants::*,
+    daemon_runtime::*, diff_engine::*, diff_view::*, error::*, external_launchers::*, file_view::*,
+    git_actions::*, github_helpers::*, github_oauth::*, github_pr_refresh::*, helpers::*,
+    issue_details_modal::*, port_detection::*, pr_summary_ui::*, prompt_runner::*, repo_presets::*,
+    settings_ui::*, terminal_rendering::*, theme_picker::*, types::*, ui_widgets::*,
+    workspace_layout::*, worktree_refresh::*,
 };
 use {
     arbor_core::{
@@ -119,7 +120,52 @@ use {
     theme::{ThemeKind, ThemePalette},
 };
 
-include!("app_bootstrap.rs");
+fn main() {
+    use app_bootstrap::*;
+
+    let program_name = env::args().next().unwrap_or_else(|| "arbor".to_owned());
+    let launch_mode = match parse_launch_mode(env::args().skip(1)) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("{error}\n\n{}", daemon_cli_usage(&program_name));
+            std::process::exit(2);
+        },
+    };
+
+    if matches!(launch_mode, LaunchMode::Help) {
+        println!("{}", daemon_cli_usage(&program_name));
+        return;
+    }
+
+    augment_path_from_login_shell();
+
+    if let LaunchMode::Daemon { bind_addr } = launch_mode {
+        if let Err(error) = run_daemon_mode(bind_addr) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let log_buffer = log_layer::LogBuffer::new();
+
+    {
+        use tracing_subscriber::{
+            EnvFilter, Layer, Registry, layer::SubscriberExt, util::SubscriberInitExt,
+        };
+
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let in_memory_layer =
+            log_layer::InMemoryLayer::new(log_buffer.clone()).with_filter(env_filter);
+
+        Registry::default().with(in_memory_layer).init();
+    }
+
+    tracing::info!("Arbor starting");
+
+    run_gui(log_buffer);
+}
 
 impl ArborWindow {
     fn load_with_daemon_store<S>(

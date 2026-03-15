@@ -3,7 +3,6 @@ use {
     graphql_client::GraphQLQuery,
     serde::{Deserialize, Serialize},
     std::{
-        process::{Command, Stdio},
         sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
@@ -750,22 +749,62 @@ pub fn default_github_service() -> Arc<dyn GitHubService> {
     Arc::new(OctocrabGitHubService)
 }
 
+/// Reads the GitHub access token from the `gh` CLI's stored credentials.
+///
+/// Checks `GH_TOKEN` environment variable first, then reads the
+/// `~/.config/gh/hosts.yml` config file for an `oauth_token` entry.
 pub fn github_access_token_from_gh_cli() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["auth", "token"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
+    // GH_TOKEN is the primary env var used by the `gh` CLI itself.
+    if let Ok(val) = std::env::var("GH_TOKEN") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
     }
 
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let token = stdout.trim();
-    (!token.is_empty()).then_some(token.to_owned())
+    read_gh_hosts_token("github.com")
+}
+
+/// Reads the `oauth_token` for the given host from the `gh` CLI config file
+/// at `~/.config/gh/hosts.yml` (or `$GH_CONFIG_DIR/hosts.yml`).
+fn read_gh_hosts_token(host: &str) -> Option<String> {
+    let config_dir = std::env::var("GH_CONFIG_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            // On macOS/Linux, `gh` defaults to `~/.config/gh`.
+            std::env::var("HOME")
+                .ok()
+                .map(|home| std::path::PathBuf::from(home).join(".config").join("gh"))
+        })?;
+
+    let hosts_path = config_dir.join("hosts.yml");
+    let contents = std::fs::read_to_string(hosts_path).ok()?;
+
+    // Simple line-by-line parser for the hosts.yml format:
+    //   github.com:
+    //       oauth_token: gho_xxxx
+    let mut in_host_block = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+
+        // Top-level host entry (no leading whitespace, ends with ':')
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            in_host_block = trimmed.strip_suffix(':').is_some_and(|h| h == host);
+            continue;
+        }
+
+        if in_host_block
+            && let Some(value) = trimmed.strip_prefix("oauth_token:")
+        {
+            let token = value.trim();
+            if !token.is_empty() {
+                return Some(token.to_owned());
+            }
+        }
+    }
+
+    None
 }
 
 pub(crate) fn resolve_pull_request_for_review(

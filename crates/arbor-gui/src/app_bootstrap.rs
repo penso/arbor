@@ -1,3 +1,5 @@
+use super::*;
+
 fn open_arbor_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
     if let Err(error) = cx.open_window(
@@ -31,7 +33,7 @@ fn new_window(_: &NewWindow, cx: &mut App) {
     open_arbor_window(cx);
 }
 
-fn install_app_menu_and_keys(cx: &mut App) {
+pub(crate) fn install_app_menu_and_keys(cx: &mut App) {
     cx.on_action(new_window);
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewWindow, None),
@@ -139,7 +141,9 @@ pub(crate) fn build_app_menus(discovered_daemons: &[mdns_browser::DiscoveredDaem
     ]
 }
 
-fn bounds_from_window_geometry(geometry: ui_state_store::WindowGeometry) -> Option<Bounds<Pixels>> {
+pub(crate) fn bounds_from_window_geometry(
+    geometry: ui_state_store::WindowGeometry,
+) -> Option<Bounds<Pixels>> {
     if geometry.width == 0 || geometry.height == 0 {
         return None;
     }
@@ -158,7 +162,7 @@ fn bounds_from_window_geometry(geometry: ui_state_store::WindowGeometry) -> Opti
 
 /// The augmented PATH computed at startup, merging the user's login-shell PATH
 /// with the process PATH.  Stored once, read by [`create_command`].
-static AUGMENTED_PATH: OnceLock<String> = OnceLock::new();
+pub(crate) static AUGMENTED_PATH: OnceLock<String> = OnceLock::new();
 
 /// When launched as a macOS `.app` bundle the process inherits a minimal PATH
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`).  This function sources the user's login
@@ -167,7 +171,7 @@ static AUGMENTED_PATH: OnceLock<String> = OnceLock::new();
 ///
 /// The result is stored in [`AUGMENTED_PATH`] and applied per-command via
 /// [`create_command`] rather than mutating the global environment.
-fn augment_path_from_login_shell() {
+pub(crate) fn augment_path_from_login_shell() {
     if !cfg!(target_os = "macos") {
         return;
     }
@@ -248,7 +252,7 @@ pub(crate) fn create_command(program: &str) -> Command {
 /// from the `assets/` directory so the dock shows the real icon instead of a folder.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn set_dock_icon() {
+pub(crate) fn set_dock_icon() {
     use cocoa::{
         appkit::{NSApp, NSApplication, NSImage},
         base::{id, nil},
@@ -281,15 +285,17 @@ fn set_dock_icon() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn set_dock_icon() {}
+pub(crate) fn set_dock_icon() {}
 
-enum LaunchMode {
+pub(crate) enum LaunchMode {
     Gui,
     Daemon { bind_addr: Option<String> },
     Help,
 }
 
-fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMode, CliError> {
+pub(crate) fn parse_launch_mode(
+    args: impl IntoIterator<Item = String>,
+) -> Result<LaunchMode, CliError> {
     let mut daemon_mode = false;
     let mut bind_addr: Option<String> = None;
     let mut args = args.into_iter();
@@ -326,13 +332,13 @@ fn parse_launch_mode(args: impl IntoIterator<Item = String>) -> Result<LaunchMod
     }
 }
 
-fn daemon_cli_usage(program_name: &str) -> String {
+pub(crate) fn daemon_cli_usage(program_name: &str) -> String {
     format!(
         "Usage:\n  {program_name}\n  {program_name} --daemon [--bind ADDR]\n\nExamples:\n  {program_name} --daemon\n  {program_name} --daemon --bind 0.0.0.0:8787"
     )
 }
 
-fn themed_ui_svg_icon(
+pub(crate) fn themed_ui_svg_icon(
     path: &'static str,
     color: u32,
     size_px: f32,
@@ -367,7 +373,7 @@ fn themed_ui_svg_icon(
         })
 }
 
-fn terminal_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
+pub(crate) fn terminal_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
     themed_ui_svg_icon(
         if is_active {
             "icons/ui/terminal-active.svg"
@@ -380,7 +386,7 @@ fn terminal_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
     )
 }
 
-fn logs_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
+pub(crate) fn logs_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
     themed_ui_svg_icon(
         if is_active {
             "icons/ui/logs-active.svg"
@@ -392,7 +398,7 @@ fn logs_tab_icon_element(is_active: bool, color: u32, size_px: f32) -> Div {
         "\u{f4ed}",
     )
 }
-fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), DaemonLaunchError> {
+pub(crate) fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), DaemonLaunchError> {
     let binary = find_arbor_httpd_binary().ok_or_else(|| {
         DaemonLaunchError::Failed(
             "could not find `arbor-httpd` in PATH or next to the current executable".to_owned(),
@@ -424,48 +430,7 @@ fn run_daemon_mode(bind_addr: Option<String>) -> Result<(), DaemonLaunchError> {
     )))
 }
 
-fn main() {
-    let program_name = env::args().next().unwrap_or_else(|| "arbor".to_owned());
-    let launch_mode = match parse_launch_mode(env::args().skip(1)) {
-        Ok(mode) => mode,
-        Err(error) => {
-            eprintln!("{error}\n\n{}", daemon_cli_usage(&program_name));
-            std::process::exit(2);
-        },
-    };
-
-    if matches!(launch_mode, LaunchMode::Help) {
-        println!("{}", daemon_cli_usage(&program_name));
-        return;
-    }
-
-    augment_path_from_login_shell();
-
-    if let LaunchMode::Daemon { bind_addr } = launch_mode {
-        if let Err(error) = run_daemon_mode(bind_addr) {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    let log_buffer = log_layer::LogBuffer::new();
-
-    {
-        use tracing_subscriber::{
-            EnvFilter, Layer, Registry, layer::SubscriberExt, util::SubscriberInitExt,
-        };
-
-        let env_filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        let in_memory_layer =
-            log_layer::InMemoryLayer::new(log_buffer.clone()).with_filter(env_filter);
-
-        Registry::default().with(in_memory_layer).init();
-    }
-
-    tracing::info!("Arbor starting");
-
+pub(crate) fn run_gui(log_buffer: log_layer::LogBuffer) {
     let mut application = Application::new();
     if let Some(assets_base) = find_assets_root_dir() {
         application = application.with_assets(ArborAssets { base: assets_base });
