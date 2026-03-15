@@ -52,7 +52,7 @@ fn install_app_menu_and_keys(cx: &mut App) {
     cx.set_menus(build_app_menus(&[]));
 }
 
-fn build_app_menus(discovered_daemons: &[mdns_browser::DiscoveredDaemon]) -> Vec<Menu> {
+pub(crate) fn build_app_menus(discovered_daemons: &[mdns_browser::DiscoveredDaemon]) -> Vec<Menu> {
     let mut host_items = vec![
         MenuItem::action("Connect to Host...", ConnectToHost),
         MenuItem::action("Manage Hosts...", OpenManageHosts),
