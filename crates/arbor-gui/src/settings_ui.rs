@@ -674,3 +674,15 @@ impl ArborWindow {
             )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_config_save_has_work_when_count_is_nonzero() {
+        assert!(!background_config_save_has_work(0));
+        assert!(background_config_save_has_work(1));
+        assert!(background_config_save_has_work(3));
+    }
+}

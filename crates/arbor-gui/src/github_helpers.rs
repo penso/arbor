@@ -182,3 +182,21 @@ pub(crate) fn github_oauth_client_id() -> Option<String> {
         .or_else(|| BUILT_IN_GITHUB_OAUTH_CLIENT_ID.map(str::to_owned))
         .and_then(|value| non_empty_trimmed_str(&value).map(str::to_owned))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_token_resolution_prefers_saved_token() {
+        let token =
+            resolve_github_access_token_from_sources(Some(" saved-token "), Some("env-token"));
+        assert_eq!(token.as_deref(), Some("saved-token"));
+    }
+
+    #[test]
+    fn github_token_resolution_falls_back_to_environment_token() {
+        let token = resolve_github_access_token_from_sources(Some(""), Some(" env-token "));
+        assert_eq!(token.as_deref(), Some("env-token"));
+    }
+}

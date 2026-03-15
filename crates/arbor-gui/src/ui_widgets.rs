@@ -627,3 +627,18 @@ pub(crate) fn worktree_activity_sparkline(worktree: &WorktreeSummary) -> String 
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use {super::*, arbor_core::agent::AgentState};
+
+    #[test]
+    fn attention_indicator_prefers_stuck_state() {
+        let mut worktree = crate::tests::sample_worktree_summary();
+        worktree.agent_state = Some(AgentState::Waiting);
+        worktree.stuck_turn_count = 2;
+
+        let attention = worktree_attention_indicator(&worktree);
+        assert_eq!(attention.label, "Stuck");
+    }
+}

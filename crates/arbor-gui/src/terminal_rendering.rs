@@ -835,3 +835,251 @@ pub(crate) fn terminal_grid_size_for_viewport(
 pub(crate) fn should_auto_follow_terminal_output(changed: bool, was_near_bottom: bool) -> bool {
     changed && was_near_bottom
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use {
+        super::*,
+        crate::{daemon_runtime::session_with_styled_line, theme::ThemeKind},
+    };
+
+    #[test]
+    fn cursor_is_painted_at_terminal_column_instead_of_line_end() {
+        let theme = ThemeKind::One.palette();
+        let session = session_with_styled_line(
+            "abcdef",
+            0x112233,
+            0x445566,
+            Some(TerminalCursor { line: 0, column: 2 }),
+        );
+
+        let lines = styled_lines_for_session(&session, theme, true, None, None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].runs.len(), 3);
+        assert_eq!(lines[0].runs[0].text, "ab");
+        assert_eq!(lines[0].runs[1].text, "c");
+        assert_eq!(lines[0].runs[1].fg, 0x112233);
+        assert_eq!(lines[0].runs[1].bg, theme.terminal_cursor);
+        assert_eq!(lines[0].runs[2].text, "def");
+    }
+
+    #[test]
+    fn cursor_pads_to_column_when_it_is_after_line_content() {
+        let theme = ThemeKind::One.palette();
+        let session = session_with_styled_line(
+            "abc",
+            0x112233,
+            0x445566,
+            Some(TerminalCursor { line: 0, column: 5 }),
+        );
+
+        let lines = styled_lines_for_session(&session, theme, true, None, None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].runs.len(), 2);
+        assert_eq!(lines[0].runs[0].text, "abc");
+        assert_eq!(lines[0].runs[1].text, " ");
+        assert_eq!(lines[0].runs[1].fg, theme.text_primary);
+        assert_eq!(lines[0].runs[1].bg, theme.terminal_cursor);
+        assert!(lines[0].cells.iter().any(|cell| {
+            cell.column == 5 && cell.text == " " && cell.bg == theme.terminal_cursor
+        }));
+    }
+
+    #[test]
+    fn positioned_runs_split_cells_with_zero_width_sequences() {
+        let cells = vec![
+            TerminalStyledCell {
+                column: 0,
+                text: "A".to_owned(),
+                fg: 0x112233,
+                bg: 0x445566,
+            },
+            TerminalStyledCell {
+                column: 1,
+                text: "\u{2600}\u{fe0f}".to_owned(),
+                fg: 0x112233,
+                bg: 0x445566,
+            },
+            TerminalStyledCell {
+                column: 2,
+                text: "B".to_owned(),
+                fg: 0x112233,
+                bg: 0x445566,
+            },
+        ];
+
+        let runs = positioned_runs_from_cells(&cells);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "A");
+        assert_eq!(runs[0].start_column, 0);
+        assert_eq!(runs[0].cell_count, 1);
+        assert!(runs[0].force_cell_width);
+        assert_eq!(runs[1].text, "\u{2600}\u{fe0f}");
+        assert_eq!(runs[1].start_column, 1);
+        assert_eq!(runs[1].cell_count, 1);
+        assert!(!runs[1].force_cell_width);
+        assert_eq!(runs[2].text, "B");
+        assert_eq!(runs[2].start_column, 2);
+        assert_eq!(runs[2].cell_count, 1);
+        assert!(runs[2].force_cell_width);
+    }
+
+    #[test]
+    fn positioned_runs_do_not_force_cell_width_for_powerline_symbols() {
+        let cells = vec![
+            TerminalStyledCell {
+                column: 0,
+                text: "\u{e0b0}".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+            TerminalStyledCell {
+                column: 1,
+                text: "X".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+        ];
+
+        let runs = positioned_runs_from_cells(&cells);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "\u{e0b0}");
+        assert!(!runs[0].force_cell_width);
+        assert_eq!(runs[1].text, "X");
+        assert!(runs[1].force_cell_width);
+    }
+
+    #[test]
+    fn positioned_runs_keep_cell_width_for_box_drawing_symbols() {
+        let cells = vec![
+            TerminalStyledCell {
+                column: 0,
+                text: "\u{2502}".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+            TerminalStyledCell {
+                column: 1,
+                text: "X".to_owned(),
+                fg: 0xaabbcc,
+                bg: 0x112233,
+            },
+        ];
+
+        let runs = positioned_runs_from_cells(&cells);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "\u{2502}X");
+        assert!(runs[0].force_cell_width);
+    }
+
+    #[test]
+    fn powerline_glyph_is_forced_to_cell_width() {
+        let run = PositionedTerminalRun {
+            text: "\u{e0b6}".to_owned(),
+            fg: 0,
+            bg: 0,
+            start_column: 7,
+            cell_count: 1,
+            force_cell_width: false,
+        };
+
+        assert!(should_force_powerline(&run));
+    }
+
+    #[test]
+    fn token_bounds_capture_full_url() {
+        let lines = vec!["visit https://example.com/path?q=1 please".to_owned()];
+        let point = TerminalGridPosition {
+            line: 0,
+            column: 12,
+        };
+
+        let bounds = terminal_token_bounds(&lines, point);
+        assert!(bounds.is_some());
+        let (start, end) = bounds.expect("token bounds");
+        let selection = TerminalSelection {
+            session_id: 1,
+            anchor: start,
+            head: end,
+        };
+        let selected = terminal_selection_text(&lines, &selection);
+        assert_eq!(selected, "https://example.com/path?q=1");
+    }
+
+    #[test]
+    fn selection_text_spans_multiple_lines() {
+        let lines = vec!["abc".to_owned(), "def".to_owned(), "ghi".to_owned()];
+        let selection = TerminalSelection {
+            session_id: 1,
+            anchor: TerminalGridPosition { line: 0, column: 1 },
+            head: TerminalGridPosition { line: 2, column: 2 },
+        };
+
+        let selected = terminal_selection_text(&lines, &selection);
+        assert_eq!(selected, "bc\ndef\ngh");
+    }
+
+    #[test]
+    fn line_bounds_capture_entire_line_on_triple_click() {
+        let lines = vec!["hello world".to_owned()];
+        let point = TerminalGridPosition { line: 0, column: 3 };
+
+        let bounds = terminal_line_bounds(&lines, point);
+        assert!(bounds.is_some());
+        let (start, end) = bounds.expect("line bounds");
+        assert_eq!(start.line, 0);
+        assert_eq!(start.column, 0);
+        assert_eq!(end.line, 0);
+        assert_eq!(end.column, 11);
+    }
+
+    #[test]
+    fn styled_lines_remap_embedded_default_palette_to_active_theme() {
+        let theme = ThemeKind::Gruvbox.palette();
+        let session = session_with_styled_line(
+            "abc",
+            EMBEDDED_TERMINAL_DEFAULT_FG,
+            EMBEDDED_TERMINAL_DEFAULT_BG,
+            None,
+        );
+
+        let lines = styled_lines_for_session(&session, theme, false, None, None);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .cells
+                .iter()
+                .all(|cell| cell.bg == theme.terminal_bg)
+        );
+        assert!(
+            lines[0]
+                .cells
+                .iter()
+                .all(|cell| cell.fg == theme.text_primary)
+        );
+    }
+
+    #[test]
+    fn auto_follow_requires_new_output_and_bottom_position() {
+        assert!(should_auto_follow_terminal_output(true, true));
+        assert!(!should_auto_follow_terminal_output(true, false));
+        assert!(!should_auto_follow_terminal_output(false, true));
+    }
+
+    #[test]
+    fn auto_follow_is_disabled_without_new_output() {
+        assert!(!should_auto_follow_terminal_output(false, false));
+    }
+
+    #[test]
+    fn computes_terminal_grid_size_from_viewport() {
+        let result = terminal_grid_size_for_viewport(
+            900.,
+            380.,
+            TERMINAL_CELL_WIDTH_PX,
+            TERMINAL_CELL_HEIGHT_PX,
+        );
+        assert_eq!(result, Some((20, 100)));
+    }
+}

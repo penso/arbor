@@ -807,3 +807,35 @@ pub(crate) fn issue_updated_label(updated_at: &str) -> String {
 pub(crate) fn issue_modal_source_label(source: &terminal_daemon_http::IssueSourceDto) -> String {
     source.provider.clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_markdown_to_text_produces_readable_plain_text() {
+        let markdown = r#"# Summary
+
+- [x] shipped **bold** change
+- see [docs](https://example.com/docs)
+
+> quoted _note_
+
+```rs
+let answer = 42;
+```
+"#;
+
+        let plain_text = issue_markdown_to_text(markdown);
+        assert_eq!(
+            plain_text,
+            "Summary\n\nshipped bold change\nsee docs (https://example.com/docs)\n\nquoted note\n\nlet answer = 42;"
+        );
+    }
+
+    #[test]
+    fn issue_body_text_falls_back_when_body_is_missing_or_empty() {
+        assert_eq!(issue_body_text(None), ISSUE_DESCRIPTION_FALLBACK);
+        assert_eq!(issue_body_text(Some("   \n\n")), ISSUE_DESCRIPTION_FALLBACK);
+    }
+}

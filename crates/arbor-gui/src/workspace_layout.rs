@@ -704,3 +704,87 @@ impl ArborWindow {
             )
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use {super::*, crate::ui_state_store};
+
+    #[test]
+    fn pending_save_coalesces_to_latest_value_after_inflight_write() {
+        let mut pending = PendingSave::default();
+
+        pending.queue("first");
+        assert_eq!(pending.begin_next(), Some("first"));
+        assert!(pending.has_work());
+
+        pending.queue("second");
+        pending.queue("third");
+        assert!(pending.begin_next().is_none());
+
+        pending.finish();
+
+        assert_eq!(pending.begin_next(), Some("third"));
+        pending.finish();
+        assert!(!pending.has_work());
+    }
+
+    #[test]
+    fn pending_save_reports_work_for_pending_and_inflight_states() {
+        let mut pending = PendingSave::default();
+        assert!(!pending.has_work());
+
+        pending.queue(1_u8);
+        assert!(pending.has_work());
+
+        let _ = pending.begin_next();
+        assert!(pending.has_work());
+
+        pending.finish();
+        assert!(!pending.has_work());
+    }
+
+    #[test]
+    fn ui_state_save_has_work_for_pending_and_inflight_states() {
+        let state = ui_state_store::UiState::default();
+
+        assert!(!ui_state_save_has_work(None, None));
+        assert!(ui_state_save_has_work(Some(&state), None));
+        assert!(ui_state_save_has_work(None, Some(&state)));
+    }
+
+    #[test]
+    fn next_pending_ui_state_save_keeps_reverted_state_queued_while_other_save_is_in_flight() {
+        let persisted = ui_state_store::UiState {
+            left_pane_width: Some(240),
+            ..ui_state_store::UiState::default()
+        };
+        let in_flight = ui_state_store::UiState {
+            left_pane_width: Some(320),
+            ..ui_state_store::UiState::default()
+        };
+
+        assert_eq!(
+            next_pending_ui_state_save(&persisted, None, Some(&in_flight), &persisted),
+            Some(persisted),
+        );
+    }
+
+    #[test]
+    fn next_pending_ui_state_save_does_not_duplicate_inflight_state() {
+        let state = ui_state_store::UiState {
+            left_pane_width: Some(320),
+            ..ui_state_store::UiState::default()
+        };
+
+        assert_eq!(
+            next_pending_ui_state_save(
+                &ui_state_store::UiState::default(),
+                None,
+                Some(&state),
+                &state,
+            ),
+            None,
+        );
+    }
+}

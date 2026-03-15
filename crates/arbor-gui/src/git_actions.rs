@@ -930,3 +930,14 @@ pub(crate) fn extract_first_url(text: &str) -> Option<String> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_first_url_ignores_punctuation() {
+        let url = extract_first_url("created PR: https://github.com/acme/repo/pull/42.");
+        assert_eq!(url.as_deref(), Some("https://github.com/acme/repo/pull/42"));
+    }
+}

@@ -3161,3 +3161,58 @@ where
         })
         .child("+")
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use {super::*, std::path::PathBuf};
+
+    #[test]
+    fn normalized_sidebar_order_keeps_saved_items_and_appends_new_ones() {
+        let saved = vec![
+            SidebarItemId::Outpost("outpost-1".to_owned()),
+            SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-2")),
+        ];
+        let worktrees = vec![
+            SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-1")),
+            SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-2")),
+        ];
+        let outposts = vec![SidebarItemId::Outpost("outpost-1".to_owned())];
+
+        assert_eq!(
+            normalized_sidebar_order(Some(saved.as_slice()), worktrees, outposts),
+            vec![
+                SidebarItemId::Outpost("outpost-1".to_owned()),
+                SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-2")),
+                SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn reordered_sidebar_items_moves_dragged_item_to_requested_slot() {
+        let items = vec![
+            SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-1")),
+            SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-2")),
+            SidebarItemId::Outpost("outpost-1".to_owned()),
+        ];
+
+        assert_eq!(
+            reordered_sidebar_items(&items, &SidebarItemId::Outpost("outpost-1".to_owned()), 0,),
+            Some(vec![
+                SidebarItemId::Outpost("outpost-1".to_owned()),
+                SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-1")),
+                SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-2")),
+            ])
+        );
+
+        assert_eq!(
+            reordered_sidebar_items(
+                &items,
+                &SidebarItemId::Worktree(PathBuf::from("/tmp/repo/wt-1")),
+                1,
+            ),
+            None
+        );
+    }
+}

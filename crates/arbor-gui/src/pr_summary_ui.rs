@@ -569,3 +569,40 @@ pub(crate) fn pr_loading_icon(theme: &ThemePalette, animation_key: &'static str)
         )
         .into_any_element()
 }
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::github_service};
+
+    #[test]
+    fn prioritized_pr_checks_show_failures_before_pending_before_successes() {
+        let pr = github_service::PrDetails {
+            number: 7,
+            title: "Sort checks".to_owned(),
+            url: "https://example.com/pr/7".to_owned(),
+            state: github_service::PrState::Open,
+            additions: 1,
+            deletions: 1,
+            review_decision: github_service::ReviewDecision::Pending,
+            mergeable: github_service::MergeableState::Mergeable,
+            merge_state_status: github_service::MergeStateStatus::Clean,
+            passed_checks: 2,
+            checks_status: github_service::CheckStatus::Pending,
+            checks: vec![
+                ("b-failure".to_owned(), github_service::CheckStatus::Failure),
+                ("a-pending".to_owned(), github_service::CheckStatus::Pending),
+                ("a-success".to_owned(), github_service::CheckStatus::Success),
+                ("z-success".to_owned(), github_service::CheckStatus::Success),
+            ],
+        };
+
+        let checks = prioritized_pr_checks_for_display(&pr);
+
+        assert_eq!(checks, &[
+            ("b-failure".to_owned(), github_service::CheckStatus::Failure),
+            ("a-pending".to_owned(), github_service::CheckStatus::Pending),
+            ("a-success".to_owned(), github_service::CheckStatus::Success),
+            ("z-success".to_owned(), github_service::CheckStatus::Success),
+        ]);
+    }
+}

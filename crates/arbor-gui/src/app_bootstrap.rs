@@ -518,3 +518,27 @@ fn main() {
         cx.activate(true);
     });
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod app_bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn parse_launch_mode_supports_daemon_bind() {
+        let mode = parse_launch_mode(vec![
+            "--daemon".to_owned(),
+            "--bind".to_owned(),
+            "0.0.0.0:8787".to_owned(),
+        ])
+        .expect("daemon args should parse");
+
+        match mode {
+            LaunchMode::Daemon { bind_addr } => {
+                assert_eq!(bind_addr.as_deref(), Some("0.0.0.0:8787"));
+            },
+            LaunchMode::Gui => panic!("expected daemon launch mode"),
+            LaunchMode::Help => panic!("expected daemon launch mode"),
+        }
+    }
+}

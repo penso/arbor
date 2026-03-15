@@ -424,3 +424,24 @@ impl ArborWindow {
         self.focus_terminal_on_next_render = false;
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use {super::*, crate::daemon_runtime::session_with_styled_line, std::sync::Arc};
+
+    #[test]
+    fn terminal_input_buffers_only_while_session_is_initializing() {
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+
+        session.is_initializing = true;
+        assert!(should_queue_terminal_input(&session));
+
+        session.is_initializing = false;
+        assert!(!should_queue_terminal_input(&session));
+
+        session.is_initializing = true;
+        session.runtime = Some(Arc::new(daemon_runtime::tests::daemon_runtime_for_test()));
+        assert!(!should_queue_terminal_input(&session));
+    }
+}

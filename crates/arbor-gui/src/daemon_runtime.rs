@@ -1100,6 +1100,58 @@ pub(crate) fn find_arbor_httpd_binary() -> Option<PathBuf> {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn session_with_styled_line(
+    text: &str,
+    fg: u32,
+    bg: u32,
+    cursor: Option<TerminalCursor>,
+) -> TerminalSession {
+    TerminalSession {
+        id: 1,
+        daemon_session_id: "daemon-test-1".to_owned(),
+        worktree_path: PathBuf::from("/tmp/worktree"),
+        managed_process_id: None,
+        title: "term-1".to_owned(),
+        last_command: None,
+        pending_command: String::new(),
+        command: "zsh".to_owned(),
+        agent_preset: None,
+        execution_mode: None,
+        state: TerminalState::Running,
+        exit_code: None,
+        updated_at_unix_ms: None,
+        root_pid: None,
+        cols: 120,
+        rows: 35,
+        generation: 0,
+        output: text.to_owned(),
+        styled_output: vec![TerminalStyledLine {
+            cells: text
+                .chars()
+                .enumerate()
+                .map(|(column, character)| TerminalStyledCell {
+                    column,
+                    text: character.to_string(),
+                    fg,
+                    bg,
+                })
+                .collect(),
+            runs: vec![TerminalStyledRun {
+                text: text.to_owned(),
+                fg,
+                bg,
+            }],
+        }],
+        cursor,
+        modes: TerminalModes::default(),
+        last_runtime_sync_at: None,
+        queued_input: Vec::new(),
+        is_initializing: false,
+        runtime: None,
+    }
+}
+
 pub(crate) fn is_localhost_url(url: &str) -> bool {
     let host = url
         .strip_prefix("http://")
@@ -1139,4 +1191,300 @@ pub(crate) fn load_outpost_summaries(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(crate) mod tests {
+    use {
+        super::*,
+        crate::terminal_daemon_http::{HttpTerminalDaemon, WebsocketConnectConfig},
+        std::time::Instant,
+    };
+
+    pub(crate) fn daemon_runtime_for_test() -> DaemonTerminalRuntime {
+        let daemon = match HttpTerminalDaemon::new("http://127.0.0.1:1") {
+            Ok(daemon) => daemon,
+            Err(error) => panic!("failed to create daemon client: {error}"),
+        };
+
+        DaemonTerminalRuntime {
+            daemon: Arc::new(daemon),
+            ws_state: Arc::new(DaemonTerminalWsState::default()),
+            last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
+            snapshot_request_in_flight: Arc::new(AtomicBool::new(false)),
+            kind: TerminalRuntimeKind::Local,
+            resize_error_label: "resize",
+            exit_labels: None,
+            clear_global_daemon_on_connection_refused: false,
+        }
+    }
+
+    #[test]
+    fn active_terminal_sync_is_prioritized() {
+        let mut first = session_with_styled_line("one", 0xffffff, 0x000000, None);
+        first.id = 10;
+        let mut second = session_with_styled_line("two", 0xffffff, 0x000000, None);
+        second.id = 20;
+        let mut third = session_with_styled_line("three", 0xffffff, 0x000000, None);
+        third.id = 30;
+
+        let indices = ordered_terminal_sync_indices(&[first, second, third], Some(30));
+
+        assert_eq!(indices, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn daemon_terminal_sync_interval_uses_active_fallback() {
+        assert_eq!(
+            daemon_terminal_sync_interval(true, TerminalState::Running),
+            ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+        assert_eq!(
+            daemon_terminal_sync_interval(false, TerminalState::Running),
+            INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+        assert_eq!(
+            daemon_terminal_sync_interval(false, TerminalState::Completed),
+            IDLE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+        assert_eq!(
+            daemon_terminal_sync_interval(false, TerminalState::Failed),
+            IDLE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+    }
+
+    #[test]
+    fn daemon_runtime_syncs_active_session_immediately_on_ws_event() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+
+        assert!(!runtime.should_sync(&session, true, None, now));
+
+        runtime.ws_state.note_event();
+
+        assert!(runtime.should_sync(&session, true, None, now));
+    }
+
+    #[test]
+    fn daemon_runtime_throttles_inactive_sessions_even_when_ws_is_dirty() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("background", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+
+        runtime.ws_state.note_event();
+
+        assert!(!runtime.should_sync(&session, false, None, now));
+        assert!(runtime.should_sync(
+            &session,
+            false,
+            None,
+            now + INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn daemon_runtime_syncs_active_resize_without_waiting_for_ws() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+
+        assert!(runtime.should_sync(
+            &session,
+            true,
+            Some((session.rows + 1, session.cols, 0, 0)),
+            now
+        ));
+    }
+
+    #[test]
+    fn orphaned_daemon_session_cleanup_kills_only_running_sessions() {
+        let mut record = DaemonSessionRecord {
+            session_id: "daemon-test-1".into(),
+            workspace_id: "/tmp/worktree".into(),
+            cwd: PathBuf::from("/tmp/worktree"),
+            shell: "zsh".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(orphaned_daemon_session_should_kill(&record));
+
+        record.state = Some(TerminalSessionState::Completed);
+        assert!(!orphaned_daemon_session_should_kill(&record));
+
+        record.state = Some(TerminalSessionState::Failed);
+        assert!(!orphaned_daemon_session_should_kill(&record));
+    }
+
+    #[test]
+    fn daemon_runtime_without_cached_snapshot_returns_without_sync_error() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+        session.last_runtime_sync_at = Some(Instant::now());
+
+        let outcome = runtime.sync(&mut session, true, None);
+
+        assert!(!outcome.changed);
+        assert!(outcome.notice.is_none());
+        assert_eq!(session.state, TerminalState::Running);
+        assert!(session.output.is_empty());
+    }
+
+    #[test]
+    fn daemon_ws_state_rehydrates_trimmed_snapshot_from_ansi_output() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.apply_snapshot_text("hello\r\nworld\r\n", TerminalState::Running, None, Some(42));
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected websocket snapshot to be available"));
+
+        assert_eq!(snapshot.state, TerminalState::Running);
+        assert_eq!(snapshot.updated_at_unix_ms, Some(42));
+        assert!(snapshot.terminal.output.contains("hello"));
+        assert!(snapshot.terminal.output.contains("world"));
+        assert_eq!(snapshot.terminal.styled_lines.len(), 2);
+    }
+
+    #[test]
+    fn daemon_runtime_sync_applies_cached_ws_snapshot_without_http_roundtrip() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+        session.exit_code = None;
+        runtime.ws_state.apply_snapshot_text(
+            "codex> working\r\n",
+            TerminalState::Running,
+            None,
+            Some(99),
+        );
+
+        let outcome = runtime.sync(&mut session, true, None);
+
+        assert!(outcome.changed);
+        assert_eq!(session.state, TerminalState::Running);
+        assert_eq!(session.updated_at_unix_ms, Some(99));
+        assert!(session.output.contains("codex> working"));
+        assert_eq!(session.exit_code, None);
+    }
+
+    #[test]
+    fn daemon_websocket_request_adds_bearer_auth_header() {
+        let request = match daemon_websocket_request(&WebsocketConnectConfig {
+            url: "ws://127.0.0.1:8787/api/v1/agent/activity/ws".to_owned(),
+            auth_token: Some("secret-token".to_owned()),
+        }) {
+            Ok(request) => request,
+            Err(error) => panic!("failed to build websocket request: {error}"),
+        };
+
+        assert_eq!(
+            request
+                .headers()
+                .get(tungstenite::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer secret-token")
+        );
+    }
+
+    #[test]
+    fn daemon_snapshot_applies_structured_terminal_state() {
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+        session.modes = TerminalModes::default();
+
+        let changed = apply_daemon_snapshot(&mut session, &daemon::TerminalSnapshot {
+            session_id: "daemon-test-1".to_owned().into(),
+            output_tail: "READY".to_owned(),
+            styled_lines: vec![daemon::DaemonTerminalStyledLine {
+                cells: vec![daemon::DaemonTerminalStyledCell {
+                    column: 0,
+                    text: "READY".to_owned(),
+                    fg: 0x123456,
+                    bg: 0x654321,
+                }],
+                runs: vec![daemon::DaemonTerminalStyledRun {
+                    text: "READY".to_owned(),
+                    fg: 0x123456,
+                    bg: 0x654321,
+                }],
+            }],
+            cursor: Some(daemon::DaemonTerminalCursor { line: 0, column: 5 }),
+            modes: daemon::DaemonTerminalModes {
+                app_cursor: true,
+                alt_screen: true,
+            },
+            exit_code: None,
+            state: TerminalSessionState::Running,
+            updated_at_unix_ms: Some(1),
+        });
+
+        assert!(changed);
+        assert_eq!(session.output, "READY");
+        assert_eq!(session.cursor, Some(TerminalCursor { line: 0, column: 5 }));
+        assert_eq!(session.modes, TerminalModes {
+            app_cursor: true,
+            alt_screen: true,
+        });
+        assert_eq!(session.styled_output.len(), 1);
+        assert_eq!(session.styled_output[0].runs[0].text, "READY");
+        assert_eq!(session.styled_output[0].runs[0].fg, 0x123456);
+        assert_eq!(session.styled_output[0].runs[0].bg, 0x654321);
+    }
+
+    #[test]
+    fn shift_enter_does_not_submit_pending_terminal_command() {
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.pending_command = "hello".to_owned();
+
+        track_terminal_command_keystroke(
+            &mut session,
+            &Keystroke::parse("shift-enter").expect("valid keystroke"),
+        );
+
+        assert_eq!(session.pending_command, "hello\n");
+        assert_eq!(session.last_command, None);
+    }
+
+    #[test]
+    fn parse_connect_host_target_normalizes_bare_http_host() {
+        let target = parse_connect_host_target("10.0.0.5")
+            .expect("bare host should parse as http daemon target");
+
+        match target {
+            ConnectHostTarget::Http { url, auth_key } => {
+                assert_eq!(url, "http://10.0.0.5:8787");
+                assert_eq!(auth_key, url);
+            },
+            ConnectHostTarget::Ssh { .. } => panic!("expected http target"),
+        }
+    }
+
+    #[test]
+    fn parse_connect_host_target_supports_ssh_scheme() {
+        let target = parse_connect_host_target("ssh://dev@example.com:2222/9001")
+            .expect("ssh address should parse");
+
+        match target {
+            ConnectHostTarget::Ssh { target, auth_key } => {
+                assert_eq!(target.user.as_deref(), Some("dev"));
+                assert_eq!(target.host, "example.com");
+                assert_eq!(target.ssh_port, 2222);
+                assert_eq!(target.daemon_port, 9001);
+                assert_eq!(auth_key, "ssh://dev@example.com:2222/9001");
+            },
+            ConnectHostTarget::Http { .. } => panic!("expected ssh target"),
+        }
+    }
 }
