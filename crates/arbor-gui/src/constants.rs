@@ -1,5 +1,7 @@
 use {
-    gpui::{App, FontFallbacks, FontFeatures, WindowDecorations, font},
+    gpui::{
+        App, FontFallbacks, FontFeatures, SharedString, TitlebarOptions, WindowDecorations, font,
+    },
     std::{
         borrow::Cow,
         env, fs,
@@ -53,6 +55,28 @@ pub(crate) const TOP_BAR_LEFT_OFFSET: f32 = 8.;
 pub(crate) const DEFAULT_WINDOW_DECORATIONS: WindowDecorations = WindowDecorations::Server;
 #[cfg(not(target_os = "linux"))]
 pub(crate) const DEFAULT_WINDOW_DECORATIONS: WindowDecorations = WindowDecorations::Client;
+
+/// Platform-aware titlebar options. On macOS, uses a transparent titlebar with
+/// custom traffic-light positioning. On Linux (server-side decorations), these
+/// macOS-specific options are omitted so the compositor can provide native
+/// window controls, drag, and resize.
+pub(crate) fn default_titlebar_options(title: Option<SharedString>) -> TitlebarOptions {
+    #[cfg(target_os = "macos")]
+    use gpui::{point, px};
+
+    let title = title.unwrap_or_else(|| app_window_title(None).into());
+    TitlebarOptions {
+        title: Some(title),
+        #[cfg(target_os = "macos")]
+        appears_transparent: true,
+        #[cfg(not(target_os = "macos"))]
+        appears_transparent: false,
+        #[cfg(target_os = "macos")]
+        traffic_light_position: Some(point(px(9.), px(9.))),
+        #[cfg(not(target_os = "macos"))]
+        traffic_light_position: None,
+    }
+}
 
 pub(crate) const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);

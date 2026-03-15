@@ -5,11 +5,7 @@ fn open_arbor_window(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(1180.), px(760.))),
             app_id: Some("so.pen.arbor".to_owned()),
-            titlebar: Some(TitlebarOptions {
-                title: Some(app_window_title(None).into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(9.), px(9.))),
-            }),
+            titlebar: Some(default_titlebar_options(None)),
             window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
             ..Default::default()
         },
@@ -449,6 +445,8 @@ fn main() {
         return;
     }
 
+    force_x11_on_wayland();
+
     let log_buffer = log_layer::LogBuffer::new();
 
     {
@@ -490,11 +488,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(1180.), px(760.))),
                 app_id: Some("so.pen.arbor".to_owned()),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(app_window_title(None).into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(9.), px(9.))),
-                }),
+                titlebar: Some(default_titlebar_options(None)),
                 window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
                 ..Default::default()
             },
@@ -518,3 +512,19 @@ fn main() {
         cx.activate(true);
     });
 }
+
+/// Force X11 (via XWayland) on Wayland sessions. GPUI's Wayland backend does not
+/// yet support server-side decoration features (resize handles, drag, close/min/max
+/// buttons), so we fall back to X11 where these work correctly.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn force_x11_on_wayland() {
+    if env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty()) {
+        // SAFETY: called at the very start of main before any threads are spawned,
+        // and only when running in GUI mode (after the daemon early-return).
+        unsafe { env::remove_var("WAYLAND_DISPLAY") };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn force_x11_on_wayland() {}

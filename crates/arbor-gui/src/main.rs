@@ -45,9 +45,9 @@ use {
         DragMoveEvent, ElementId, ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight,
         Image, ImageFormat, KeyBinding, KeyDownEvent, Keystroke, Menu, MenuItem, MouseButton,
         MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, ScrollHandle,
-        ScrollStrategy, Stateful, SystemMenuType, TextRun, TitlebarOptions, UTF16Selection,
-        UniformListScrollHandle, Window, WindowBounds, WindowControlArea, WindowOptions, canvas,
-        div, ease_in_out, fill, img, point, prelude::*, px, rgb, size, uniform_list,
+        ScrollStrategy, Stateful, SystemMenuType, TextRun, UTF16Selection, UniformListScrollHandle,
+        Window, WindowBounds, WindowControlArea, WindowOptions, canvas, div, ease_in_out, fill,
+        img, point, prelude::*, px, rgb, size, uniform_list,
     },
     ropey::Rope,
     std::{

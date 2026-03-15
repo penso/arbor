@@ -145,28 +145,25 @@ impl MoshShell {
         let pixel_height = pixel_height.max(1);
 
         {
-            let size = self
-                .size
-                .lock()
-                .map_err(|_| MoshError::Io("failed to acquire mosh terminal size lock".to_owned()))?;
+            let size = self.size.lock().map_err(|_| {
+                MoshError::Io("failed to acquire mosh terminal size lock".to_owned())
+            })?;
             if *size == (rows, cols, pixel_width, pixel_height) {
                 return Ok(());
             }
         }
 
         {
-            let mut emulator = self
-                .emulator
-                .lock()
-                .map_err(|_| MoshError::Io("failed to acquire mosh emulator lock for resize".to_owned()))?;
+            let mut emulator = self.emulator.lock().map_err(|_| {
+                MoshError::Io("failed to acquire mosh emulator lock for resize".to_owned())
+            })?;
             emulator.resize(rows, cols);
         }
 
         {
-            let master = self
-                .master
-                .lock()
-                .map_err(|_| MoshError::Io("failed to acquire mosh PTY master lock for resize".to_owned()))?;
+            let master = self.master.lock().map_err(|_| {
+                MoshError::Io("failed to acquire mosh PTY master lock for resize".to_owned())
+            })?;
             master
                 .resize(PtySize {
                     rows,
@@ -178,10 +175,9 @@ impl MoshShell {
         }
 
         {
-            let mut size = self
-                .size
-                .lock()
-                .map_err(|_| MoshError::Io("failed to update mosh terminal size lock".to_owned()))?;
+            let mut size = self.size.lock().map_err(|_| {
+                MoshError::Io("failed to update mosh terminal size lock".to_owned())
+            })?;
             *size = (rows, cols, pixel_width, pixel_height);
         }
 
