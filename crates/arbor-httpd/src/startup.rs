@@ -1,8 +1,10 @@
+#[cfg(feature = "agent-chat")]
+use crate::agent_chat;
 #[cfg(feature = "symphony")]
 use arbor_symphony::{ServiceOptions, SymphonyService};
 use {
     crate::{
-        agent_chat, auth, github_service, issue_provider,
+        auth, github_service, issue_provider,
         process_manager::ProcessManager,
         repository_store,
         routes::spawn_notification_webhooks,
@@ -132,6 +134,7 @@ pub(crate) async fn build_app_state(
         issue_service: Arc::new(issue_provider::RepositoryIssueService::default()),
         agent_sessions: Arc::new(Mutex::new(HashMap::new())),
         agent_broadcast,
+        #[cfg(feature = "agent-chat")]
         agent_chat: Arc::new(Mutex::new(agent_chat::AgentChatManager::new())),
         log_broadcast,
         pr_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -141,6 +144,7 @@ pub(crate) async fn build_app_state(
     };
 
     // Restore persisted agent chat sessions and spawn listeners
+    #[cfg(feature = "agent-chat")]
     {
         let mut mgr = state.agent_chat.lock().await;
         let restored = mgr.load_persisted_sessions();

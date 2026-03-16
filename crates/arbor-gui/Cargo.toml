@@ -14,6 +14,7 @@ default = ["ssh", "mosh", "mdns"]
 ssh = ["dep:arbor-ssh", "arbor-core/ssh"]
 mosh = ["dep:arbor-mosh", "ssh", "arbor-core/mosh"]
 mdns = ["dep:zeroconf"]
+agent-chat = []
 vendored-openssl = ["arbor-core/vendored-openssl", "libssh-rs-sys/vendored-openssl", "libssh-rs-sys/vendored"]
 ghostty-vt-experimental = ["arbor-terminal-emulator/ghostty-vt-experimental"]
 

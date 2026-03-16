@@ -77,10 +77,10 @@ run-configured-embedded-engine port="": web-ui-build-if-needed ghostty-vt-bridge
     export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
     export ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)"
     export RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}"
-    cargo +{{nightly_toolchain}} run -p arbor-httpd --features ghostty-vt-experimental &
+    cargo +{{nightly_toolchain}} run -p arbor-httpd --features ghostty-vt-experimental,agent-chat &
     HTTPD_PID=$!
     trap "kill $HTTPD_PID 2>/dev/null" EXIT
-    cargo +{{nightly_toolchain}} run -p arbor-gui --features ghostty-vt-experimental
+    cargo +{{nightly_toolchain}} run -p arbor-gui --features ghostty-vt-experimental,agent-chat
     kill $HTTPD_PID 2>/dev/null || true
 
 run-ghostty-vt port="": web-ui-build-if-needed ghostty-vt-bridge
@@ -97,10 +97,10 @@ run-ghostty-vt port="": web-ui-build-if-needed ghostty-vt-bridge
     export ARBOR_TERMINAL_ENGINE="ghostty-vt-experimental"
     export ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)"
     export RUSTFLAGS="-L native=$(pwd)/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,$(pwd)/target/ghostty-vt-bridge/lib ${RUSTFLAGS:-}"
-    cargo +{{nightly_toolchain}} run -p arbor-httpd --features ghostty-vt-experimental &
+    cargo +{{nightly_toolchain}} run -p arbor-httpd --features ghostty-vt-experimental,agent-chat &
     HTTPD_PID=$!
     trap "kill $HTTPD_PID 2>/dev/null" EXIT
-    cargo +{{nightly_toolchain}} run -p arbor-gui --features ghostty-vt-experimental
+    cargo +{{nightly_toolchain}} run -p arbor-gui --features ghostty-vt-experimental,agent-chat
     kill $HTTPD_PID 2>/dev/null || true
 
 run port="": web-ui-build-if-needed
@@ -115,10 +115,10 @@ run port="": web-ui-build-if-needed
     export ARBOR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}"
     export ARBOR_HTTPD_PORT="${DAEMON_PORT}"
     export ARBOR_BUILD_BRANCH="$(git branch --show-current 2>/dev/null || true)"
-    cargo +{{nightly_toolchain}} run -p arbor-httpd &
+    cargo +{{nightly_toolchain}} run -p arbor-httpd --features agent-chat &
     HTTPD_PID=$!
     trap "kill $HTTPD_PID 2>/dev/null" EXIT
-    cargo +{{nightly_toolchain}} run -p arbor-gui
+    cargo +{{nightly_toolchain}} run -p arbor-gui --features agent-chat
     kill $HTTPD_PID 2>/dev/null || true
 
 web-ui-build:

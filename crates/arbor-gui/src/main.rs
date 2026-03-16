@@ -1,6 +1,9 @@
 mod actions;
 mod agent_activity;
+#[cfg(feature = "agent-chat")]
 mod agent_chat;
+#[cfg(not(feature = "agent-chat"))]
+mod agent_chat_stubs;
 mod agent_presets;
 mod app_bootstrap;
 mod app_config;

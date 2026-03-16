@@ -85,13 +85,6 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/agent/notify", post(agent_notify))
         .route("/agent/activity", get(list_agent_activity))
         .route("/agent/activity/ws", get(agent_activity_ws))
-        .route("/agent/chat", get(list_agent_chats).post(create_agent_chat))
-        .route("/agent/chat/{session_id}", delete(kill_agent_chat))
-        .route("/agent/chat/{session_id}/send", post(send_agent_message))
-        .route("/agent/chat/{session_id}/cancel", post(cancel_agent_chat))
-        .route("/agent/chat/{session_id}/history", get(agent_chat_history))
-        .route("/agent/chat/{session_id}/ws", get(agent_chat_ws))
-        .route("/agent/chat/discover-models", post(discover_models))
         .route("/processes", get(list_processes))
         .route("/processes/start-all", post(start_all_processes))
         .route("/processes/stop-all", post(stop_all_processes))
@@ -108,14 +101,21 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/config/theme", get(get_theme))
         .route("/logs/ws", get(logs_ws));
 
+    #[cfg(feature = "agent-chat")]
+    let api = api
+        .route("/agent/chat", get(list_agent_chats).post(create_agent_chat))
+        .route("/agent/chat/{session_id}", delete(kill_agent_chat))
+        .route("/agent/chat/{session_id}/send", post(send_agent_message))
+        .route("/agent/chat/{session_id}/cancel", post(cancel_agent_chat))
+        .route("/agent/chat/{session_id}/history", get(agent_chat_history))
+        .route("/agent/chat/{session_id}/ws", get(agent_chat_ws))
+        .route("/agent/chat/discover-models", post(discover_models));
+
     #[cfg(feature = "symphony")]
     let api = api
         .route("/symphony/state", get(symphony_state))
         .route("/symphony/refresh", post(symphony_refresh))
         .route("/symphony/{issue_identifier}", get(symphony_issue));
-
-    #[cfg(not(feature = "symphony"))]
-    let api = api;
 
     let with_state = Router::new().nest("/api/v1", api).with_state(state);
 
@@ -2119,6 +2119,7 @@ pub(crate) fn not_found_error(message: String) -> (StatusCode, Json<ApiError>) {
     (StatusCode::NOT_FOUND, Json(ApiError { error: message }))
 }
 
+#[cfg(feature = "agent-chat")]
 fn bad_gateway_error(message: &str) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::BAD_GATEWAY,
@@ -2526,6 +2527,7 @@ fn pr_cache_key(slug: &str, branch: &str, is_primary: bool) -> String {
 
 // ── Agent Chat routes ────────────────────────────────────────────────
 
+#[cfg(feature = "agent-chat")]
 async fn create_agent_chat(
     State(state): State<AppState>,
     Json(request): Json<crate::agent_chat::CreateAgentChatRequest>,
@@ -2553,6 +2555,7 @@ async fn create_agent_chat(
     }))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn list_agent_chats(
     State(state): State<AppState>,
 ) -> ApiResult<Vec<crate::agent_chat::AgentChatSessionDto>> {
@@ -2560,6 +2563,7 @@ async fn list_agent_chats(
     Ok(Json(manager.list()))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn send_agent_message(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -2572,6 +2576,7 @@ async fn send_agent_message(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn cancel_agent_chat(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -2581,6 +2586,7 @@ async fn cancel_agent_chat(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn kill_agent_chat(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -2591,6 +2597,7 @@ async fn kill_agent_chat(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn agent_chat_history(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -2600,6 +2607,7 @@ async fn agent_chat_history(
     Ok(Json(messages))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn agent_chat_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -2608,6 +2616,7 @@ async fn agent_chat_ws(
     ws.on_upgrade(move |socket| handle_agent_chat_ws(socket, state, session_id))
 }
 
+#[cfg(feature = "agent-chat")]
 async fn handle_agent_chat_ws(mut socket: WebSocket, state: AppState, session_id: String) {
     // Subscribe to session events
     let (mut event_rx, session_dto, messages) = {
@@ -2674,6 +2683,7 @@ async fn handle_agent_chat_ws(mut socket: WebSocket, state: AppState, session_id
     }
 }
 
+#[cfg(feature = "agent-chat")]
 async fn discover_models(
     Json(request): Json<crate::agent_chat::DiscoverModelsRequest>,
 ) -> ApiResult<crate::agent_chat::DiscoverModelsResponse> {

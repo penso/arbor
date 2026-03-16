@@ -1,5 +1,34 @@
 use super::*;
 
+/// Handler for the "+" new tab button.  When `agent-chat` is enabled this opens
+/// a dropdown menu; otherwise it spawns a terminal directly.
+#[cfg(feature = "agent-chat")]
+fn new_tab_button_handler(
+    this: &mut ArborWindow,
+    event: &MouseDownEvent,
+    _window: &mut Window,
+    cx: &mut Context<ArborWindow>,
+) {
+    this.new_tab_menu_position = if this.new_tab_menu_position.is_some() {
+        None
+    } else {
+        Some(event.position)
+    };
+    cx.stop_propagation();
+    cx.notify();
+}
+
+#[cfg(not(feature = "agent-chat"))]
+fn new_tab_button_handler(
+    this: &mut ArborWindow,
+    _event: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut Context<ArborWindow>,
+) {
+    cx.stop_propagation();
+    this.spawn_terminal_session(window, cx);
+}
+
 impl ArborWindow {
     pub(crate) fn render_terminal_panel(
         &mut self,
@@ -218,18 +247,7 @@ impl ArborWindow {
                                             .child("+")
                                             .on_mouse_down(
                                                 MouseButton::Left,
-                                                cx.listener(
-                                                    |this, event: &MouseDownEvent, _, cx| {
-                                                        this.new_tab_menu_position =
-                                                            if this.new_tab_menu_position.is_some() {
-                                                                None
-                                                            } else {
-                                                                Some(event.position)
-                                                            };
-                                                        cx.stop_propagation();
-                                                        cx.notify();
-                                                    },
-                                                ),
+                                                cx.listener(new_tab_button_handler),
                                             ),
                                     ),
                             ),
@@ -741,8 +759,10 @@ impl ArborWindow {
 
     /// Render the "+" new tab dropdown menu.
     ///
-    /// Shows "Terminal" and installed agent chat options (Claude, Codex, etc.).
-    /// Presets are no longer shown here — they live inside terminal tabs.
+    /// Shows "Terminal" and agent chat options when the `agent-chat` feature is
+    /// enabled.  Returns an empty div otherwise (the "+" button spawns a
+    /// terminal directly).
+    #[cfg(feature = "agent-chat")]
     pub(crate) fn render_new_tab_menu(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(position) = self.new_tab_menu_position else {
             return div();
@@ -854,6 +874,11 @@ impl ArborWindow {
                             })),
                     ),
             )
+    }
+
+    #[cfg(not(feature = "agent-chat"))]
+    pub(crate) fn render_new_tab_menu(&mut self, _cx: &mut Context<Self>) -> Div {
+        div()
     }
 
     pub(crate) fn render_center_pane(

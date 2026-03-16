@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = ["mdns"]
 mdns = ["dep:zeroconf"]
+agent-chat = []
 symphony = ["dep:arbor-symphony"]
 vendored-openssl = ["arbor-core/vendored-openssl"]
 ghostty-vt-experimental = ["arbor-terminal-emulator/ghostty-vt-experimental"]
