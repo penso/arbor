@@ -166,6 +166,7 @@ pub(crate) async fn build_app_state(
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
             let mut ticks_since_reap: u32 = 0;
+            let mut ticks_since_process_check: u32 = 0;
             loop {
                 interval.tick().await;
                 let (restart_schedule, crashed_processes) = {
@@ -224,6 +225,45 @@ pub(crate) async fn build_app_state(
                         let mut daemon = state.daemon.lock().await;
                         let _ = pm.restart_tracked_process(&name, &mut *daemon);
                     });
+                }
+
+                // Periodically check session process trees for runaway spawning
+                ticks_since_process_check += 1;
+                if ticks_since_process_check >= 5 {
+                    ticks_since_process_check = 0;
+                    let daemon = state.daemon.lock().await;
+                    if let Ok(metrics) =
+                        crate::process_metrics::collect_session_process_metrics(&*daemon)
+                    {
+                        let mut total_processes: u32 = 0;
+                        for (session_id, session_metrics) in &metrics {
+                            total_processes =
+                                total_processes.saturating_add(session_metrics.process_count);
+                            let memory_mb = session_metrics.memory_bytes as f64 / (1024.0 * 1024.0);
+                            if session_metrics.process_count > 200 {
+                                tracing::error!(
+                                    session_id = %session_id,
+                                    process_count = session_metrics.process_count,
+                                    memory_mb = format!("{memory_mb:.1}"),
+                                    "session has excessive descendant processes"
+                                );
+                            } else if session_metrics.process_count > 50 {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    process_count = session_metrics.process_count,
+                                    memory_mb = format!("{memory_mb:.1}"),
+                                    "session has many descendant processes"
+                                );
+                            }
+                        }
+                        if total_processes > 100 {
+                            tracing::info!(
+                                total_process_count = total_processes,
+                                session_count = metrics.len(),
+                                "high total process count across all sessions"
+                            );
+                        }
+                    }
                 }
             }
         });

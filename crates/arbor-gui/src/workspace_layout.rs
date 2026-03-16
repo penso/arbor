@@ -666,6 +666,10 @@ impl ArborWindow {
                     ))
                     .child(status_text(theme, "•"))
                     .child(status_text(theme, format!("terminals {terminal_count}")))
+                    .when_some(self.self_memory_bytes, |this, bytes| {
+                        this.child(status_text(theme, "•"))
+                            .child(status_text(theme, format_memory_bytes(bytes)))
+                    })
                     .when_some(self.update_available.clone(), |this, version| {
                         this.child(status_text(theme, "•")).child(
                             div()

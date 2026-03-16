@@ -13,6 +13,13 @@ struct ProcessSnapshot {
     memory_bytes: u64,
 }
 
+/// Per-session metrics: total memory and descendant process count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionProcessMetrics {
+    pub(crate) memory_bytes: u64,
+    pub(crate) process_count: u32,
+}
+
 pub(crate) fn collect_session_memory_bytes<D>(
     daemon: &D,
 ) -> Result<HashMap<String, u64>, ProcessMetricsError>
@@ -20,10 +27,25 @@ where
     D: TerminalDaemon,
     D::Error: ToString,
 {
+    let metrics = collect_session_process_metrics(daemon)?;
+    Ok(metrics
+        .into_iter()
+        .map(|(id, m)| (id, m.memory_bytes))
+        .collect())
+}
+
+/// Collect both memory and process count metrics for all running sessions.
+pub(crate) fn collect_session_process_metrics<D>(
+    daemon: &D,
+) -> Result<HashMap<String, SessionProcessMetrics>, ProcessMetricsError>
+where
+    D: TerminalDaemon,
+    D::Error: ToString,
+{
     let sessions = daemon
         .list_sessions()
         .map_err(|error| ProcessMetricsError::DaemonListSessions(error.to_string()))?;
-    Ok(session_memory_bytes_from_sessions(
+    Ok(session_process_metrics_from_sessions(
         &sessions,
         &list_process_snapshot(),
     ))
@@ -41,12 +63,12 @@ pub(crate) fn attach_process_memory(
     }
 }
 
-fn session_memory_bytes_from_sessions(
+fn session_process_metrics_from_sessions(
     sessions: &[DaemonSessionRecord],
     process_snapshot: &HashMap<u32, ProcessSnapshot>,
-) -> HashMap<String, u64> {
+) -> HashMap<String, SessionProcessMetrics> {
     let children_by_parent = build_children_by_parent(process_snapshot);
-    let mut session_memory_bytes = HashMap::new();
+    let mut result = HashMap::new();
 
     for session in sessions {
         if session.state != Some(TerminalSessionState::Running) {
@@ -63,10 +85,15 @@ fn session_memory_bytes_from_sessions(
             continue;
         };
 
-        session_memory_bytes.insert(session.session_id.to_string(), memory_bytes);
+        let process_count = subtree_process_count(root_pid, process_snapshot, &children_by_parent);
+
+        result.insert(session.session_id.to_string(), SessionProcessMetrics {
+            memory_bytes,
+            process_count,
+        });
     }
 
-    session_memory_bytes
+    result
 }
 
 fn build_children_by_parent(
@@ -111,6 +138,34 @@ fn subtree_memory_bytes(
     }
 
     found_process.then_some(total_memory_bytes)
+}
+
+fn subtree_process_count(
+    root_pid: u32,
+    process_snapshot: &HashMap<u32, ProcessSnapshot>,
+    children_by_parent: &HashMap<u32, Vec<u32>>,
+) -> u32 {
+    let mut count = 0_u32;
+    let mut visited = HashSet::new();
+    let mut stack = vec![root_pid];
+
+    while let Some(pid) = stack.pop() {
+        if !visited.insert(pid) {
+            continue;
+        }
+
+        if process_snapshot.get(&pid).is_none() {
+            continue;
+        }
+
+        count = count.saturating_add(1);
+
+        if let Some(children) = children_by_parent.get(&pid) {
+            stack.extend(children.iter().copied());
+        }
+    }
+
+    count
 }
 
 #[cfg(unix)]
@@ -222,9 +277,8 @@ mod tests {
         std::path::PathBuf,
     };
 
-    #[test]
-    fn session_memory_sums_the_full_process_tree() {
-        let process_snapshot = HashMap::from([
+    fn sample_process_snapshot() -> HashMap<u32, ProcessSnapshot> {
+        HashMap::from([
             (10, ProcessSnapshot {
                 parent_pid: 1,
                 memory_bytes: 4_096,
@@ -241,8 +295,11 @@ mod tests {
                 parent_pid: 1,
                 memory_bytes: 32_768,
             }),
-        ]);
-        let sessions = vec![
+        ])
+    }
+
+    fn sample_sessions() -> Vec<DaemonSessionRecord> {
+        vec![
             DaemonSessionRecord {
                 session_id: SessionId::from("daemon-1"),
                 workspace_id: WorkspaceId::from("/tmp/repo"),
@@ -273,12 +330,53 @@ mod tests {
                 state: Some(TerminalSessionState::Completed),
                 updated_at_unix_ms: None,
             },
-        ];
+        ]
+    }
 
-        let session_memory = session_memory_bytes_from_sessions(&sessions, &process_snapshot);
+    #[test]
+    fn session_memory_sums_the_full_process_tree() {
+        let process_snapshot = sample_process_snapshot();
+        let sessions = sample_sessions();
 
-        assert_eq!(session_memory.get("daemon-1"), Some(&28_672));
-        assert_eq!(session_memory.get("daemon-2"), None);
+        let metrics = session_process_metrics_from_sessions(&sessions, &process_snapshot);
+
+        assert_eq!(
+            metrics.get("daemon-1").map(|m| m.memory_bytes),
+            Some(28_672)
+        );
+        assert_eq!(metrics.get("daemon-2"), None);
+    }
+
+    #[test]
+    fn session_process_count_counts_all_descendants() {
+        let process_snapshot = sample_process_snapshot();
+        let sessions = sample_sessions();
+
+        let metrics = session_process_metrics_from_sessions(&sessions, &process_snapshot);
+
+        // daemon-1 root_pid=10 has children 11, grandchild 12 → 3 processes total
+        assert_eq!(metrics.get("daemon-1").map(|m| m.process_count), Some(3));
+        // daemon-2 is Completed, so it's excluded
+        assert_eq!(metrics.get("daemon-2"), None);
+    }
+
+    #[test]
+    fn subtree_process_count_returns_zero_for_missing_root() {
+        let process_snapshot = sample_process_snapshot();
+        let children_by_parent = build_children_by_parent(&process_snapshot);
+
+        let count = subtree_process_count(999, &process_snapshot, &children_by_parent);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn subtree_process_count_single_process() {
+        let process_snapshot = sample_process_snapshot();
+        let children_by_parent = build_children_by_parent(&process_snapshot);
+
+        // pid 20 has no children
+        let count = subtree_process_count(20, &process_snapshot, &children_by_parent);
+        assert_eq!(count, 1);
     }
 
     #[cfg(unix)]

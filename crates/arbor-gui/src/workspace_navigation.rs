@@ -738,6 +738,17 @@ impl ArborWindow {
             .iter()
             .any(|session| session.worktree_path == worktree_path);
         if !has_terminal {
+            // Before creating a brand-new terminal, check whether the daemon
+            // already has sessions for this worktree (e.g. from a prior GUI
+            // session).  Adopting them prevents orphaned agent processes from
+            // accumulating across GUI restarts.
+            if self.try_adopt_daemon_sessions_for_worktree(&worktree_path) {
+                tracing::info!(
+                    worktree = %worktree_path.display(),
+                    "adopted existing daemon sessions instead of creating a new terminal"
+                );
+                return true;
+            }
             return self.spawn_terminal_session_inner(false, cx);
         }
 
@@ -747,6 +758,41 @@ impl ArborWindow {
         }
 
         true
+    }
+
+    /// Check the daemon for running sessions that belong to the given worktree
+    /// and adopt them into the GUI's terminal list.  Returns `true` if at least
+    /// one session was adopted.
+    fn try_adopt_daemon_sessions_for_worktree(&mut self, worktree_path: &Path) -> bool {
+        let Some(daemon) = self.terminal_daemon.as_ref() else {
+            return false;
+        };
+
+        let records = match daemon.list_sessions() {
+            Ok(records) => records,
+            Err(_) => return false,
+        };
+
+        let worktree_str = worktree_path.display().to_string();
+        let matching: Vec<DaemonSessionRecord> = records
+            .into_iter()
+            .filter(|record| {
+                let cwd_matches = paths_equivalent(record.cwd.as_path(), worktree_path);
+                let workspace_matches = record.workspace_id.as_str() == worktree_str;
+                let is_live = record.state == Some(TerminalSessionState::Running);
+                let already_tracked = self
+                    .terminals
+                    .iter()
+                    .any(|session| session.daemon_session_id == record.session_id.as_str());
+                (cwd_matches || workspace_matches) && is_live && !already_tracked
+            })
+            .collect();
+
+        if matching.is_empty() {
+            return false;
+        }
+
+        self.restore_terminal_sessions_from_records(matching, true)
     }
 
     pub(crate) fn close_terminal_session_by_id(&mut self, session_id: u64) -> bool {

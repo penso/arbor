@@ -87,6 +87,8 @@ impl ArborWindow {
         });
 
         let mut changed = false;
+        let mut restored_count = 0_usize;
+        let mut skipped_count = 0_usize;
 
         for record in records {
             if record.session_id.as_str().trim().is_empty() {
@@ -94,6 +96,13 @@ impl ArborWindow {
             }
 
             let Some(worktree_path) = self.worktree_path_for_session_record(&record) else {
+                skipped_count += 1;
+                tracing::debug!(
+                    session_id = %record.session_id,
+                    cwd = %record.cwd.display(),
+                    workspace_id = %record.workspace_id,
+                    "skipping daemon session restore: no matching worktree"
+                );
                 continue;
             };
             let session_state = terminal_state_from_daemon_record(&record);
@@ -217,11 +226,22 @@ impl ArborWindow {
                 .iter()
                 .find(|session| session.daemon_session_id == record.session_id.as_str())
                 .map(|session| session.id);
+            restored_count += 1;
             if let Some(mapped_terminal_id) = mapped_terminal_id {
                 self.active_terminal_by_worktree
                     .entry(worktree_path)
                     .or_insert(mapped_terminal_id);
             }
+        }
+
+        if restored_count > 0 || skipped_count > 0 {
+            tracing::info!(
+                restored_count,
+                skipped_count,
+                total_terminals = self.terminals.len(),
+                worktree_count = self.worktrees.len(),
+                "terminal session restore completed"
+            );
         }
 
         changed
@@ -233,7 +253,23 @@ impl ArborWindow {
         }
 
         let workspace_path = PathBuf::from(record.workspace_id.to_string());
-        self.match_worktree_path(workspace_path.as_path())
+        if let Some(path) = self.match_worktree_path(workspace_path.as_path()) {
+            return Some(path);
+        }
+
+        // When worktrees haven't been populated yet (e.g. during startup before
+        // the async refresh completes), fall back to the record's own paths so
+        // that daemon sessions are still restored.  Without this, every GUI
+        // restart would skip all daemon sessions and create fresh terminals —
+        // causing orphaned agent processes to accumulate.
+        if record.cwd.is_dir() {
+            return Some(record.cwd.clone());
+        }
+        if workspace_path.is_dir() {
+            return Some(workspace_path);
+        }
+
+        None
     }
 
     fn match_worktree_path(&self, candidate: &Path) -> Option<PathBuf> {

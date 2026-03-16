@@ -375,6 +375,7 @@ impl ArborWindow {
                     remote_daemon_states: HashMap::new(),
                     active_remote_worktree: None,
                     update_available: None,
+                    self_memory_bytes: None,
                 };
 
                 return app;
@@ -821,6 +822,7 @@ impl ArborWindow {
             remote_daemon_states: HashMap::new(),
             active_remote_worktree: None,
             update_available: None,
+            self_memory_bytes: None,
         };
 
         app.refresh_worktrees(cx);
@@ -846,6 +848,7 @@ impl ArborWindow {
         app.start_daemon_log_ws(cx);
         app.start_mdns_browser(cx);
         app.start_version_check_poller(cx);
+        app.start_memory_poller(cx);
         app.ensure_claude_code_hooks(cx);
         app.ensure_pi_agent_extension(cx);
 

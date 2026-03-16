@@ -794,6 +794,15 @@ pub(crate) async fn create_terminal(
         .workspace_id
         .unwrap_or_else(|| request.cwd.clone().into());
 
+    tracing::info!(
+        session_id = ?request.session_id,
+        workspace_id = %workspace_id,
+        cwd = %cwd.display(),
+        title = ?request.title,
+        command = ?request.command,
+        "create_terminal request received"
+    );
+
     let mut daemon = state.daemon.lock().await;
     let response = daemon
         .create_or_attach(CreateOrAttachRequest {
@@ -807,6 +816,12 @@ pub(crate) async fn create_terminal(
             command: request.command,
         })
         .map_err(map_daemon_error)?;
+
+    tracing::info!(
+        session_id = %response.session.session_id,
+        is_new = response.is_new_session,
+        "create_terminal response"
+    );
 
     Ok(Json(CreateTerminalResponse {
         is_new_session: response.is_new_session,

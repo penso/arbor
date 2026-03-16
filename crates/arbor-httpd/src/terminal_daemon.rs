@@ -618,6 +618,12 @@ impl TerminalDaemon for LocalTerminalDaemon {
         }
 
         if let Some(existing) = self.sessions.get(&request.session_id) {
+            tracing::debug!(
+                session_id = %request.session_id,
+                workspace_id = %request.workspace_id,
+                cwd = %request.cwd.display(),
+                "attaching to existing terminal session"
+            );
             return Ok(CreateOrAttachResponse {
                 is_new_session: false,
                 session: existing.record(),
@@ -630,6 +636,17 @@ impl TerminalDaemon for LocalTerminalDaemon {
         if request.rows == 0 {
             request.rows = DEFAULT_ROWS;
         }
+
+        tracing::info!(
+            session_id = %request.session_id,
+            workspace_id = %request.workspace_id,
+            cwd = %request.cwd.display(),
+            shell = %request.shell,
+            command = ?request.command,
+            title = ?request.title,
+            total_sessions = self.sessions.len() + 1,
+            "creating new terminal session"
+        );
 
         let session = LiveSession::from_request(request, self.activity_tx.clone())?;
         let record = session.record();
@@ -670,6 +687,11 @@ impl TerminalDaemon for LocalTerminalDaemon {
 
     fn kill(&mut self, request: KillRequest) -> Result<(), Self::Error> {
         let session = self.session_by_id(&request.session_id)?;
+        tracing::info!(
+            session_id = %request.session_id,
+            cwd = %session.cwd.display(),
+            "killing terminal session"
+        );
         session.kill()?;
         self.sessions.remove(&request.session_id);
         self.persist_current_sessions()?;

@@ -126,6 +126,7 @@ pub(crate) const COMMAND_PALETTE_MAX_HEIGHT_PX: f32 = 360.;
 pub(crate) const COMMAND_PALETTE_ROW_ESTIMATE_PX: f32 = 52.;
 pub(crate) const COMMAND_PALETTE_SCROLLBAR_TRACK_HEIGHT_PX: f32 = 336.;
 pub(crate) const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const MEMORY_POLLER_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
 pub(crate) const WORKTREE_HOVER_POPOVER_HIDE_DELAY: Duration = Duration::from_millis(300);
 pub(crate) const WORKTREE_HOVER_POPOVER_CARD_WIDTH_PX: f32 = 300.;

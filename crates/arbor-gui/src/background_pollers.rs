@@ -313,4 +313,28 @@ impl ArborWindow {
         })
         .detach();
     }
+
+    pub(crate) fn start_memory_poller(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async move {
+                    std::thread::sleep(MEMORY_POLLER_INTERVAL);
+                })
+                .await;
+
+                let memory_bytes = cx.background_spawn(async move { self_rss_bytes() }).await;
+
+                let updated = this.update(cx, |this, cx| {
+                    if this.self_memory_bytes != memory_bytes {
+                        this.self_memory_bytes = memory_bytes;
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
 }

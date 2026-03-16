@@ -2399,6 +2399,8 @@ pub(crate) struct ArborWindow {
     pub(crate) active_remote_worktree: Option<ActiveRemoteWorktree>,
     /// When `Some`, a newer version of Arbor is available on GitHub.
     pub(crate) update_available: Option<String>,
+    /// Current process RSS memory usage in bytes, updated periodically.
+    pub(crate) self_memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

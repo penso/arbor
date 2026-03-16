@@ -1173,6 +1173,35 @@ pub(crate) fn collapsed_repository_indices_from_group_keys(
         .collect()
 }
 
+/// Return the current process's resident set size in bytes.
+#[cfg(unix)]
+pub(crate) fn self_rss_bytes() -> Option<u64> {
+    let pid = std::process::id();
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let kib: u64 = text.trim().parse().ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn self_rss_bytes() -> Option<u64> {
+    None
+}
+
+pub(crate) fn format_memory_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else {
+        format!("{} MB", bytes / 1_048_576)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
