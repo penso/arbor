@@ -666,9 +666,19 @@ impl ArborWindow {
                     ))
                     .child(status_text(theme, "•"))
                     .child(status_text(theme, format!("terminals {terminal_count}")))
+                    .when_some(self.self_cpu_percent, |this, percent| {
+                        this.child(status_text(theme, "•")).child(status_metric(
+                            theme,
+                            "\u{f2db}",
+                            format_cpu_percent(percent),
+                        ))
+                    })
                     .when_some(self.self_memory_bytes, |this, bytes| {
-                        this.child(status_text(theme, "•"))
-                            .child(status_text(theme, format_memory_bytes(bytes)))
+                        this.child(status_text(theme, "•")).child(status_metric(
+                            theme,
+                            "\u{f538}",
+                            format_memory_bytes(bytes),
+                        ))
                     })
                     .when_some(self.update_available.clone(), |this, version| {
                         this.child(status_text(theme, "•")).child(
@@ -715,6 +725,15 @@ impl ArborWindow {
                     }),
             )
     }
+}
+
+fn status_metric(theme: ThemePalette, icon: &'static str, value: impl Into<String>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(status_text(theme, icon))
+        .child(status_text(theme, value))
 }
 
 #[cfg(test)]

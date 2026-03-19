@@ -1,38 +1,84 @@
 use {
     super::*,
-    std::{collections::HashMap, time::Duration},
+    std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, mpsc::Receiver},
+        time::Duration,
+    },
+    sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid},
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ProcessUsageSnapshot {
+    cpu_percent: Option<u16>,
+    memory_bytes: Option<u64>,
+}
+
+struct ProcessUsageSampler {
+    pid: sysinfo::Pid,
+    system: System,
+}
+
+impl ProcessUsageSampler {
+    fn new() -> Option<Self> {
+        let pid = get_current_pid().ok()?;
+        let mut system = System::new();
+        refresh_process_usage(&mut system, pid);
+        Some(Self { pid, system })
+    }
+
+    fn snapshot(&mut self) -> ProcessUsageSnapshot {
+        refresh_process_usage(&mut self.system, self.pid);
+
+        let Some(process) = self.system.process(self.pid) else {
+            return ProcessUsageSnapshot::default();
+        };
+
+        ProcessUsageSnapshot {
+            cpu_percent: Some(process.cpu_usage().round().clamp(0.0, u16::MAX as f32) as u16),
+            memory_bytes: Some(process.memory()),
+        }
+    }
+}
+
+fn refresh_process_usage(system: &mut System, pid: sysinfo::Pid) {
+    let pids = [pid];
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        ProcessRefreshKind::new().with_cpu().with_memory(),
+    );
+}
 
 impl ArborWindow {
     pub(crate) fn start_terminal_poller(&mut self, cx: &mut Context<Self>) {
         let Some(poll_rx) = self.terminal_poll_rx.take() else {
             return;
         };
+        let poll_rx = Arc::new(Mutex::new(poll_rx));
 
         cx.spawn(async move |this, cx| {
-            let (bridge_tx, bridge_rx) = smol::channel::bounded::<()>(1);
-
-            cx.background_spawn(async move {
-                loop {
-                    // Wait for a notification or fall back to 45ms timeout (for SSH/daemon
-                    // terminals that use pull-based polling without a reader thread).
-                    let _ = poll_rx.recv_timeout(Duration::from_millis(45));
-                    // Drain queued notifications to coalesce burst output.
-                    while poll_rx.try_recv().is_ok() {}
-                    // Small deadline window to batch rapid output (e.g. `cat large_file`).
-                    std::thread::sleep(Duration::from_millis(4));
-                    while poll_rx.try_recv().is_ok() {}
-                    if bridge_tx.send(()).await.is_err() {
-                        break;
-                    }
-                }
-            })
-            .detach();
-
             loop {
-                if bridge_rx.recv().await.is_err() {
+                let wait_interval =
+                    match this.update(cx, |this, _| this.terminal_background_sync_interval()) {
+                        Ok(wait_interval) => wait_interval,
+                        Err(_) => break,
+                    };
+
+                let poll_rx = Arc::clone(&poll_rx);
+                let should_continue = cx
+                    .background_spawn(async move {
+                        let poll_rx = match poll_rx.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        wait_for_terminal_poller_event(&poll_rx, wait_interval)
+                    })
+                    .await;
+
+                if !should_continue {
                     break;
                 }
+
                 let updated = this.update(cx, |this, cx| this.sync_running_terminals(cx));
                 if updated.is_err() {
                     break;
@@ -316,17 +362,42 @@ impl ArborWindow {
 
     pub(crate) fn start_memory_poller(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_spawn(async move {
-                    std::thread::sleep(MEMORY_POLLER_INTERVAL);
-                })
-                .await;
+            let (bridge_tx, bridge_rx) = smol::channel::bounded::<ProcessUsageSnapshot>(1);
 
-                let memory_bytes = cx.background_spawn(async move { self_rss_bytes() }).await;
+            cx.background_spawn(async move {
+                let mut sampler = ProcessUsageSampler::new();
+
+                loop {
+                    std::thread::sleep(MEMORY_POLLER_INTERVAL);
+
+                    let snapshot = sampler
+                        .as_mut()
+                        .map(ProcessUsageSampler::snapshot)
+                        .unwrap_or_default();
+
+                    if bridge_tx.send(snapshot).await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+
+            loop {
+                let Ok(snapshot) = bridge_rx.recv().await else {
+                    break;
+                };
 
                 let updated = this.update(cx, |this, cx| {
-                    if this.self_memory_bytes != memory_bytes {
-                        this.self_memory_bytes = memory_bytes;
+                    let cpu_changed = this.self_cpu_percent != snapshot.cpu_percent;
+                    let memory_changed = this.self_memory_bytes != snapshot.memory_bytes;
+
+                    if cpu_changed {
+                        this.self_cpu_percent = snapshot.cpu_percent;
+                    }
+                    if memory_changed {
+                        this.self_memory_bytes = snapshot.memory_bytes;
+                    }
+                    if cpu_changed || memory_changed {
                         cx.notify();
                     }
                 });
@@ -337,4 +408,36 @@ impl ArborWindow {
         })
         .detach();
     }
+}
+
+fn wait_for_terminal_poller_event(poll_rx: &Receiver<()>, wait_interval: Option<Duration>) -> bool {
+    enum TerminalPollWait {
+        TimedOut,
+        Notified,
+        Disconnected,
+    }
+
+    let wait_result = match wait_interval {
+        Some(wait_interval) => match poll_rx.recv_timeout(wait_interval) {
+            Ok(()) => TerminalPollWait::Notified,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => TerminalPollWait::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => TerminalPollWait::Disconnected,
+        },
+        None => match poll_rx.recv() {
+            Ok(()) => TerminalPollWait::Notified,
+            Err(_) => TerminalPollWait::Disconnected,
+        },
+    };
+
+    if matches!(wait_result, TerminalPollWait::Disconnected) {
+        return false;
+    }
+
+    while poll_rx.try_recv().is_ok() {}
+    if matches!(wait_result, TerminalPollWait::Notified) {
+        std::thread::sleep(Duration::from_millis(4));
+        while poll_rx.try_recv().is_ok() {}
+    }
+
+    true
 }

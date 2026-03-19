@@ -1,6 +1,23 @@
 use super::*;
 
 impl ArborWindow {
+    pub(crate) fn terminal_background_sync_interval(&self) -> Option<Duration> {
+        let active_terminal_id = self.active_terminal_id_for_selected_worktree();
+
+        self.terminals
+            .iter()
+            .filter_map(|session| {
+                let runtime = session.runtime.as_ref()?;
+                let is_active = active_terminal_id == Some(session.id);
+                runtime.background_sync_interval(session, is_active)
+            })
+            .min()
+    }
+
+    pub(crate) fn wake_terminal_poller(&self) {
+        let _ = self.terminal_poll_tx.send(());
+    }
+
     pub(crate) fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
         let records = self.daemon_session_records_snapshot();
         self.daemon_session_store_save.queue(records);
@@ -593,6 +610,7 @@ impl ArborWindow {
                 }
 
                 session.is_initializing = false;
+                this.wake_terminal_poller();
                 if let Err(error) = this.flush_queued_input_for_terminal(session_id) {
                     this.notice = Some(format!("failed to write queued terminal input: {error}"));
                 }
@@ -848,6 +866,7 @@ impl ArborWindow {
                     },
                 }
                 session.is_initializing = false;
+                this.wake_terminal_poller();
                 if let Err(error) = this.flush_queued_input_for_terminal(session_id) {
                     this.notice = Some(format!("failed to write queued terminal input: {error}"));
                 }
@@ -898,6 +917,7 @@ impl ArborWindow {
         self.logs_tab_active = false;
         self.sync_navigation_ui_state_store(cx);
         self.terminal_scroll_handle.scroll_to_bottom();
+        self.wake_terminal_poller();
         window.focus(&self.terminal_focus);
         self.focus_terminal_on_next_render = false;
         cx.notify();

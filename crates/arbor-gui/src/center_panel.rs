@@ -301,11 +301,29 @@ impl ArborWindow {
                     .when_some(active_terminal, |this, session| {
                         let selection = self.terminal_selection_for_session(session.id);
                         let ime_text = self.ime_marked_text.as_deref();
-                        let styled_lines =
-                            styled_lines_for_session(&session, theme, true, selection, ime_text);
                         let mono_font = terminal_mono_font(cx);
                         let cell_width = terminal_cell_width_px(cx);
                         let line_height = terminal_line_height_px(cx);
+                        let line_count = terminal_render_line_count(&session, selection);
+                        let visible_range = terminal_visible_line_range(
+                            &self.terminal_scroll_handle,
+                            line_count,
+                            line_height,
+                        );
+                        let top_spacer_height =
+                            terminal_spacer_height_px(visible_range.start, line_height);
+                        let bottom_spacer_height = terminal_spacer_height_px(
+                            line_count.saturating_sub(visible_range.end),
+                            line_height,
+                        );
+                        let styled_lines = styled_lines_for_session_range(
+                            &session,
+                            theme,
+                            true,
+                            selection,
+                            ime_text,
+                            visible_range,
+                        );
 
                         this.child(
                             div()
@@ -365,6 +383,14 @@ impl ArborWindow {
                                                         .flex()
                                                         .flex_col()
                                                         .gap_0()
+                                                        .when(top_spacer_height > px(0.), |this| {
+                                                            this.child(
+                                                                div()
+                                                                    .w_full()
+                                                                    .h(top_spacer_height)
+                                                                    .flex_none(),
+                                                            )
+                                                        })
                                                         .children(styled_lines.into_iter().map(|line| {
                                                             render_terminal_line(
                                                                 line,
@@ -373,7 +399,15 @@ impl ArborWindow {
                                                                 line_height,
                                                                 mono_font.clone(),
                                                             )
-                                                        })),
+                                                        }))
+                                                        .when(bottom_spacer_height > px(0.), |this| {
+                                                            this.child(
+                                                                div()
+                                                                    .w_full()
+                                                                    .h(bottom_spacer_height)
+                                                                    .flex_none(),
+                                                            )
+                                                        }),
                                                 ),
                                         ),
                                 ),

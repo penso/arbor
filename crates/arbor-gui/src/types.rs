@@ -287,6 +287,11 @@ impl SshTerminalShell {
                 self.generation.fetch_add(1, Ordering::Relaxed);
                 true
             },
+            Ok(_) | Err(_) if shell.is_closed() || shell.is_eof() => {
+                drop(shell);
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                true
+            },
             _ => false,
         }
     }
@@ -391,11 +396,24 @@ pub(crate) trait EmulatorRuntimeBackend: Clone {
     ) -> Result<(), TerminalError>;
     fn generation(&self) -> u64;
     fn close(&self);
+    fn background_sync_interval(
+        &self,
+        is_active: bool,
+        session_state: TerminalState,
+    ) -> Option<Duration>;
 }
 
 pub(crate) trait TerminalRuntimeHandle {
     fn kind(&self) -> TerminalRuntimeKind;
     fn sync_interval(&self, is_active: bool, session_state: TerminalState) -> Duration;
+    fn background_sync_interval(
+        &self,
+        session: &TerminalSession,
+        is_active: bool,
+    ) -> Option<Duration> {
+        let interval = self.sync_interval(is_active, session.state);
+        (interval > Duration::ZERO).then_some(interval)
+    }
     fn should_sync(
         &self,
         session: &TerminalSession,
@@ -700,6 +718,14 @@ impl EmulatorRuntimeBackend for EmbeddedTerminal {
     fn close(&self) {
         EmbeddedTerminal::close(self);
     }
+
+    fn background_sync_interval(
+        &self,
+        is_active: bool,
+        session_state: TerminalState,
+    ) -> Option<Duration> {
+        event_driven_terminal_sync_interval(is_active, session_state)
+    }
 }
 
 impl EmulatorRuntimeBackend for SshTerminalShell {
@@ -731,6 +757,14 @@ impl EmulatorRuntimeBackend for SshTerminalShell {
 
     fn close(&self) {
         SshTerminalShell::close(self);
+    }
+
+    fn background_sync_interval(
+        &self,
+        is_active: bool,
+        session_state: TerminalState,
+    ) -> Option<Duration> {
+        ssh_terminal_sync_interval(is_active, session_state)
     }
 }
 
@@ -764,6 +798,14 @@ impl EmulatorRuntimeBackend for arbor_mosh::MoshShell {
     fn close(&self) {
         arbor_mosh::MoshShell::close(self);
     }
+
+    fn background_sync_interval(
+        &self,
+        is_active: bool,
+        session_state: TerminalState,
+    ) -> Option<Duration> {
+        event_driven_terminal_sync_interval(is_active, session_state)
+    }
 }
 
 impl<B> TerminalRuntimeHandle for EmulatorTerminalRuntime<B>
@@ -776,6 +818,15 @@ where
 
     fn sync_interval(&self, _is_active: bool, _session_state: TerminalState) -> Duration {
         Duration::ZERO
+    }
+
+    fn background_sync_interval(
+        &self,
+        session: &TerminalSession,
+        is_active: bool,
+    ) -> Option<Duration> {
+        self.backend
+            .background_sync_interval(is_active, session.state)
     }
 
     fn write_input(&self, _session: &TerminalSession, input: &[u8]) -> Result<(), TerminalError> {
@@ -853,6 +904,14 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
 
     fn sync_interval(&self, is_active: bool, session_state: TerminalState) -> Duration {
         daemon_terminal_sync_interval(is_active, session_state)
+    }
+
+    fn background_sync_interval(
+        &self,
+        session: &TerminalSession,
+        is_active: bool,
+    ) -> Option<Duration> {
+        Some(self.sync_interval(is_active, session.state))
     }
 
     fn should_sync(
@@ -2402,6 +2461,8 @@ pub(crate) struct ArborWindow {
     pub(crate) active_remote_worktree: Option<ActiveRemoteWorktree>,
     /// When `Some`, a newer version of Arbor is available on GitHub.
     pub(crate) update_available: Option<String>,
+    /// Current process CPU usage percentage, updated periodically.
+    pub(crate) self_cpu_percent: Option<u16>,
     /// Current process RSS memory usage in bytes, updated periodically.
     pub(crate) self_memory_bytes: Option<u64>,
 }

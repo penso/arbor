@@ -193,6 +193,28 @@ pub(crate) fn daemon_terminal_sync_interval(
     }
 }
 
+pub(crate) fn event_driven_terminal_sync_interval(
+    is_active: bool,
+    session_state: TerminalState,
+) -> Option<Duration> {
+    (is_active && session_state == TerminalState::Running)
+        .then_some(ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL)
+}
+
+pub(crate) fn ssh_terminal_sync_interval(
+    is_active: bool,
+    session_state: TerminalState,
+) -> Option<Duration> {
+    match session_state {
+        TerminalState::Running => Some(if is_active {
+            ACTIVE_SSH_TERMINAL_SYNC_INTERVAL
+        } else {
+            INACTIVE_SSH_TERMINAL_SYNC_INTERVAL
+        }),
+        TerminalState::Completed | TerminalState::Failed => None,
+    }
+}
+
 pub(crate) fn runtime_sync_interval_elapsed(
     last_runtime_sync_at: Option<Instant>,
     sync_interval: Duration,
@@ -1251,6 +1273,38 @@ pub(crate) mod tests {
         assert_eq!(
             daemon_terminal_sync_interval(false, TerminalState::Failed),
             IDLE_DAEMON_TERMINAL_SYNC_INTERVAL
+        );
+    }
+
+    #[test]
+    fn event_driven_terminal_sync_interval_only_polls_active_running_sessions() {
+        assert_eq!(
+            event_driven_terminal_sync_interval(true, TerminalState::Running),
+            Some(ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL)
+        );
+        assert_eq!(
+            event_driven_terminal_sync_interval(false, TerminalState::Running),
+            None
+        );
+        assert_eq!(
+            event_driven_terminal_sync_interval(true, TerminalState::Completed),
+            None
+        );
+    }
+
+    #[test]
+    fn ssh_terminal_sync_interval_polls_only_running_sessions() {
+        assert_eq!(
+            ssh_terminal_sync_interval(true, TerminalState::Running),
+            Some(ACTIVE_SSH_TERMINAL_SYNC_INTERVAL)
+        );
+        assert_eq!(
+            ssh_terminal_sync_interval(false, TerminalState::Running),
+            Some(INACTIVE_SSH_TERMINAL_SYNC_INTERVAL)
+        );
+        assert_eq!(
+            ssh_terminal_sync_interval(true, TerminalState::Completed),
+            None
         );
     }
 

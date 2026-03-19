@@ -1,5 +1,9 @@
 use super::*;
 
+const TERMINAL_RENDER_OVERSCAN_LINES: usize = 12;
+const TERMINAL_INITIAL_RENDER_LINES: usize = 240;
+
+#[cfg(test)]
 pub(crate) fn styled_lines_for_session(
     session: &TerminalSession,
     theme: ThemePalette,
@@ -7,40 +11,55 @@ pub(crate) fn styled_lines_for_session(
     selection: Option<&TerminalSelection>,
     ime_marked_text: Option<&str>,
 ) -> Vec<TerminalStyledLine> {
+    let line_count = terminal_render_line_count(session, selection);
+    styled_lines_for_session_range(
+        session,
+        theme,
+        show_cursor,
+        selection,
+        ime_marked_text,
+        0..line_count,
+    )
+}
+
+pub(crate) fn styled_lines_for_session_range(
+    session: &TerminalSession,
+    theme: ThemePalette,
+    show_cursor: bool,
+    selection: Option<&TerminalSelection>,
+    ime_marked_text: Option<&str>,
+    range: std::ops::Range<usize>,
+) -> Vec<TerminalStyledLine> {
+    if range.is_empty() {
+        return Vec::new();
+    }
+
     let mut lines = if !session.styled_output.is_empty() {
-        session.styled_output.clone()
+        let start = range.start.min(session.styled_output.len());
+        let end = range.end.min(session.styled_output.len());
+        session.styled_output[start..end].to_vec()
     } else {
-        plain_lines_to_styled(lines_for_display(&session.output), theme)
+        plain_lines_to_styled(
+            lines_for_display(&session.output)
+                .into_iter()
+                .skip(range.start)
+                .take(range.len())
+                .collect(),
+            theme,
+        )
     };
 
-    for line in &mut lines {
-        if line.cells.is_empty() && !line.runs.is_empty() {
-            line.cells = cells_from_runs(&line.runs);
-        } else if line.runs.is_empty() && !line.cells.is_empty() {
-            line.runs = runs_from_cells(&line.cells);
-        }
-
-        let mut changed = false;
-        for cell in &mut line.cells {
-            if cell.bg == EMBEDDED_TERMINAL_DEFAULT_BG {
-                cell.bg = theme.terminal_bg;
-                changed = true;
-            }
-            if cell.fg == EMBEDDED_TERMINAL_DEFAULT_FG {
-                cell.fg = theme.text_primary;
-                changed = true;
-            }
-        }
-
-        if changed {
-            line.runs = runs_from_cells(&line.cells);
-        }
-    }
+    remap_terminal_line_palette(&mut lines, theme);
 
     if show_cursor
         && session.state == TerminalState::Running
         && let Some(cursor) = session.cursor
+        && range.contains(&cursor.line)
     {
+        let cursor = TerminalCursor {
+            line: cursor.line - range.start,
+            column: cursor.column,
+        };
         if let Some(marked) = ime_marked_text {
             apply_ime_marked_text_to_lines(&mut lines, cursor, marked, theme);
         } else {
@@ -48,11 +67,133 @@ pub(crate) fn styled_lines_for_session(
         }
     }
 
-    if let Some(selection) = selection.filter(|selection| selection.session_id == session.id) {
-        apply_selection_to_lines(&mut lines, selection, theme);
+    if let Some(selection) = selection.filter(|selection| selection.session_id == session.id)
+        && let Some(selection) = terminal_selection_for_render_range(selection, &range)
+    {
+        apply_selection_to_lines(&mut lines, &selection, theme);
     }
 
     lines
+}
+
+pub(crate) fn terminal_render_line_count(
+    session: &TerminalSession,
+    selection: Option<&TerminalSelection>,
+) -> usize {
+    let base_count = if !session.styled_output.is_empty() {
+        session.styled_output.len()
+    } else {
+        lines_for_display(&session.output).len()
+    };
+
+    let cursor_count = session
+        .cursor
+        .map_or(0, |cursor| cursor.line.saturating_add(1));
+    let selection_count = selection
+        .and_then(normalized_terminal_selection)
+        .map_or(0, |(_, end)| end.line.saturating_add(1));
+
+    base_count.max(1).max(cursor_count).max(selection_count)
+}
+
+pub(crate) fn terminal_visible_line_range(
+    scroll_handle: &ScrollHandle,
+    line_count: usize,
+    line_height: f32,
+) -> std::ops::Range<usize> {
+    let line_count = line_count.max(1);
+    let viewport_height = scroll_handle.bounds().size.height.to_f64() as f32;
+
+    if !viewport_height.is_finite()
+        || viewport_height <= 0.
+        || !line_height.is_finite()
+        || line_height <= 0.
+    {
+        let end = line_count;
+        let start = end.saturating_sub(TERMINAL_INITIAL_RENDER_LINES);
+        return start..end;
+    }
+
+    let scroll_top = (-(scroll_handle.offset().y.to_f64() as f32)).max(0.);
+    let first_visible_line = (scroll_top / line_height).floor().max(0.) as usize;
+    let visible_line_count = (viewport_height / line_height).ceil().max(1.) as usize;
+    let start = first_visible_line.saturating_sub(TERMINAL_RENDER_OVERSCAN_LINES);
+    let end = line_count.min(
+        first_visible_line
+            .saturating_add(visible_line_count)
+            .saturating_add(TERMINAL_RENDER_OVERSCAN_LINES),
+    );
+
+    let start = start.min(line_count.saturating_sub(1));
+    let end = end.max(start.saturating_add(1)).min(line_count);
+    start..end
+}
+
+pub(crate) fn terminal_spacer_height_px(line_count: usize, line_height: f32) -> Pixels {
+    px((line_count as f32 * line_height).max(0.))
+}
+
+fn remap_terminal_line_palette(lines: &mut [TerminalStyledLine], theme: ThemePalette) {
+    for line in lines {
+        remap_terminal_styled_line_palette(line, theme);
+    }
+}
+
+fn remap_terminal_styled_line_palette(line: &mut TerminalStyledLine, theme: ThemePalette) {
+    if line.cells.is_empty() && !line.runs.is_empty() {
+        line.cells = cells_from_runs(&line.runs);
+    } else if line.runs.is_empty() && !line.cells.is_empty() {
+        line.runs = runs_from_cells(&line.cells);
+    }
+
+    let mut changed = false;
+    for cell in &mut line.cells {
+        if cell.bg == EMBEDDED_TERMINAL_DEFAULT_BG {
+            cell.bg = theme.terminal_bg;
+            changed = true;
+        }
+        if cell.fg == EMBEDDED_TERMINAL_DEFAULT_FG {
+            cell.fg = theme.text_primary;
+            changed = true;
+        }
+    }
+
+    if changed {
+        line.runs = runs_from_cells(&line.cells);
+    }
+}
+
+fn terminal_selection_for_render_range(
+    selection: &TerminalSelection,
+    range: &std::ops::Range<usize>,
+) -> Option<TerminalSelection> {
+    let (start, end) = normalized_terminal_selection(selection)?;
+    if end.line < range.start || start.line >= range.end {
+        return None;
+    }
+
+    let clamped_start_line = start.line.max(range.start);
+    let clamped_end_line = end.line.min(range.end.saturating_sub(1));
+
+    Some(TerminalSelection {
+        session_id: selection.session_id,
+        anchor: TerminalGridPosition {
+            line: clamped_start_line - range.start,
+            column: if start.line < range.start {
+                0
+            } else {
+                start.column
+            },
+        },
+        head: TerminalGridPosition {
+            line: clamped_end_line - range.start,
+            column: if end.line >= range.end {
+                usize::MAX
+            } else {
+                end.column
+            },
+        },
+    })
 }
 
 pub(crate) fn apply_cursor_to_lines(
@@ -1057,6 +1198,105 @@ mod tests {
                 .cells
                 .iter()
                 .all(|cell| cell.fg == theme.text_primary)
+        );
+    }
+
+    #[test]
+    fn styled_lines_for_session_range_offsets_cursor_into_visible_slice() {
+        let theme = ThemeKind::One.palette();
+        let mut session = session_with_styled_line(
+            "alpha",
+            0x112233,
+            0x445566,
+            Some(TerminalCursor { line: 2, column: 1 }),
+        );
+        session.output = "alpha\nbeta\ngamma".to_owned();
+        session.styled_output = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(|text| TerminalStyledLine {
+                cells: text
+                    .chars()
+                    .enumerate()
+                    .map(|(column, character)| TerminalStyledCell {
+                        column,
+                        text: character.to_string(),
+                        fg: 0x112233,
+                        bg: 0x445566,
+                    })
+                    .collect(),
+                runs: vec![TerminalStyledRun {
+                    text: text.to_owned(),
+                    fg: 0x112233,
+                    bg: 0x445566,
+                }],
+            })
+            .collect();
+
+        let lines = styled_lines_for_session_range(&session, theme, true, None, None, 2..3);
+
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .cells
+                .iter()
+                .any(|cell| cell.column == 1 && cell.bg == theme.terminal_cursor)
+        );
+    }
+
+    #[test]
+    fn styled_lines_for_session_range_clips_selection_to_visible_slice() {
+        let theme = ThemeKind::One.palette();
+        let mut session = session_with_styled_line("alpha", 0x112233, 0x445566, None);
+        session.output = "alpha\nbeta\ngamma".to_owned();
+        session.styled_output = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(|text| TerminalStyledLine {
+                cells: text
+                    .chars()
+                    .enumerate()
+                    .map(|(column, character)| TerminalStyledCell {
+                        column,
+                        text: character.to_string(),
+                        fg: 0x112233,
+                        bg: 0x445566,
+                    })
+                    .collect(),
+                runs: vec![TerminalStyledRun {
+                    text: text.to_owned(),
+                    fg: 0x112233,
+                    bg: 0x445566,
+                }],
+            })
+            .collect();
+        let selection = TerminalSelection {
+            session_id: session.id,
+            anchor: TerminalGridPosition { line: 0, column: 2 },
+            head: TerminalGridPosition { line: 2, column: 2 },
+        };
+
+        let lines =
+            styled_lines_for_session_range(&session, theme, false, Some(&selection), None, 1..3);
+
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0]
+                .cells
+                .iter()
+                .all(|cell| cell.bg == theme.terminal_selection_bg)
+        );
+        assert!(
+            lines[1]
+                .cells
+                .iter()
+                .filter(|cell| cell.column < 2)
+                .all(|cell| cell.bg == theme.terminal_selection_bg)
+        );
+        assert!(
+            lines[1]
+                .cells
+                .iter()
+                .filter(|cell| cell.column >= 2)
+                .all(|cell| cell.bg == 0x445566)
         );
     }
 

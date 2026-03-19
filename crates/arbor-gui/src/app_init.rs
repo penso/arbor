@@ -375,6 +375,7 @@ impl ArborWindow {
                     remote_daemon_states: HashMap::new(),
                     active_remote_worktree: None,
                     update_available: None,
+                    self_cpu_percent: None,
                     self_memory_bytes: None,
                 };
 
@@ -821,6 +822,7 @@ impl ArborWindow {
             remote_daemon_states: HashMap::new(),
             active_remote_worktree: None,
             update_available: None,
+            self_cpu_percent: None,
             self_memory_bytes: None,
         };
 

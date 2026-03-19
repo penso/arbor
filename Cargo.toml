@@ -67,6 +67,7 @@ serde_yaml         = "0.9"
 sha2               = "0.10"
 smol               = "2"
 syntect            = "5.3.0"
+sysinfo            = "0.31.4"
 tempfile           = "3"
 thiserror          = "2"
 tokio              = { features = ["full"], version = "1.48.0" }

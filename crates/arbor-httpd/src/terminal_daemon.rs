@@ -343,10 +343,13 @@ impl LiveSession {
             };
 
             let cursor = snapshot.cursor.and_then(|cursor| {
-                (cursor.line >= keep_from).then_some(DaemonTerminalCursor {
-                    line: cursor.line - keep_from,
-                    column: cursor.column,
-                })
+                cursor
+                    .line
+                    .checked_sub(keep_from)
+                    .map(|line| DaemonTerminalCursor {
+                        line,
+                        column: cursor.column,
+                    })
             });
 
             if keep_from > 0 {
@@ -959,7 +962,7 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, arbor_terminal_emulator::TerminalEngineKind};
 
     fn test_live_session() -> (
         Arc<LiveSession>,
@@ -1057,6 +1060,23 @@ mod tests {
         let text = "a\u{1b}]133;A\u{1b}\\b";
         let trimmed = trim_output_tail_preserving_ansi(text, 64);
         assert_eq!(trimmed, text);
+    }
+
+    #[test]
+    fn snapshot_omits_cursor_when_max_lines_trims_past_visible_cursor_line() {
+        let (session, _) = test_live_session();
+
+        {
+            let mut emulator = lock_or_recover(&session.emulator);
+            *emulator = TerminalEmulator::with_engine(TerminalEngineKind::Alacritty, 6, 20);
+            emulator.process(b"line-0\r\nline-1\r\nline-2\r\nline-3\r\nline-4\r\nline-5");
+            emulator.process(b"\x1b[H");
+        }
+
+        let snapshot = session.snapshot(5);
+
+        assert_eq!(snapshot.styled_lines.len(), 5);
+        assert_eq!(snapshot.cursor, None);
     }
 
     #[test]
