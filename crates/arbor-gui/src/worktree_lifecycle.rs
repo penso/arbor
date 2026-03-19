@@ -2396,9 +2396,6 @@ pub(crate) fn modal_preview_line(value: String, color: u32, mono: bool) -> Div {
     div()
         .w_full()
         .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
         .text_sm()
         .text_color(rgb(color))
         .when(mono, |this| this.font_family(FONT_MONO))
@@ -3014,5 +3011,24 @@ mod worktree_lifecycle_tests {
         assert!(create_modal_branch_preview_matches(&modal, 7, 5));
         assert!(!create_modal_branch_preview_matches(&modal, 8, 5));
         assert!(!create_modal_branch_preview_matches(&modal, 7, 6));
+    }
+
+    #[test]
+    fn modal_mono_preview_keeps_short_branch_preview_visible() {
+        let preview = modal_mono_preview("codex/issue-513-command-palette-issues");
+
+        assert_eq!(preview, "codex/issue-513-command-palette-issues");
+    }
+
+    #[test]
+    fn modal_mono_preview_truncates_long_paths_without_collapsing_to_ellipsis_only() {
+        let preview = modal_mono_preview(
+            "/Users/penso/.arbor/worktrees/arbor/github-513-command-palette-issues/src/components/create-worktree-modal.ts",
+        );
+
+        assert_ne!(preview, "\u{2026}");
+        assert_ne!(preview, "...");
+        assert!(preview.contains('\u{2026}'));
+        assert!(preview.ends_with("create-worktree-modal.ts"));
     }
 }

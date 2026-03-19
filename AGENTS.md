@@ -79,6 +79,7 @@ All dependency versions live in the root `Cargo.toml` `[workspace.dependencies]`
 - **Duplicate definitions**: When splitting code, ensure a function/type exists in exactly one place. Check both the source and destination files.
 - **Test module lint attributes**: Test modules need both `#[allow(clippy::unwrap_used)]` and `#[allow(clippy::expect_used)]` since the workspace denies both.
 - **Forgetting `#[cfg(feature)]` on imports**: When gating a module with a feature flag, also gate its `use` import and any code that references its types.
+- **Double-truncating UI preview text**: For branch/path/URL previews in forms and modals, choose exactly one truncation layer. If the string is already truncated in code, do not add UI-level ellipsis on top of it. Add a regression test for the preview helper or render path so placeholders never collapse to just `...` or `…`.
 
 ## Git Rules
 
