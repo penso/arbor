@@ -40,6 +40,12 @@ fn strip_version_prefix(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
+fn should_check_for_updates(build_branch: Option<&str>) -> bool {
+    build_branch
+        .map(str::trim)
+        .is_none_or(|branch| branch.is_empty())
+}
+
 /// Compare two semver-like version strings. Returns true if `latest` is newer
 /// than `current`. Falls back to lexicographic comparison if parsing fails.
 fn is_newer_version(current: &str, latest: &str) -> bool {
@@ -67,6 +73,15 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
 impl ArborWindow {
     /// Start a background poller that checks GitHub for new releases.
     pub(crate) fn start_version_check_poller(&mut self, cx: &mut Context<Self>) {
+        if !should_check_for_updates(APP_BUILD_BRANCH) {
+            tracing::debug!(
+                branch = APP_BUILD_BRANCH,
+                "skipping release update checks for source build"
+            );
+            self.update_available = None;
+            return;
+        }
+
         cx.spawn(async move |this, cx| {
             // Small initial delay so startup isn't slowed down.
             cx.background_spawn(async move {
@@ -133,6 +148,19 @@ mod tests {
     fn strip_prefix_handles_v_and_bare() {
         assert_eq!(strip_version_prefix("v1.2.3"), "1.2.3");
         assert_eq!(strip_version_prefix("1.2.3"), "1.2.3");
+    }
+
+    #[test]
+    fn release_builds_check_for_updates() {
+        assert!(should_check_for_updates(None));
+        assert!(should_check_for_updates(Some("")));
+        assert!(should_check_for_updates(Some("   ")));
+    }
+
+    #[test]
+    fn branch_builds_skip_update_checks() {
+        assert!(!should_check_for_updates(Some("main")));
+        assert!(!should_check_for_updates(Some("feature/demo")));
     }
 
     #[test]
