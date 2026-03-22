@@ -107,6 +107,22 @@ pub(crate) fn snapshot_output(term: &Term<AlacrittyEventListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+pub(crate) fn snapshot_output_tail(
+    term: &Term<AlacrittyEventListener>,
+    max_lines: usize,
+) -> String {
+    if max_lines == 0 {
+        return String::new();
+    }
+
+    let top = term.topmost_line().0;
+    let bottom = term.bottommost_line().0;
+    let start_line = (bottom - (max_lines.saturating_sub(1) as i32)).max(top);
+    let start = Point::new(Line(start_line), Column(0));
+    let end = Point::new(term.bottommost_line(), term.last_column());
+    term.bounds_to_string(start, end)
+}
+
 pub(crate) fn snapshot_cursor(term: &Term<AlacrittyEventListener>) -> Option<TerminalCursor> {
     if !term.mode().contains(TermMode::SHOW_CURSOR) {
         return None;
@@ -126,6 +142,32 @@ pub(crate) fn snapshot_cursor(term: &Term<AlacrittyEventListener>) -> Option<Ter
     Some(TerminalCursor { line, column })
 }
 
+pub(crate) fn snapshot_cursor_tail(
+    term: &Term<AlacrittyEventListener>,
+    max_lines: usize,
+) -> Option<TerminalCursor> {
+    if max_lines == 0 {
+        return None;
+    }
+    if !term.mode().contains(TermMode::SHOW_CURSOR) {
+        return None;
+    }
+
+    let grid = term.grid();
+    let top = grid.topmost_line().0;
+    let bottom = grid.bottommost_line().0;
+    let start_line = (bottom - (max_lines.saturating_sub(1) as i32)).max(top);
+    let cursor = grid.cursor.point;
+
+    if cursor.line.0 < start_line || cursor.line.0 > bottom {
+        return None;
+    }
+
+    let line = usize::try_from(cursor.line.0 - start_line).ok()?;
+    let column = cursor.column.0;
+    Some(TerminalCursor { line, column })
+}
+
 #[cfg_attr(feature = "ghostty-vt-experimental", allow(dead_code))]
 pub(crate) fn snapshot_modes(term: &Term<AlacrittyEventListener>) -> TerminalModes {
     let mode = term.mode();
@@ -140,6 +182,32 @@ pub(crate) fn collect_styled_lines(term: &Term<AlacrittyEventListener>) -> Vec<T
     let colors = term.colors();
     let top_line = grid.topmost_line().0;
     let bottom_line = grid.bottommost_line().0;
+    collect_styled_lines_between(term, colors, top_line, bottom_line)
+}
+
+pub(crate) fn collect_styled_lines_tail(
+    term: &Term<AlacrittyEventListener>,
+    max_lines: usize,
+) -> Vec<TerminalStyledLine> {
+    if max_lines == 0 {
+        return vec![finalize_styled_line(Vec::new())];
+    }
+
+    let grid = term.grid();
+    let colors = term.colors();
+    let top_line = grid.topmost_line().0;
+    let bottom_line = grid.bottommost_line().0;
+    let start_line = (bottom_line - (max_lines.saturating_sub(1) as i32)).max(top_line);
+    collect_styled_lines_between(term, colors, start_line, bottom_line)
+}
+
+fn collect_styled_lines_between(
+    term: &Term<AlacrittyEventListener>,
+    colors: &Colors,
+    top_line: i32,
+    bottom_line: i32,
+) -> Vec<TerminalStyledLine> {
+    let grid = term.grid();
     let columns = grid.columns();
 
     let mut lines = Vec::new();

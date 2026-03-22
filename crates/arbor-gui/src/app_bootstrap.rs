@@ -1,12 +1,20 @@
 use super::*;
 
+fn arbor_app_id() -> String {
+    env::var("ARBOR_APP_ID")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "so.pen.arbor".to_owned())
+}
+
 fn open_arbor_window(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1460.), px(900.)), cx);
     if let Err(error) = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(1180.), px(760.))),
-            app_id: Some("so.pen.arbor".to_owned()),
+            app_id: Some(arbor_app_id()),
             titlebar: Some(default_titlebar_options(None)),
             window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
             ..Default::default()
@@ -467,7 +475,7 @@ pub(crate) fn run_gui(log_buffer: log_layer::LogBuffer) {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(1180.), px(760.))),
-                app_id: Some("so.pen.arbor".to_owned()),
+                app_id: Some(arbor_app_id()),
                 titlebar: Some(default_titlebar_options(None)),
                 window_decorations: Some(DEFAULT_WINDOW_DECORATIONS),
                 ..Default::default()

@@ -204,6 +204,8 @@ impl ArborWindow {
                 cursor: None,
                 modes: TerminalModes::default(),
                 last_runtime_sync_at: None,
+                interactive_sync_until: None,
+                last_port_hint_scan_at: None,
                 queued_input: Vec::new(),
                 is_initializing: true,
                 runtime: None,

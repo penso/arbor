@@ -152,6 +152,9 @@ run-mcp port="": web-ui-build-if-needed
     trap "kill $HTTPD_PID 2>/dev/null" EXIT
     cargo +{{nightly_toolchain}} run -p arbor-mcp --features stdio-server
 
+perf-harness action="start" mode="dashboard":
+    ./scripts/dev/arbor-perf-harness.sh "{{action}}" "{{mode}}"
+
 changelog:
     git-cliff --config cliff.toml
 

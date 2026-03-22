@@ -61,14 +61,7 @@ impl ArborWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let cell_width = diff_cell_width_px(cx);
-        let wrap_columns = if let Some(list_width) = self.live_diff_list_width_px() {
-            self.estimated_diff_wrap_columns_for_list_width(list_width, cell_width)
-        } else {
-            let window_width = f32::from(window.window_bounds().get_bounds().size.width).max(600.);
-            self.estimated_diff_wrap_columns_for_window_width(window_width, cell_width)
-        };
-        self.rewrap_diff_sessions_if_needed(wrap_columns);
+        let terminal_metrics = self.terminal_font_metrics(cx);
 
         let theme = self.theme();
         let terminals = self.selected_worktree_terminals();
@@ -136,45 +129,258 @@ impl ArborWindow {
         let active_tab_index =
             active_tab.and_then(|tab| tabs.iter().position(|entry| *entry == tab));
         if let Some(index) = active_tab_index {
-            self.center_tabs_scroll_handle.scroll_to_item(index);
+            if self.center_tabs_last_scrolled_index != Some(index) {
+                self.center_tabs_last_scrolled_index = Some(index);
+                self.center_tabs_scroll_handle.scroll_to_item(index);
+            }
+        } else {
+            self.center_tabs_last_scrolled_index = None;
         }
-        let active_terminal = match active_tab {
-            Some(CenterTab::Terminal(session_id)) => self
+        let active_terminal_id = match active_tab {
+            Some(CenterTab::Terminal(session_id)) => Some(session_id),
+            _ => None,
+        };
+        let active_diff_id = match active_tab {
+            Some(CenterTab::Diff(diff_id)) => Some(diff_id),
+            _ => None,
+        };
+        let active_file_view_id = match active_tab {
+            Some(CenterTab::FileView(fv_id)) => Some(fv_id),
+            _ => None,
+        };
+        let active_agent_chat_id = match active_tab {
+            Some(CenterTab::AgentChat(local_id)) => Some(local_id),
+            _ => None,
+        };
+        if active_diff_id.is_some() {
+            let cell_width = terminal_metrics.diff_cell_width;
+            let wrap_columns = if let Some(list_width) = self.live_diff_list_width_px() {
+                self.estimated_diff_wrap_columns_for_list_width(list_width, cell_width)
+            } else {
+                let window_width =
+                    f32::from(window.window_bounds().get_bounds().size.width).max(600.);
+                self.estimated_diff_wrap_columns_for_window_width(window_width, cell_width)
+            };
+            self.rewrap_diff_sessions_if_needed(wrap_columns);
+        }
+        let is_empty_state = active_terminal_id.is_none()
+            && active_diff_id.is_none()
+            && active_file_view_id.is_none()
+            && active_agent_chat_id.is_none()
+            && active_tab != Some(CenterTab::Logs);
+
+        let content = if is_empty_state {
+            div()
+                .h_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_center()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.text_primary))
+                        .child("Workspace"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(theme.text_muted))
+                        .child("Press Cmd-T to open a terminal tab."),
+                )
+                .child(
+                    action_button(
+                        theme,
+                        "spawn-terminal-empty-state",
+                        "Open Terminal Tab",
+                        ActionButtonStyle::Secondary,
+                        true,
+                    )
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.spawn_terminal_session(window, cx)),
+                    ),
+                )
+                .into_any_element()
+        } else if let Some(session_id) = active_terminal_id {
+            if let Some(session) = self
                 .terminals
                 .iter()
                 .find(|session| session.id == session_id)
-                .cloned(),
-            _ => None,
-        };
-        let active_diff_session = match active_tab {
-            Some(CenterTab::Diff(diff_id)) => self
-                .diff_sessions
+            {
+                let selection = self.terminal_selection_for_session(session.id);
+                let ime_text = self.ime_marked_text.as_deref();
+                let mono_font = terminal_mono_font(cx);
+                let cell_width = terminal_metrics.cell_width;
+                let line_height = terminal_metrics.line_height;
+                let render_snapshot = session
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.render_snapshot(session));
+                let render_source = render_snapshot.as_ref().map(|snapshot| {
+                    terminal_render_source_for_snapshot(
+                        session.id,
+                        snapshot.state,
+                        &snapshot.terminal,
+                    )
+                });
+                let line_count = render_source.as_ref().map_or_else(
+                    || terminal_render_line_count(session, selection),
+                    |source| terminal_render_line_count_for_source(source, selection),
+                );
+                let visible_range = terminal_visible_line_range(
+                    &self.terminal_scroll_handle,
+                    line_count,
+                    line_height,
+                );
+                let styled_lines = render_source.as_ref().map_or_else(
+                    || {
+                        styled_lines_for_session_range(
+                            session,
+                            theme,
+                            true,
+                            selection,
+                            ime_text,
+                            visible_range.clone(),
+                        )
+                    },
+                    |source| {
+                        styled_lines_for_render_source_range(
+                            source,
+                            theme,
+                            true,
+                            selection,
+                            ime_text,
+                            visible_range.clone(),
+                        )
+                    },
+                );
+
+                div()
+                    .h_full()
+                    .w_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .gap_0()
+                    .child(self.render_preset_sub_bar(theme, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .font(mono_font.clone())
+                            .text_size(px(TERMINAL_FONT_SIZE_PX))
+                            .line_height(px(line_height))
+                            .px_2()
+                            .pt_1()
+                            .flex()
+                            .flex_col()
+                            .gap_0()
+                            .child(
+                                div()
+                                    .id("terminal-output-scroll")
+                                    .flex_1()
+                                    .w_full()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .overflow_x_hidden()
+                                    .overflow_y_scroll()
+                                    .scrollbar_width(px(12.))
+                                    .track_scroll(&self.terminal_scroll_handle)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(Self::handle_terminal_output_mouse_down),
+                                    )
+                                    .on_mouse_move(
+                                        cx.listener(Self::handle_terminal_output_mouse_move),
+                                    )
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(Self::handle_terminal_output_mouse_up),
+                                    )
+                                    .child(render_terminal_lines(
+                                        styled_lines,
+                                        theme,
+                                        cell_width,
+                                        line_height,
+                                        mono_font.clone(),
+                                        line_count,
+                                        visible_range.start,
+                                    )),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            }
+        } else if let Some(diff_id) = active_diff_id {
+            self.diff_sessions
                 .iter()
                 .find(|session| session.id == diff_id)
-                .cloned(),
-            _ => None,
-        };
-        let active_file_view_session = match active_tab {
-            Some(CenterTab::FileView(fv_id)) => self
-                .file_view_sessions
+                .cloned()
+                .map(|session| {
+                    let mono_font = terminal_mono_font(cx);
+                    let diff_cell_width = diff_cell_width_px(cx);
+                    render_diff_session(
+                        session,
+                        theme,
+                        &self.diff_scroll_handle,
+                        mono_font,
+                        diff_cell_width,
+                    )
+                    .into_any_element()
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        } else if let Some(fv_id) = active_file_view_id {
+            self.file_view_sessions
                 .iter()
                 .find(|session| session.id == fv_id)
-                .cloned(),
-            _ => None,
-        };
-        let active_agent_chat = match active_tab {
-            Some(CenterTab::AgentChat(local_id)) => self
-                .agent_chat_sessions
+                .cloned()
+                .map(|session| {
+                    let mono_font = terminal_mono_font(cx);
+                    let editing = self.file_view_editing;
+                    render_file_view_session(
+                        session,
+                        theme,
+                        &self.file_view_scroll_handle,
+                        mono_font,
+                        editing,
+                        cx,
+                    )
+                    .into_any_element()
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        } else if let Some(local_id) = active_agent_chat_id {
+            self.agent_chat_sessions
                 .iter()
-                .find(|s| s.local_id == local_id)
-                .cloned(),
-            _ => None,
+                .find(|session| session.local_id == local_id)
+                .map(|session| {
+                    render_agent_chat_content(
+                        session,
+                        self.agent_selector_open_for,
+                        self.chat_mode_selector_open_for,
+                        &self.agent_selector_search,
+                        self.agent_selector_search_cursor,
+                        &self.configured_providers,
+                        theme,
+                        &self.agent_chat_scroll_handle,
+                        cx,
+                    )
+                    .into_any_element()
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        } else if active_tab == Some(CenterTab::Logs) {
+            self.render_logs_content(cx).into_any_element()
+        } else {
+            div().into_any_element()
         };
-        let is_empty_state = active_terminal.is_none()
-            && active_diff_session.is_none()
-            && active_file_view_session.is_none()
-            && active_agent_chat.is_none()
-            && active_tab != Some(CenterTab::Logs);
 
         div()
             .flex_1()
@@ -286,199 +492,7 @@ impl ArborWindow {
                     .flex_1()
                     .min_h_0()
                     .bg(rgb(theme.terminal_bg))
-                    .when(is_empty_state, |this| {
-                        this.child(
-                            div()
-                                .h_full()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .text_center()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(theme.text_primary))
-                                        .child("Workspace"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(theme.text_muted))
-                                        .child("Press Cmd-T to open a terminal tab."),
-                                )
-                                .child(
-                                    action_button(
-                                        theme,
-                                        "spawn-terminal-empty-state",
-                                        "Open Terminal Tab",
-                                        ActionButtonStyle::Secondary,
-                                        true,
-                                    )
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.spawn_terminal_session(window, cx)
-                                        }),
-                                    ),
-                                ),
-                        )
-                    })
-                    .when_some(active_terminal, |this, session| {
-                        let selection = self.terminal_selection_for_session(session.id);
-                        let ime_text = self.ime_marked_text.as_deref();
-                        let mono_font = terminal_mono_font(cx);
-                        let cell_width = terminal_cell_width_px(cx);
-                        let line_height = terminal_line_height_px(cx);
-                        let line_count = terminal_render_line_count(&session, selection);
-                        let visible_range = terminal_visible_line_range(
-                            &self.terminal_scroll_handle,
-                            line_count,
-                            line_height,
-                        );
-                        let top_spacer_height =
-                            terminal_spacer_height_px(visible_range.start, line_height);
-                        let bottom_spacer_height = terminal_spacer_height_px(
-                            line_count.saturating_sub(visible_range.end),
-                            line_height,
-                        );
-                        let styled_lines = styled_lines_for_session_range(
-                            &session,
-                            theme,
-                            true,
-                            selection,
-                            ime_text,
-                            visible_range,
-                        );
-
-                        this.child(
-                            div()
-                                .h_full()
-                                .w_full()
-                                .min_w_0()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .flex()
-                                .flex_col()
-                                .gap_0()
-                                // Preset sub-bar inside the terminal tab
-                                .child(self.render_preset_sub_bar(theme, cx))
-                                // Terminal output
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .w_full()
-                                        .min_w_0()
-                                        .min_h_0()
-                                        .overflow_hidden()
-                                        .font(mono_font.clone())
-                                        .text_size(px(TERMINAL_FONT_SIZE_PX))
-                                        .line_height(px(line_height))
-                                        .px_2()
-                                        .pt_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_0()
-                                        .child(
-                                            div()
-                                                .id("terminal-output-scroll")
-                                                .flex_1()
-                                                .w_full()
-                                                .min_w_0()
-                                                .min_h_0()
-                                                .overflow_x_hidden()
-                                                .overflow_y_scroll()
-                                                .scrollbar_width(px(12.))
-                                                .track_scroll(&self.terminal_scroll_handle)
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(Self::handle_terminal_output_mouse_down),
-                                                )
-                                                .on_mouse_move(
-                                                    cx.listener(Self::handle_terminal_output_mouse_move),
-                                                )
-                                                .on_mouse_up(
-                                                    MouseButton::Left,
-                                                    cx.listener(Self::handle_terminal_output_mouse_up),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .flex_none()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_0()
-                                                        .when(top_spacer_height > px(0.), |this| {
-                                                            this.child(
-                                                                div()
-                                                                    .w_full()
-                                                                    .h(top_spacer_height)
-                                                                    .flex_none(),
-                                                            )
-                                                        })
-                                                        .children(styled_lines.into_iter().map(|line| {
-                                                            render_terminal_line(
-                                                                line,
-                                                                theme,
-                                                                cell_width,
-                                                                line_height,
-                                                                mono_font.clone(),
-                                                            )
-                                                        }))
-                                                        .when(bottom_spacer_height > px(0.), |this| {
-                                                            this.child(
-                                                                div()
-                                                                    .w_full()
-                                                                    .h(bottom_spacer_height)
-                                                                    .flex_none(),
-                                                            )
-                                                        }),
-                                                ),
-                                        ),
-                                ),
-                        )
-                    })
-                    .when_some(active_diff_session, |this, session| {
-                        let mono_font = terminal_mono_font(cx);
-                        let diff_cell_width = diff_cell_width_px(cx);
-                        this.child(render_diff_session(
-                            session,
-                            theme,
-                            &self.diff_scroll_handle,
-                            mono_font,
-                            diff_cell_width,
-                        ))
-                    })
-                    .when_some(active_file_view_session, |this, session| {
-                        let mono_font = terminal_mono_font(cx);
-                        let editing = self.file_view_editing;
-                        this.child(render_file_view_session(
-                            session,
-                            theme,
-                            &self.file_view_scroll_handle,
-                            mono_font,
-                            editing,
-                            cx,
-                        ))
-                    })
-                    .when_some(active_agent_chat, |this, session| {
-                        this.child(render_agent_chat_content(
-                            &session,
-                            self.agent_selector_open_for,
-                            self.chat_mode_selector_open_for,
-                            &self.agent_selector_search,
-                            self.agent_selector_search_cursor,
-                            &self.configured_providers,
-                            theme,
-                            &self.agent_chat_scroll_handle,
-                            cx,
-                        ))
-                    })
-                    .when(active_tab == Some(CenterTab::Logs), |this| {
-                        this.child(self.render_logs_content(cx))
-                    }),
+                    .child(content),
             )
     }
 

@@ -202,6 +202,39 @@ impl TerminalEmulator {
         }
     }
 
+    pub fn snapshot_tail(&self, max_lines: usize) -> TerminalSnapshot {
+        let mut snapshot = self.snapshot();
+        if max_lines == 0 {
+            snapshot.output.clear();
+            snapshot.styled_lines.clear();
+            snapshot.cursor = None;
+            return snapshot;
+        }
+
+        snapshot.output = snapshot
+            .output
+            .lines()
+            .rev()
+            .take(max_lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let keep_from = snapshot.styled_lines.len().saturating_sub(max_lines);
+        snapshot.cursor = snapshot.cursor.and_then(|cursor| {
+            (cursor.line >= keep_from).then_some(TerminalCursor {
+                line: cursor.line - keep_from,
+                column: cursor.column,
+            })
+        });
+        if keep_from > 0 {
+            snapshot.styled_lines.drain(..keep_from);
+        }
+        snapshot
+    }
+
     fn styled_snapshot(&self) -> CachedStyledSnapshot {
         if let Some(snapshot) = self.cached_styled_snapshot() {
             return snapshot;

@@ -4,8 +4,6 @@ impl ArborWindow {
     pub(crate) fn render_left_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.left_pane_visible {
             let theme = self.theme();
-            let repositories = self.repositories.clone();
-            let worktrees = self.worktrees.clone();
             let mut pane = div()
                 .id("collapsed-left-pane")
                 .w(px(40.))
@@ -19,12 +17,13 @@ impl ArborWindow {
                 .gap_1()
                 .overflow_y_scroll();
 
-            for (repo_index, repository) in repositories.iter().enumerate() {
+            for (repo_index, repository) in self.repositories.iter().enumerate() {
                 let repository_github_url = repository
                     .github_repo_slug
                     .as_ref()
                     .map(|repo_slug| github_repo_url(repo_slug));
-                let repo_worktrees: Vec<(usize, &WorktreeSummary)> = worktrees
+                let repo_worktrees: Vec<(usize, &WorktreeSummary)> = self
+                    .worktrees
                     .iter()
                     .enumerate()
                     .filter(|(_, w)| w.group_key == repository.group_key)
@@ -166,7 +165,6 @@ impl ArborWindow {
         }
         let theme = self.theme();
         let repositories = self.repositories.clone();
-        let worktrees = self.worktrees.clone();
         div()
             .id("left-pane")
             .w(px(self.left_pane_width))
@@ -194,13 +192,14 @@ impl ArborWindow {
                                 .github_repo_slug
                                 .as_ref()
                                 .map(|repo_slug| github_repo_url(repo_slug));
-                            let repo_worktrees: Vec<(usize, WorktreeSummary)> = worktrees
+                            let repo_worktrees: Vec<(usize, WorktreeSummary)> = self
+                                .worktrees
                                 .iter()
-                                .cloned()
                                 .enumerate()
                                 .filter(|(_, worktree)| {
                                     worktree.group_key == repository.group_key
                                 })
+                                .map(|(index, worktree)| (index, worktree.clone()))
                                 .collect();
                             let repo_agent_dot_color = if is_collapsed {
                                 if repo_worktrees

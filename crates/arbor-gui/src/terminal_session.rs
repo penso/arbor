@@ -1,6 +1,28 @@
 use super::*;
 
 impl ArborWindow {
+    fn terminal_port_hint_scan_interval_elapsed(
+        last_scan_at: Option<Instant>,
+        now: Instant,
+    ) -> bool {
+        match last_scan_at {
+            Some(last_scan_at) => {
+                now.saturating_duration_since(last_scan_at) >= TERMINAL_PORT_HINT_SCAN_INTERVAL
+            },
+            None => true,
+        }
+    }
+
+    pub(crate) fn terminal_font_metrics(&mut self, cx: &App) -> TerminalFontMetrics {
+        *self
+            .terminal_font_metrics
+            .get_or_insert_with(|| TerminalFontMetrics {
+                cell_width: terminal_cell_width_px(cx),
+                line_height: terminal_line_height_px(cx),
+                diff_cell_width: diff_cell_width_px(cx),
+            })
+    }
+
     pub(crate) fn terminal_background_sync_interval(&self) -> Option<Duration> {
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
 
@@ -19,9 +41,39 @@ impl ArborWindow {
     }
 
     pub(crate) fn sync_daemon_session_store(&mut self, cx: &mut Context<Self>) {
+        self.daemon_session_store_dirty = false;
         let records = self.daemon_session_records_snapshot();
         self.daemon_session_store_save.queue(records);
         self.start_pending_daemon_session_store_save(cx);
+    }
+
+    pub(crate) fn schedule_running_daemon_session_store_sync(&mut self, cx: &mut Context<Self>) {
+        self.daemon_session_store_dirty = true;
+        if self._daemon_session_store_debounce_task.is_some() {
+            return;
+        }
+
+        self._daemon_session_store_debounce_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                smol::Timer::after(RUNNING_DAEMON_SESSION_STORE_SYNC_DEBOUNCE_INTERVAL).await;
+
+                let should_continue = this
+                    .update(cx, |this, cx| {
+                        if !this.daemon_session_store_dirty {
+                            this._daemon_session_store_debounce_task = None;
+                            return false;
+                        }
+
+                        this.sync_daemon_session_store(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
     }
 
     pub(crate) fn daemon_session_records_snapshot(&self) -> Vec<DaemonSessionRecord> {
@@ -219,6 +271,8 @@ impl ArborWindow {
                     cursor: None,
                     modes: TerminalModes::default(),
                     last_runtime_sync_at: None,
+                    interactive_sync_until: None,
+                    last_port_hint_scan_at: None,
                     queued_input: Vec::new(),
                     is_initializing: false,
                     runtime: attach_runtime
@@ -298,11 +352,16 @@ impl ArborWindow {
 
     pub(crate) fn sync_running_terminals(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
+        let mut repaint = false;
         let mut should_refresh_ports = false;
         let follow_output = terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
         let active_terminal_id = self.active_terminal_id_for_selected_worktree();
-        let target_grid_size =
-            terminal_grid_size_from_scroll_handle(&self.terminal_scroll_handle, cx);
+        let terminal_metrics = self.terminal_font_metrics(cx);
+        let target_grid_size = terminal_grid_size_from_scroll_handle_with_metrics(
+            &self.terminal_scroll_handle,
+            terminal_metrics.cell_width,
+            terminal_metrics.line_height,
+        );
         let now = Instant::now();
         if let Some((rows, cols, ..)) = target_grid_size {
             self.last_terminal_grid_size = Some((rows, cols));
@@ -332,7 +391,15 @@ impl ArborWindow {
             self.terminals[index].last_runtime_sync_at = Some(now);
 
             changed |= outcome.changed;
-            if outcome.changed {
+            repaint |= outcome.repaint;
+            if outcome.changed
+                && self.terminals[index].state == TerminalState::Running
+                && Self::terminal_port_hint_scan_interval_elapsed(
+                    self.terminals[index].last_port_hint_scan_at,
+                    now,
+                )
+            {
+                self.terminals[index].last_port_hint_scan_at = Some(now);
                 let recent_output =
                     terminal_output_tail_for_metadata(&self.terminals[index], 24, 4_000);
                 if output_contains_port_hint(&recent_output) {
@@ -366,12 +433,14 @@ impl ArborWindow {
             changed |= self.close_terminal_session_by_id(session_id);
         }
 
-        if changed {
-            self.sync_daemon_session_store(cx);
-            if should_refresh_ports {
-                self.refresh_worktree_ports(cx);
+        if changed || repaint {
+            if changed {
+                self.schedule_running_daemon_session_store_sync(cx);
+                if should_refresh_ports {
+                    self.refresh_worktree_ports(cx);
+                }
             }
-            if should_auto_follow_terminal_output(changed, follow_output) {
+            if should_auto_follow_terminal_output(changed || repaint, follow_output) {
                 self.terminal_scroll_handle.scroll_to_bottom();
             }
             cx.notify();
@@ -420,6 +489,8 @@ impl ArborWindow {
             cursor: None,
             modes: TerminalModes::default(),
             last_runtime_sync_at: None,
+            interactive_sync_until: None,
+            last_port_hint_scan_at: None,
             queued_input: Vec::new(),
             is_initializing: true,
             runtime: None,
@@ -753,6 +824,8 @@ impl ArborWindow {
             cursor: None,
             modes: TerminalModes::default(),
             last_runtime_sync_at: None,
+            interactive_sync_until: None,
+            last_port_hint_scan_at: None,
             queued_input: Vec::new(),
             is_initializing: true,
             runtime: None,
@@ -898,9 +971,14 @@ impl ArborWindow {
             .insert(worktree_path, session_id);
         if let Some(session) = self
             .terminals
-            .iter()
+            .iter_mut()
             .find(|session| session.id == session_id)
         {
+            session.interactive_sync_until =
+                Some(Instant::now() + INTERACTIVE_TERMINAL_SYNC_WINDOW);
+            if let Some(runtime) = session.runtime.as_ref() {
+                runtime.session_became_active(session);
+            }
             if let Some(preset) = session.agent_preset {
                 self.active_preset_tab = Some(preset);
             }

@@ -91,16 +91,30 @@ impl ArborWindow {
     pub(crate) fn start_log_poller(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_spawn(async move {
-                    std::thread::sleep(LOG_POLLER_INTERVAL);
-                })
-                .await;
+                let wait_interval = match this.update(cx, |this, _| {
+                    if this.logs_tab_open || this.logs_tab_active {
+                        LOG_POLLER_VISIBLE_INTERVAL
+                    } else {
+                        LOG_POLLER_IDLE_INTERVAL
+                    }
+                }) {
+                    Ok(wait_interval) => wait_interval,
+                    Err(_) => break,
+                };
+
+                cx.background_spawn(async move { std::thread::sleep(wait_interval) })
+                    .await;
 
                 let updated = this.update(cx, |this, cx| {
                     let current_generation = this.log_buffer.generation();
                     if current_generation == this.log_generation {
                         return;
                     }
+
+                    if !this.logs_tab_open && !this.logs_tab_active {
+                        return;
+                    }
+
                     this.log_generation = current_generation;
                     this.log_entries = this.log_buffer.snapshot();
                     if this.log_auto_scroll && this.logs_tab_active {

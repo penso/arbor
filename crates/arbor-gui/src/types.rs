@@ -1,6 +1,7 @@
 use {
     super::*,
     serde::{Deserialize, Serialize},
+    std::sync::atomic::AtomicU64,
 };
 
 /// Identifies a sidebar item for persisted UI ordering.
@@ -70,6 +71,13 @@ pub(crate) enum RepositorySidebarTab {
     #[default]
     Worktrees,
     Issues,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TerminalFontMetrics {
+    pub(crate) cell_width: f32,
+    pub(crate) line_height: f32,
+    pub(crate) diff_cell_width: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +219,8 @@ pub(crate) struct TerminalSession {
     pub(crate) cursor: Option<TerminalCursor>,
     pub(crate) modes: TerminalModes,
     pub(crate) last_runtime_sync_at: Option<Instant>,
+    pub(crate) interactive_sync_until: Option<Instant>,
+    pub(crate) last_port_hint_scan_at: Option<Instant>,
     pub(crate) queued_input: Vec<u8>,
     pub(crate) is_initializing: bool,
     pub(crate) runtime: Option<SharedTerminalRuntime>,
@@ -230,7 +240,7 @@ pub(crate) enum TerminalState {
 pub(crate) struct SshTerminalShell {
     pub(crate) shell: Arc<Mutex<arbor_ssh::shell::SshShell>>,
     pub(crate) emulator: Arc<Mutex<arbor_terminal_emulator::TerminalEmulator>>,
-    pub(crate) generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) generation: Arc<AtomicU64>,
 }
 
 impl SshTerminalShell {
@@ -257,7 +267,7 @@ impl SshTerminalShell {
             emulator: Arc::new(Mutex::new(
                 arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols),
             )),
-            generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            generation: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -376,9 +386,16 @@ pub(crate) struct RuntimeNotification {
     pub(crate) play_sound: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct TerminalRenderSnapshot {
+    pub(crate) terminal: Arc<arbor_terminal_emulator::TerminalSnapshot>,
+    pub(crate) state: TerminalState,
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalRuntimeSyncOutcome {
     pub(crate) changed: bool,
+    pub(crate) repaint: bool,
     pub(crate) close_session: bool,
     pub(crate) clear_global_daemon: bool,
     pub(crate) notice: Option<String>,
@@ -389,6 +406,9 @@ pub(crate) trait EmulatorRuntimeBackend: Clone {
     fn poll(&self);
     fn write_input(&self, input: &[u8]) -> Result<(), TerminalError>;
     fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot;
+    fn render_snapshot(&self) -> Option<Arc<arbor_terminal_emulator::TerminalSnapshot>> {
+        None
+    }
     fn resize(
         &self,
         rows: u16,
@@ -430,6 +450,10 @@ pub(crate) trait TerminalRuntimeHandle {
         )
     }
     fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), TerminalError>;
+    fn session_became_active(&self, _session: &TerminalSession) {}
+    fn render_snapshot(&self, _session: &TerminalSession) -> Option<TerminalRenderSnapshot> {
+        None
+    }
     fn sync(
         &self,
         session: &mut TerminalSession,
@@ -457,8 +481,9 @@ pub(crate) struct EmulatorTerminalRuntime<B> {
 pub(crate) struct DaemonTerminalRuntime {
     pub(crate) daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     pub(crate) ws_state: Arc<DaemonTerminalWsState>,
-    pub(crate) last_synced_ws_generation: std::sync::atomic::AtomicU64,
+    pub(crate) last_synced_ws_generation: AtomicU64,
     pub(crate) snapshot_request_in_flight: Arc<AtomicBool>,
+    pub(crate) snapshot_request_pending: Arc<AtomicBool>,
     pub(crate) kind: TerminalRuntimeKind,
     pub(crate) resize_error_label: &'static str,
     pub(crate) exit_labels: Option<RuntimeExitLabels>,
@@ -467,7 +492,7 @@ pub(crate) struct DaemonTerminalRuntime {
 
 #[derive(Clone)]
 pub(crate) struct DaemonTerminalCachedSnapshot {
-    pub(crate) terminal: arbor_terminal_emulator::TerminalSnapshot,
+    pub(crate) terminal: Arc<arbor_terminal_emulator::TerminalSnapshot>,
     pub(crate) state: TerminalState,
     pub(crate) updated_at_unix_ms: Option<u64>,
     pub(crate) ready: bool,
@@ -476,13 +501,13 @@ pub(crate) struct DaemonTerminalCachedSnapshot {
 impl Default for DaemonTerminalCachedSnapshot {
     fn default() -> Self {
         Self {
-            terminal: arbor_terminal_emulator::TerminalSnapshot {
+            terminal: Arc::new(arbor_terminal_emulator::TerminalSnapshot {
                 output: String::new(),
                 styled_lines: Vec::new(),
                 cursor: None,
                 modes: TerminalModes::default(),
                 exit_code: None,
-            },
+            }),
             state: TerminalState::Running,
             updated_at_unix_ms: None,
             ready: false,
@@ -491,7 +516,12 @@ impl Default for DaemonTerminalCachedSnapshot {
 }
 
 pub(crate) struct DaemonTerminalWsState {
-    pub(crate) event_generation: std::sync::atomic::AtomicU64,
+    pub(crate) event_generation: AtomicU64,
+    pub(crate) snapshot_generation: AtomicU64,
+    pub(crate) snapshot_refresh_requested: AtomicBool,
+    pub(crate) snapshot_build_in_flight: AtomicBool,
+    pub(crate) snapshot_build_pending: AtomicBool,
+    pub(crate) interactive_output_until_unix_ms: AtomicU64,
     pub(crate) closed: AtomicBool,
     pub(crate) connection_refused: AtomicBool,
     /// Channel to send keystroke bytes to the WS thread for low-latency binary transmission.
@@ -522,7 +552,12 @@ impl DaemonTerminalWsState {
         let rows = rows.max(1);
         let cols = cols.max(2);
         Self {
-            event_generation: std::sync::atomic::AtomicU64::new(0),
+            event_generation: AtomicU64::new(0),
+            snapshot_generation: AtomicU64::new(0),
+            snapshot_refresh_requested: AtomicBool::new(false),
+            snapshot_build_in_flight: AtomicBool::new(false),
+            snapshot_build_pending: AtomicBool::new(false),
+            interactive_output_until_unix_ms: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             connection_refused: AtomicBool::new(false),
             ws_writer: Mutex::new(None),
@@ -542,8 +577,57 @@ impl DaemonTerminalWsState {
         }
     }
 
+    pub(crate) fn note_event_with_cached_snapshot(&self) {
+        let generation = self.event_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.snapshot_generation
+            .store(generation, Ordering::Relaxed);
+        if let Some(ref tx) = self.poll_notify {
+            let _ = tx.send(());
+        }
+    }
+
     pub(crate) fn event_generation(&self) -> u64 {
         self.event_generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn request_snapshot_refresh(&self) {
+        self.snapshot_refresh_requested
+            .store(true, Ordering::Relaxed);
+        if let Some(ref tx) = self.poll_notify {
+            let _ = tx.send(());
+        }
+    }
+
+    pub(crate) fn enter_interactive_output_window(&self) {
+        let Some(now) = current_unix_timestamp_millis() else {
+            return;
+        };
+        let until =
+            now.saturating_add(INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW.as_millis() as u64);
+        self.interactive_output_until_unix_ms
+            .store(until, Ordering::Relaxed);
+    }
+
+    pub(crate) fn should_inline_output_snapshot(&self, byte_len: usize) -> bool {
+        if byte_len == 0 || byte_len > INTERACTIVE_DAEMON_INLINE_SNAPSHOT_MAX_BYTES {
+            return false;
+        }
+
+        let Some(now) = current_unix_timestamp_millis() else {
+            return false;
+        };
+        self.interactive_output_until_unix_ms
+            .load(Ordering::Relaxed)
+            > now
+    }
+
+    pub(crate) fn snapshot_refresh_requested(&self) -> bool {
+        self.snapshot_refresh_requested.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn take_snapshot_refresh_requested(&self) -> bool {
+        self.snapshot_refresh_requested
+            .swap(false, Ordering::Relaxed)
     }
 
     pub(crate) fn close(&self) {
@@ -599,8 +683,7 @@ impl DaemonTerminalWsState {
             };
             *emulator = arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols);
             emulator.process(ansi_output.as_bytes());
-            let mut snapshot =
-                trim_terminal_snapshot(emulator.snapshot(), DAEMON_TERMINAL_WS_MAX_LINES);
+            let mut snapshot = emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES);
             snapshot.exit_code = exit_code;
             snapshot
         };
@@ -610,38 +693,53 @@ impl DaemonTerminalWsState {
             Err(poisoned) => poisoned.into_inner(),
         };
         *cached = DaemonTerminalCachedSnapshot {
-            terminal: terminal_snapshot,
+            terminal: Arc::new(terminal_snapshot),
             state,
             updated_at_unix_ms: updated_at_unix_ms.or_else(current_unix_timestamp_millis),
             ready: true,
         };
         drop(cached);
-        self.note_event();
+        self.note_event_with_cached_snapshot();
     }
 
-    pub(crate) fn apply_output_bytes(&self, bytes: &[u8]) {
+    pub(crate) fn apply_output_bytes(&self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
-            return;
+            return false;
         }
 
-        let terminal_snapshot = {
+        let inline_snapshot = {
             let mut emulator = match self.emulator.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
             emulator.process(bytes);
-            trim_terminal_snapshot(emulator.snapshot(), DAEMON_TERMINAL_WS_MAX_LINES)
+
+            self.should_inline_output_snapshot(bytes.len())
+                .then(|| emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES))
         };
+
+        let Some(mut terminal_snapshot) = inline_snapshot else {
+            return false;
+        };
+
+        let exit_code = self
+            .snapshot
+            .lock()
+            .ok()
+            .map(|cached| cached.terminal.exit_code)
+            .unwrap_or(None);
+        terminal_snapshot.exit_code = exit_code;
 
         let mut cached = match self.snapshot.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        cached.terminal = terminal_snapshot;
+        cached.terminal = Arc::new(terminal_snapshot);
         cached.updated_at_unix_ms = current_unix_timestamp_millis();
         cached.ready = true;
         drop(cached);
-        self.note_event();
+        self.note_event_with_cached_snapshot();
+        true
     }
 
     pub(crate) fn apply_exit(&self, state: TerminalState, exit_code: Option<i32>) {
@@ -650,11 +748,13 @@ impl DaemonTerminalWsState {
             Err(poisoned) => poisoned.into_inner(),
         };
         cached.state = state;
-        cached.terminal.exit_code = exit_code;
+        let mut terminal = (*cached.terminal).clone();
+        terminal.exit_code = exit_code;
+        cached.terminal = Arc::new(terminal);
         cached.updated_at_unix_ms = current_unix_timestamp_millis();
         cached.ready = true;
         drop(cached);
-        self.note_event();
+        self.note_event_with_cached_snapshot();
     }
 
     pub(crate) fn resize_emulator(&self, rows: u16, cols: u16) {
@@ -670,7 +770,7 @@ impl DaemonTerminalWsState {
                 Err(poisoned) => poisoned.into_inner(),
             };
             emulator.resize(rows, cols);
-            trim_terminal_snapshot(emulator.snapshot(), DAEMON_TERMINAL_WS_MAX_LINES)
+            emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES)
         };
 
         let mut cached = match self.snapshot.lock() {
@@ -678,17 +778,31 @@ impl DaemonTerminalWsState {
             Err(poisoned) => poisoned.into_inner(),
         };
         if cached.ready {
-            cached.terminal = terminal_snapshot;
+            cached.terminal = Arc::new(terminal_snapshot);
             cached.updated_at_unix_ms = current_unix_timestamp_millis();
         }
+        self.snapshot_generation
+            .store(self.event_generation(), Ordering::Relaxed);
     }
 
     pub(crate) fn snapshot(&self) -> Option<DaemonTerminalCachedSnapshot> {
+        let current_generation = self.event_generation();
+        if self.snapshot_generation.load(Ordering::Relaxed) != current_generation {
+            return None;
+        }
+
         self.snapshot
             .lock()
             .ok()
             .map(|guard| guard.clone())
             .filter(|snapshot| snapshot.ready)
+    }
+
+    pub(crate) fn has_ready_snapshot(&self) -> bool {
+        self.snapshot
+            .lock()
+            .ok()
+            .is_some_and(|snapshot| snapshot.ready)
     }
 }
 
@@ -701,6 +815,10 @@ impl EmulatorRuntimeBackend for EmbeddedTerminal {
 
     fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
         EmbeddedTerminal::snapshot(self)
+    }
+
+    fn render_snapshot(&self) -> Option<Arc<arbor_terminal_emulator::TerminalSnapshot>> {
+        Some(EmbeddedTerminal::shared_snapshot(self))
     }
 
     fn resize(
@@ -831,8 +949,60 @@ where
             .background_sync_interval(is_active, session.state)
     }
 
+    fn should_sync(
+        &self,
+        session: &TerminalSession,
+        is_active: bool,
+        target_grid_size: Option<(u16, u16, u16, u16)>,
+        now: Instant,
+    ) -> bool {
+        if self.kind == TerminalRuntimeKind::Local
+            && is_active
+            && let Some((rows, cols, ..)) = target_grid_size
+            && (cols != session.cols || rows != session.rows)
+        {
+            return true;
+        }
+
+        if self.kind == TerminalRuntimeKind::Local
+            && let Some(interval) = self
+                .backend
+                .background_sync_interval(is_active, session.state)
+        {
+            let generation = self.backend.generation();
+            if generation == session.generation {
+                return false;
+            }
+
+            return runtime_sync_interval_elapsed(
+                session.last_runtime_sync_at,
+                terminal_sync_interval_for_session(session, interval, now),
+                now,
+            );
+        }
+
+        runtime_sync_interval_elapsed(
+            session.last_runtime_sync_at,
+            terminal_sync_interval_for_session(
+                session,
+                self.sync_interval(is_active, session.state),
+                now,
+            ),
+            now,
+        )
+    }
+
     fn write_input(&self, _session: &TerminalSession, input: &[u8]) -> Result<(), TerminalError> {
         self.backend.write_input(input)
+    }
+
+    fn render_snapshot(&self, session: &TerminalSession) -> Option<TerminalRenderSnapshot> {
+        self.backend
+            .render_snapshot()
+            .map(|terminal| TerminalRenderSnapshot {
+                terminal,
+                state: session.state,
+            })
     }
 
     fn sync(
@@ -858,7 +1028,7 @@ where
         }
 
         let snapshot = self.backend.snapshot();
-        if apply_terminal_emulator_snapshot(session, snapshot) {
+        if apply_terminal_emulator_snapshot(session, &snapshot) {
             outcome.changed = true;
         }
         session.generation = generation;
@@ -930,6 +1100,19 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
             return true;
         }
 
+        if self.ws_state.snapshot_refresh_requested() {
+            let interval = if is_active {
+                ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL
+            } else {
+                self.sync_interval(false, session.state)
+            };
+            return runtime_sync_interval_elapsed(
+                session.last_runtime_sync_at,
+                terminal_sync_interval_for_session(session, interval, now),
+                now,
+            );
+        }
+
         let current_generation = self.ws_state.event_generation();
         let last_synced_generation = self.last_synced_ws_generation.load(Ordering::Relaxed);
         if current_generation > last_synced_generation {
@@ -938,39 +1121,89 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
             } else {
                 self.sync_interval(false, session.state)
             };
-            return runtime_sync_interval_elapsed(session.last_runtime_sync_at, interval, now);
+            return runtime_sync_interval_elapsed(
+                session.last_runtime_sync_at,
+                terminal_sync_interval_for_session(session, interval, now),
+                now,
+            );
         }
 
         runtime_sync_interval_elapsed(
             session.last_runtime_sync_at,
-            self.sync_interval(is_active, session.state),
+            terminal_sync_interval_for_session(
+                session,
+                self.sync_interval(is_active, session.state),
+                now,
+            ),
             now,
         )
     }
 
     fn write_input(&self, session: &TerminalSession, input: &[u8]) -> Result<(), TerminalError> {
-        if input == [0x03] {
-            // Ctrl-C: send as signal for reliable delivery
-            self.daemon
-                .signal(SignalRequest {
-                    session_id: session.daemon_session_id.clone().into(),
-                    signal: TerminalSignal::Interrupt,
-                })
-                .map_err(|error| TerminalError::Pty(error.to_string()))
+        let (result, used_http_fallback) = if input == [0x03] {
+            (
+                self.daemon
+                    .signal(SignalRequest {
+                        session_id: session.daemon_session_id.clone().into(),
+                        signal: TerminalSignal::Interrupt,
+                    })
+                    .map_err(|error| TerminalError::Pty(error.to_string())),
+                false,
+            )
         } else if self.ws_state.try_write(input.to_vec()) {
-            // Fast path: send via WebSocket binary frame
             tracing::trace!("write_input: sent via WS binary frame");
-            Ok(())
+            (Ok(()), false)
         } else {
-            // Fallback: HTTP POST (WS not connected yet)
             tracing::trace!("write_input: WS unavailable, falling back to HTTP POST");
-            self.daemon
-                .write(WriteRequest {
-                    session_id: session.daemon_session_id.clone().into(),
-                    bytes: input.to_vec(),
-                })
-                .map_err(|error| TerminalError::Pty(error.to_string()))
+            (
+                self.daemon
+                    .write(WriteRequest {
+                        session_id: session.daemon_session_id.clone().into(),
+                        bytes: input.to_vec(),
+                    })
+                    .map_err(|error| TerminalError::Pty(error.to_string())),
+                true,
+            )
+        };
+
+        if result.is_ok() {
+            self.ws_state.enter_interactive_output_window();
+            if used_http_fallback {
+                self.ws_state.request_snapshot_refresh();
+                request_async_daemon_snapshot(
+                    self.daemon.clone(),
+                    session.daemon_session_id.clone(),
+                    self.ws_state.clone(),
+                    self.snapshot_request_in_flight.clone(),
+                    self.snapshot_request_pending.clone(),
+                );
+            }
         }
+
+        result
+    }
+
+    fn session_became_active(&self, session: &TerminalSession) {
+        self.ws_state.enter_interactive_output_window();
+        if self.ws_state.snapshot().is_none() {
+            self.ws_state.request_snapshot_refresh();
+            request_async_daemon_snapshot(
+                self.daemon.clone(),
+                session.daemon_session_id.clone(),
+                self.ws_state.clone(),
+                self.snapshot_request_in_flight.clone(),
+                self.snapshot_request_pending.clone(),
+            );
+        }
+    }
+
+    fn render_snapshot(&self, _session: &TerminalSession) -> Option<TerminalRenderSnapshot> {
+        self.ws_state
+            .snapshot()
+            .map(|snapshot| TerminalRenderSnapshot {
+                terminal: snapshot.terminal,
+                state: snapshot.state,
+            })
     }
 
     fn sync(
@@ -981,6 +1214,8 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
     ) -> TerminalRuntimeSyncOutcome {
         let mut outcome = TerminalRuntimeSyncOutcome::default();
         let observed_ws_generation = self.ws_state.event_generation();
+        let last_synced_generation = self.last_synced_ws_generation.load(Ordering::Relaxed);
+        let refresh_requested = self.ws_state.take_snapshot_refresh_requested();
 
         if self.clear_global_daemon_on_connection_refused && self.ws_state.take_connection_refused()
         {
@@ -1012,20 +1247,39 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
             }
         }
 
+        if refresh_requested {
+            request_async_daemon_snapshot(
+                self.daemon.clone(),
+                session.daemon_session_id.clone(),
+                self.ws_state.clone(),
+                self.snapshot_request_in_flight.clone(),
+                self.snapshot_request_pending.clone(),
+            );
+        }
+
         let Some(snapshot) = self.ws_state.snapshot() else {
             request_async_daemon_snapshot(
                 self.daemon.clone(),
                 session.daemon_session_id.clone(),
                 self.ws_state.clone(),
                 self.snapshot_request_in_flight.clone(),
+                self.snapshot_request_pending.clone(),
             );
             return outcome;
         };
 
         self.last_synced_ws_generation
             .store(observed_ws_generation, Ordering::Relaxed);
+        outcome.repaint = is_active && observed_ws_generation > last_synced_generation;
 
-        if apply_terminal_emulator_snapshot(session, snapshot.terminal.clone()) {
+        let should_materialize_active_snapshot = !is_active
+            || snapshot.state != TerminalState::Running
+            || (session.output.is_empty()
+                && session.styled_output.is_empty()
+                && session.cursor.is_none());
+        if should_materialize_active_snapshot
+            && apply_terminal_emulator_snapshot(session, &snapshot.terminal)
+        {
             outcome.changed = true;
         }
 
@@ -1033,9 +1287,15 @@ impl TerminalRuntimeHandle for DaemonTerminalRuntime {
             session.state = snapshot.state;
             outcome.changed = true;
         }
-        if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
-            session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
+        if session.exit_code != snapshot.terminal.exit_code {
+            session.exit_code = snapshot.terminal.exit_code;
             outcome.changed = true;
+        }
+        if session.updated_at_unix_ms != snapshot.updated_at_unix_ms {
+            // Keep terminal metadata fresh, but do not force a full UI redraw when
+            // only the daemon timestamp changed. Hidden control traffic can update
+            // the timestamp without changing any visible terminal content.
+            session.updated_at_unix_ms = snapshot.updated_at_unix_ms;
         }
 
         if let Some(exit_labels) = self.exit_labels
@@ -2298,7 +2558,9 @@ pub(crate) struct ArborWindow {
     pub(crate) issue_details_scroll_handle: ScrollHandle,
     pub(crate) issue_details_scrollbar_drag_offset: Option<Pixels>,
     pub(crate) last_terminal_grid_size: Option<(u16, u16)>,
+    pub(crate) terminal_font_metrics: Option<TerminalFontMetrics>,
     pub(crate) center_tabs_scroll_handle: ScrollHandle,
+    pub(crate) center_tabs_last_scrolled_index: Option<usize>,
     pub(crate) diff_scroll_handle: UniformListScrollHandle,
     pub(crate) terminal_selection: Option<TerminalSelection>,
     pub(crate) terminal_selection_drag_anchor: Option<TerminalGridPosition>,
@@ -2362,6 +2624,7 @@ pub(crate) struct ArborWindow {
     pub(crate) pending_issue_cache_save: Option<issue_cache_store::IssueCache>,
     pub(crate) issue_cache_save_in_flight: Option<issue_cache_store::IssueCache>,
     pub(crate) daemon_session_store_save: PendingSave<Vec<DaemonSessionRecord>>,
+    pub(crate) daemon_session_store_dirty: bool,
     pub(crate) last_ui_state_error: Option<String>,
     pub(crate) last_issue_cache_error: Option<String>,
     pub(crate) notification_service: Box<dyn notifications::NotificationService>,
@@ -2371,6 +2634,7 @@ pub(crate) struct ArborWindow {
     pub(crate) auto_checkpoint_in_flight: Arc<Mutex<HashSet<PathBuf>>>,
     pub(crate) agent_activity_epochs: Arc<Mutex<HashMap<PathBuf, u64>>>,
     pub(crate) window_is_active: bool,
+    pub(crate) last_window_geometry: Option<ui_state_store::WindowGeometry>,
     pub(crate) notice: Option<String>,
     pub(crate) theme_toast: Option<String>,
     pub(crate) theme_toast_generation: u64,
@@ -2428,6 +2692,7 @@ pub(crate) struct ArborWindow {
     pub(crate) _ui_state_save_task: Option<gpui::Task<()>>,
     pub(crate) _issue_cache_save_task: Option<gpui::Task<()>>,
     pub(crate) _daemon_session_store_save_task: Option<gpui::Task<()>>,
+    pub(crate) _daemon_session_store_debounce_task: Option<gpui::Task<()>>,
     pub(crate) _create_modal_preview_task: Option<gpui::Task<()>>,
     pub(crate) _file_tree_refresh_task: Option<gpui::Task<()>>,
     pub(crate) worktree_refresh_epoch: u64,

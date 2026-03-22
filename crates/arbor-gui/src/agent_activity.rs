@@ -71,8 +71,9 @@ pub(crate) fn process_agent_ws_message(
                 );
             }
             let _ = this.update(cx, |this, cx| {
-                apply_agent_ws_snapshot(this, &entries, cx);
-                cx.notify();
+                if apply_agent_ws_snapshot(this, &entries, cx) {
+                    cx.notify();
+                }
             });
         },
         Some("update") => {
@@ -87,8 +88,9 @@ pub(crate) fn process_agent_ws_message(
                 );
                 let entries = vec![entry];
                 let _ = this.update(cx, |this, cx| {
-                    apply_agent_ws_update(this, &entries, cx);
-                    cx.notify();
+                    if apply_agent_ws_update(this, &entries, cx) {
+                        cx.notify();
+                    }
                 });
             }
         },
@@ -97,8 +99,9 @@ pub(crate) fn process_agent_ws_message(
                 tracing::info!(session_id, "agent WS clear received");
                 let session_id = session_id.to_owned();
                 let _ = this.update(cx, |this, cx| {
-                    apply_agent_ws_clear(this, &session_id, cx);
-                    cx.notify();
+                    if apply_agent_ws_clear(this, &session_id, cx) {
+                        cx.notify();
+                    }
                 });
             }
         },
@@ -110,7 +113,7 @@ fn apply_agent_ws_snapshot(
     app: &mut ArborWindow,
     entries: &[AgentWsSessionEntry],
     cx: &mut Context<ArborWindow>,
-) {
+) -> bool {
     tracing::info!(count = entries.len(), "agent WS snapshot received");
     app.agent_activity_sessions = entries
         .iter()
@@ -122,14 +125,14 @@ fn apply_agent_ws_snapshot(
             })
         })
         .collect();
-    reconcile_worktree_agent_activity(app, false, cx);
+    reconcile_worktree_agent_activity(app, false, cx)
 }
 
 fn apply_agent_ws_update(
     app: &mut ArborWindow,
     entries: &[AgentWsSessionEntry],
     cx: &mut Context<ArborWindow>,
-) {
+) -> bool {
     for entry in entries {
         app.agent_activity_sessions
             .insert(entry.session_id.clone(), AgentActivitySessionRecord {
@@ -138,22 +141,27 @@ fn apply_agent_ws_update(
                 updated_at_unix_ms: entry.updated_at_unix_ms,
             });
     }
-    reconcile_worktree_agent_activity(app, true, cx);
+    reconcile_worktree_agent_activity(app, true, cx)
 }
 
-fn apply_agent_ws_clear(app: &mut ArborWindow, session_id: &str, cx: &mut Context<ArborWindow>) {
+fn apply_agent_ws_clear(
+    app: &mut ArborWindow,
+    session_id: &str,
+    cx: &mut Context<ArborWindow>,
+) -> bool {
     remove_agent_activity_session(&mut app.agent_activity_sessions, session_id);
-    reconcile_worktree_agent_activity(app, false, cx);
+    reconcile_worktree_agent_activity(app, false, cx)
 }
 
 pub(crate) fn reconcile_worktree_agent_activity(
     app: &mut ArborWindow,
     allow_waiting_transitions: bool,
     cx: &mut Context<ArborWindow>,
-) {
+) -> bool {
     let worktree_paths: Vec<PathBuf> = app.worktrees.iter().map(|w| w.path.clone()).collect();
     let allow_auto_checkpoint = app.active_outpost_index.is_none();
     let mut derived_states = HashMap::<PathBuf, (AgentState, Option<u64>)>::new();
+    let mut visible_changed = false;
 
     for (session_id, session) in &app.agent_activity_sessions {
         let cwd_path = Path::new(&session.cwd);
@@ -189,6 +197,7 @@ pub(crate) fn reconcile_worktree_agent_activity(
     let mut waiting_transitions = Vec::new();
     for worktree in &mut app.worktrees {
         let previous_state = worktree.agent_state;
+        let previous_recent = worktree_recent_activity_visible(worktree.last_activity_unix_ms);
         let (next_state, updated_at) = derived_states
             .remove(&worktree.path)
             .map(|(state, updated_at)| (Some(state), updated_at))
@@ -208,6 +217,9 @@ pub(crate) fn reconcile_worktree_agent_activity(
             worktree.last_activity_unix_ms =
                 Some(worktree.last_activity_unix_ms.unwrap_or(0).max(ts));
         }
+        let next_recent = worktree_recent_activity_visible(worktree.last_activity_unix_ms);
+        visible_changed |= previous_state != next_state
+            || (previous_state.is_none() && next_state.is_none() && previous_recent != next_recent);
 
         if allow_waiting_transitions
             && agent_waiting_transition_detected(previous_state, next_state)
@@ -227,6 +239,17 @@ pub(crate) fn reconcile_worktree_agent_activity(
     for request in waiting_transitions {
         app.spawn_agent_waiting_transition(request, cx);
     }
+
+    visible_changed
+}
+
+fn worktree_recent_activity_visible(last_activity_unix_ms: Option<u64>) -> bool {
+    last_activity_unix_ms.is_some_and(|timestamp| {
+        current_unix_timestamp_millis()
+            .unwrap_or(0)
+            .saturating_sub(timestamp)
+            <= 15 * 60 * 1000
+    })
 }
 
 pub(crate) fn agent_waiting_transition_detected(

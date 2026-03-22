@@ -21,13 +21,22 @@ pub(crate) fn local_daemon_runtime(
     poll_notify: Option<std::sync::mpsc::Sender<()>>,
 ) -> SharedTerminalRuntime {
     let ws_state = Arc::new(DaemonTerminalWsState::new(poll_notify, rows, cols));
-    spawn_daemon_terminal_ws_watcher(daemon.clone(), session_id.clone(), &ws_state);
+    let snapshot_request_in_flight = Arc::new(AtomicBool::new(false));
+    let snapshot_request_pending = Arc::new(AtomicBool::new(false));
+    spawn_daemon_terminal_ws_watcher(
+        daemon.clone(),
+        session_id.clone(),
+        &ws_state,
+        snapshot_request_in_flight.clone(),
+        snapshot_request_pending.clone(),
+    );
 
     Arc::new(DaemonTerminalRuntime {
         daemon,
         ws_state,
         last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
-        snapshot_request_in_flight: Arc::new(AtomicBool::new(false)),
+        snapshot_request_in_flight,
+        snapshot_request_pending,
         kind: TerminalRuntimeKind::Local,
         resize_error_label: "failed to resize terminal",
         exit_labels: Some(RuntimeExitLabels {
@@ -87,7 +96,7 @@ pub(crate) enum DaemonTerminalWsServerEvent {
 
 pub(crate) fn apply_terminal_emulator_snapshot(
     session: &mut TerminalSession,
-    snapshot: arbor_terminal_emulator::TerminalSnapshot,
+    snapshot: &arbor_terminal_emulator::TerminalSnapshot,
 ) -> bool {
     let mut changed = false;
 
@@ -96,8 +105,8 @@ pub(crate) fn apply_terminal_emulator_snapshot(
         || session.cursor != snapshot.cursor
         || session.modes != snapshot.modes
     {
-        session.output = snapshot.output;
-        session.styled_output = snapshot.styled_lines;
+        session.output = snapshot.output.clone();
+        session.styled_output = snapshot.styled_lines.clone();
         session.cursor = snapshot.cursor;
         session.modes = snapshot.modes;
         session.updated_at_unix_ms = current_unix_timestamp_millis();
@@ -111,27 +120,6 @@ pub(crate) fn apply_terminal_emulator_snapshot(
     }
 
     changed
-}
-
-pub(crate) fn trim_terminal_snapshot(
-    mut snapshot: arbor_terminal_emulator::TerminalSnapshot,
-    max_lines: usize,
-) -> arbor_terminal_emulator::TerminalSnapshot {
-    snapshot.output = trim_to_last_lines(snapshot.output, max_lines);
-
-    let keep_from = snapshot.styled_lines.len().saturating_sub(max_lines);
-    snapshot.cursor = snapshot.cursor.and_then(|cursor| {
-        (cursor.line >= keep_from).then_some(TerminalCursor {
-            line: cursor.line - keep_from,
-            column: cursor.column,
-        })
-    });
-
-    if keep_from > 0 {
-        snapshot.styled_lines.drain(..keep_from);
-    }
-
-    snapshot
 }
 
 pub(crate) fn track_terminal_command_keystroke(
@@ -197,8 +185,11 @@ pub(crate) fn event_driven_terminal_sync_interval(
     is_active: bool,
     session_state: TerminalState,
 ) -> Option<Duration> {
-    (is_active && session_state == TerminalState::Running)
-        .then_some(ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL)
+    (session_state == TerminalState::Running).then_some(if is_active {
+        ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL
+    } else {
+        INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL
+    })
 }
 
 pub(crate) fn ssh_terminal_sync_interval(
@@ -228,6 +219,22 @@ pub(crate) fn runtime_sync_interval_elapsed(
         Some(last_sync) => now.saturating_duration_since(last_sync) >= sync_interval,
         None => true,
     }
+}
+
+pub(crate) fn terminal_sync_interval_for_session(
+    session: &TerminalSession,
+    default_interval: Duration,
+    now: Instant,
+) -> Duration {
+    if session.state == TerminalState::Running
+        && session
+            .interactive_sync_until
+            .is_some_and(|deadline| deadline > now)
+    {
+        return default_interval.min(INTERACTIVE_TERMINAL_SYNC_INTERVAL);
+    }
+
+    default_interval
 }
 
 pub(crate) fn daemon_websocket_request(
@@ -271,6 +278,8 @@ pub(crate) fn spawn_daemon_terminal_ws_watcher(
     daemon: terminal_daemon_http::SharedTerminalDaemonClient,
     session_id: String,
     ws_state: &Arc<DaemonTerminalWsState>,
+    snapshot_request_in_flight: Arc<AtomicBool>,
+    snapshot_request_pending: Arc<AtomicBool>,
 ) {
     let ws_state = Arc::downgrade(ws_state);
     std::thread::spawn(move || {
@@ -319,6 +328,16 @@ pub(crate) fn spawn_daemon_terminal_ws_watcher(
                     // Set up write channel for low-latency keystroke delivery
                     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
                     ws_state.set_writer(Some(tx));
+                    if !ws_state.has_ready_snapshot() {
+                        ws_state.request_snapshot_refresh();
+                        request_async_daemon_snapshot(
+                            daemon.clone(),
+                            session_id.clone(),
+                            ws_state.clone(),
+                            snapshot_request_in_flight.clone(),
+                            snapshot_request_pending.clone(),
+                        );
+                    }
                     tracing::debug!(session_id = %session_id, "WS write channel established for keystroke delivery");
 
                     loop {
@@ -342,7 +361,9 @@ pub(crate) fn spawn_daemon_terminal_ws_watcher(
                         // Read incoming messages (may timeout quickly due to read timeout)
                         match socket.read() {
                             Ok(tungstenite::Message::Binary(bytes)) => {
-                                ws_state.apply_output_bytes(&bytes);
+                                if !ws_state.apply_output_bytes(&bytes) {
+                                    schedule_daemon_ws_snapshot_rebuild(ws_state.clone());
+                                }
                             },
                             Ok(tungstenite::Message::Text(payload)) => {
                                 match serde_json::from_str::<DaemonTerminalWsServerEvent>(&payload)
@@ -444,45 +465,151 @@ pub(crate) fn request_async_daemon_snapshot(
     session_id: String,
     ws_state: Arc<DaemonTerminalWsState>,
     in_flight: Arc<AtomicBool>,
+    pending: Arc<AtomicBool>,
 ) {
     if in_flight
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        pending.store(true, Ordering::Release);
         return;
     }
 
     std::thread::spawn(move || {
-        let result = daemon.snapshot(daemon::SnapshotRequest {
-            session_id: session_id.clone().into(),
-            max_lines: DAEMON_TERMINAL_WS_MAX_LINES,
-        });
+        loop {
+            let requested_generation = ws_state.event_generation();
+            let result = daemon.snapshot(daemon::SnapshotRequest {
+                session_id: session_id.clone().into(),
+                max_lines: DAEMON_TERMINAL_WS_MAX_LINES,
+            });
 
-        match result {
-            Ok(Some(snapshot)) => {
-                if ws_state.snapshot().is_none() {
-                    ws_state.apply_snapshot_text(
-                        &snapshot.output_tail,
-                        terminal_state_from_daemon_state(snapshot.state),
-                        snapshot.exit_code,
+            match result {
+                Ok(Some(snapshot)) => {
+                    let cached_updated_at_unix_ms = ws_state
+                        .snapshot
+                        .lock()
+                        .ok()
+                        .and_then(|cached| cached.updated_at_unix_ms);
+                    if should_apply_async_daemon_snapshot(
+                        requested_generation,
+                        ws_state.event_generation(),
                         snapshot.updated_at_unix_ms,
+                        cached_updated_at_unix_ms,
+                    ) {
+                        ws_state.apply_snapshot_text(
+                            &snapshot.output_tail,
+                            terminal_state_from_daemon_state(snapshot.state),
+                            snapshot.exit_code,
+                            snapshot.updated_at_unix_ms,
+                        );
+                    }
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        %error,
+                        "failed to load daemon terminal snapshot asynchronously"
                     );
-                }
-            },
-            Ok(None) => {},
-            Err(error) => {
-                tracing::debug!(
-                    session_id = %session_id,
-                    %error,
-                    "failed to load daemon terminal snapshot asynchronously"
-                );
-                if daemon_error_is_connection_refused(&error.to_string()) {
-                    ws_state.note_connection_refused();
-                }
-            },
-        }
+                    if daemon_error_is_connection_refused(&error.to_string()) {
+                        ws_state.note_connection_refused();
+                    }
+                },
+            }
 
-        in_flight.store(false, Ordering::Release);
+            in_flight.store(false, Ordering::Release);
+
+            if !pending.swap(false, Ordering::AcqRel) {
+                break;
+            }
+
+            if in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
+pub(crate) fn should_apply_async_daemon_snapshot(
+    requested_generation: u64,
+    current_generation: u64,
+    snapshot_updated_at_unix_ms: Option<u64>,
+    cached_updated_at_unix_ms: Option<u64>,
+) -> bool {
+    if current_generation == requested_generation {
+        return true;
+    }
+
+    match (snapshot_updated_at_unix_ms, cached_updated_at_unix_ms) {
+        (Some(snapshot_updated_at), Some(cached_updated_at)) => {
+            snapshot_updated_at >= cached_updated_at
+        },
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+pub(crate) fn schedule_daemon_ws_snapshot_rebuild(ws_state: Arc<DaemonTerminalWsState>) {
+    if ws_state
+        .snapshot_build_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        ws_state
+            .snapshot_build_pending
+            .store(true, Ordering::Release);
+        return;
+    }
+
+    std::thread::spawn(move || {
+        loop {
+            let exit_code = ws_state
+                .snapshot
+                .lock()
+                .ok()
+                .map(|cached| cached.terminal.exit_code)
+                .unwrap_or(None);
+            let mut terminal_snapshot = {
+                let emulator = match ws_state.emulator.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES)
+            };
+            terminal_snapshot.exit_code = exit_code;
+
+            let mut cached = match ws_state.snapshot.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cached.terminal = Arc::new(terminal_snapshot);
+            cached.updated_at_unix_ms = current_unix_timestamp_millis();
+            cached.ready = true;
+            drop(cached);
+            ws_state.note_event_with_cached_snapshot();
+
+            ws_state
+                .snapshot_build_in_flight
+                .store(false, Ordering::Release);
+
+            if !ws_state
+                .snapshot_build_pending
+                .swap(false, Ordering::AcqRel)
+            {
+                break;
+            }
+
+            if ws_state
+                .snapshot_build_in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+        }
     });
 }
 
@@ -680,15 +807,12 @@ pub(crate) fn terminal_output_tail_for_metadata(
     max_lines: usize,
     max_chars: usize,
 ) -> String {
-    let lines = terminal_display_lines(session);
+    let lines = terminal_display_tail_lines(session, max_lines);
     if lines.is_empty() {
         return String::new();
     }
-
-    let start = lines.len().saturating_sub(max_lines);
     let mut tail = lines
         .into_iter()
-        .skip(start)
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -1168,6 +1292,8 @@ pub(crate) fn session_with_styled_line(
         cursor,
         modes: TerminalModes::default(),
         last_runtime_sync_at: None,
+        interactive_sync_until: None,
+        last_port_hint_scan_at: None,
         queued_input: Vec::new(),
         is_initializing: false,
         runtime: None,
@@ -1221,8 +1347,82 @@ pub(crate) mod tests {
     use {
         super::*,
         crate::terminal_daemon_http::{HttpTerminalDaemon, WebsocketConnectConfig},
-        std::time::Instant,
+        std::{
+            sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering},
+            },
+            time::Instant,
+        },
     };
+
+    #[derive(Clone)]
+    struct TestEmbeddedBackend {
+        generation: Arc<AtomicU64>,
+    }
+
+    impl TestEmbeddedBackend {
+        fn new(generation: u64) -> Self {
+            Self {
+                generation: Arc::new(AtomicU64::new(generation)),
+            }
+        }
+    }
+
+    impl EmulatorRuntimeBackend for TestEmbeddedBackend {
+        fn poll(&self) {}
+
+        fn write_input(&self, _input: &[u8]) -> Result<(), TerminalError> {
+            Ok(())
+        }
+
+        fn snapshot(&self) -> arbor_terminal_emulator::TerminalSnapshot {
+            arbor_terminal_emulator::TerminalSnapshot {
+                output: String::new(),
+                styled_lines: Vec::new(),
+                cursor: None,
+                modes: TerminalModes::default(),
+                exit_code: None,
+            }
+        }
+
+        fn resize(
+            &self,
+            _rows: u16,
+            _cols: u16,
+            _pixel_width: u16,
+            _pixel_height: u16,
+        ) -> Result<(), TerminalError> {
+            Ok(())
+        }
+
+        fn generation(&self) -> u64 {
+            self.generation.load(Ordering::Relaxed)
+        }
+
+        fn close(&self) {}
+
+        fn background_sync_interval(
+            &self,
+            is_active: bool,
+            session_state: TerminalState,
+        ) -> Option<Duration> {
+            event_driven_terminal_sync_interval(is_active, session_state)
+        }
+    }
+
+    fn embedded_runtime_for_test(generation: u64) -> EmulatorTerminalRuntime<TestEmbeddedBackend> {
+        EmulatorTerminalRuntime {
+            backend: TestEmbeddedBackend::new(generation),
+            kind: TerminalRuntimeKind::Local,
+            resize_error_label: "resize",
+            exit_labels: RuntimeExitLabels {
+                completed_title: "done",
+                failed_title: "failed",
+                failed_notice_prefix: "terminal",
+            },
+        }
+    }
 
     pub(crate) fn daemon_runtime_for_test() -> DaemonTerminalRuntime {
         let daemon = match HttpTerminalDaemon::new("http://127.0.0.1:1") {
@@ -1233,8 +1433,9 @@ pub(crate) mod tests {
         DaemonTerminalRuntime {
             daemon: Arc::new(daemon),
             ws_state: Arc::new(DaemonTerminalWsState::default()),
-            last_synced_ws_generation: std::sync::atomic::AtomicU64::new(0),
+            last_synced_ws_generation: AtomicU64::new(0),
             snapshot_request_in_flight: Arc::new(AtomicBool::new(false)),
+            snapshot_request_pending: Arc::new(AtomicBool::new(false)),
             kind: TerminalRuntimeKind::Local,
             resize_error_label: "resize",
             exit_labels: None,
@@ -1277,14 +1478,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn event_driven_terminal_sync_interval_only_polls_active_running_sessions() {
+    fn event_driven_terminal_sync_interval_coalesces_running_sessions() {
         assert_eq!(
             event_driven_terminal_sync_interval(true, TerminalState::Running),
             Some(ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL)
         );
         assert_eq!(
             event_driven_terminal_sync_interval(false, TerminalState::Running),
-            None
+            Some(INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL)
         );
         assert_eq!(
             event_driven_terminal_sync_interval(true, TerminalState::Completed),
@@ -1325,6 +1526,124 @@ pub(crate) mod tests {
             true,
             None,
             now + ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn async_daemon_snapshot_applies_when_snapshot_is_newer_than_cached_ws_state() {
+        assert!(should_apply_async_daemon_snapshot(
+            1,
+            2,
+            Some(200),
+            Some(150)
+        ));
+        assert!(should_apply_async_daemon_snapshot(1, 2, Some(200), None));
+    }
+
+    #[test]
+    fn async_daemon_snapshot_skips_stale_snapshot_after_newer_ws_state() {
+        assert!(!should_apply_async_daemon_snapshot(
+            1,
+            2,
+            Some(150),
+            Some(200)
+        ));
+        assert!(!should_apply_async_daemon_snapshot(1, 2, None, Some(200)));
+    }
+
+    #[test]
+    fn daemon_runtime_uses_interactive_sync_interval_after_input() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+        session.interactive_sync_until = Some(now + INTERACTIVE_TERMINAL_SYNC_WINDOW);
+
+        runtime.ws_state.note_event();
+
+        assert!(!runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL.saturating_sub(Duration::from_millis(1))
+        ));
+        assert!(runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn daemon_runtime_coalesces_refresh_requests_for_active_sessions() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+
+        runtime.ws_state.request_snapshot_refresh();
+
+        assert!(!runtime.should_sync(&session, true, None, now));
+        assert!(runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn embedded_runtime_coalesces_active_generation_bursts() {
+        let runtime = embedded_runtime_for_test(1);
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+
+        assert!(!runtime.should_sync(&session, true, None, now));
+        assert!(runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn embedded_runtime_uses_interactive_sync_interval_after_input() {
+        let runtime = embedded_runtime_for_test(1);
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+        session.interactive_sync_until = Some(now + INTERACTIVE_TERMINAL_SYNC_WINDOW);
+
+        assert!(!runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL.saturating_sub(Duration::from_millis(1))
+        ));
+        assert!(runtime.should_sync(
+            &session,
+            true,
+            None,
+            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn embedded_runtime_throttles_inactive_generation_bursts() {
+        let runtime = embedded_runtime_for_test(1);
+        let mut session = session_with_styled_line("prompt", 0xffffff, 0x000000, None);
+        let now = Instant::now();
+        session.last_runtime_sync_at = Some(now);
+
+        assert!(!runtime.should_sync(&session, false, None, now));
+        assert!(runtime.should_sync(
+            &session,
+            false,
+            None,
+            now + INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL
         ));
     }
 
@@ -1414,6 +1733,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn interactive_ws_output_publishes_snapshot_immediately() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.enter_interactive_output_window();
+
+        assert!(ws_state.apply_output_bytes(b"echo"));
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected inline websocket snapshot to be available"));
+        assert!(snapshot.terminal.output.contains("echo"));
+    }
+
+    #[test]
+    fn daemon_runtime_write_input_does_not_mutate_snapshot_before_echo() {
+        let runtime = daemon_runtime_for_test();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        runtime.ws_state.set_writer(Some(tx));
+        runtime
+            .ws_state
+            .apply_snapshot_text("$ ", TerminalState::Running, None, Some(1));
+
+        let session = session_with_styled_line("$ ", 0xffffff, 0x000000, None);
+        let before = runtime
+            .ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected snapshot before local input"));
+
+        if let Err(error) = runtime.write_input(&session, b" ") {
+            panic!("expected websocket write to succeed: {error}");
+        }
+
+        let after = runtime
+            .ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected snapshot after local input"));
+        assert_eq!(after.terminal.output, before.terminal.output);
+        assert_eq!(after.terminal.cursor, before.terminal.cursor);
+    }
+
+    #[test]
+    fn daemon_ws_output_redraw_replaces_line_without_duplicate_local_echo() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.apply_snapshot_text("$ ", TerminalState::Running, None, Some(1));
+
+        ws_state.enter_interactive_output_window();
+        assert!(ws_state.apply_output_bytes(b"star"));
+        assert!(ws_state.apply_output_bytes(b"\r\x1b[2K$ starship"));
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected snapshot after redraw output"));
+        assert!(
+            snapshot
+                .terminal
+                .output
+                .trim_end_matches('\n')
+                .ends_with("$ starship"),
+            "unexpected redraw output: {:?}",
+            snapshot.terminal.output
+        );
+    }
+
+    #[test]
     fn daemon_runtime_sync_applies_cached_ws_snapshot_without_http_roundtrip() {
         let runtime = daemon_runtime_for_test();
         let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
@@ -1435,6 +1816,62 @@ pub(crate) mod tests {
         assert_eq!(session.updated_at_unix_ms, Some(99));
         assert!(session.output.contains("codex> working"));
         assert_eq!(session.exit_code, None);
+    }
+
+    #[test]
+    fn daemon_runtime_timestamp_only_ws_update_does_not_mark_session_changed() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("", 0xffffff, 0x000000, None);
+        session.output.clear();
+        session.styled_output.clear();
+        session.cursor = None;
+
+        runtime.ws_state.apply_snapshot_text(
+            "codex> working\r\n",
+            TerminalState::Running,
+            None,
+            Some(42),
+        );
+        let first = runtime.sync(&mut session, true, None);
+        assert!(first.changed);
+        assert_eq!(session.updated_at_unix_ms, Some(42));
+
+        runtime.ws_state.apply_snapshot_text(
+            "codex> working\r\n",
+            TerminalState::Running,
+            None,
+            Some(99),
+        );
+        let second = runtime.sync(&mut session, true, None);
+
+        assert!(!second.changed);
+        assert_eq!(session.updated_at_unix_ms, Some(99));
+        assert!(session.output.contains("codex> working"));
+    }
+
+    #[test]
+    fn active_daemon_sync_repaints_without_recopying_session_buffers() {
+        let runtime = daemon_runtime_for_test();
+        let mut session = session_with_styled_line("stale", 0xffffff, 0x000000, None);
+        session.updated_at_unix_ms = Some(10);
+
+        runtime.ws_state.apply_snapshot_text(
+            "codex> refreshed\r\n",
+            TerminalState::Running,
+            None,
+            Some(99),
+        );
+
+        let outcome = runtime.sync(&mut session, true, None);
+        let render_snapshot = runtime
+            .render_snapshot(&session)
+            .unwrap_or_else(|| panic!("expected daemon render snapshot"));
+
+        assert!(!outcome.changed);
+        assert!(outcome.repaint);
+        assert_eq!(session.updated_at_unix_ms, Some(99));
+        assert!(session.output.contains("stale"));
+        assert!(render_snapshot.terminal.output.contains("codex> refreshed"));
     }
 
     #[test]

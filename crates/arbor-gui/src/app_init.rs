@@ -219,7 +219,9 @@ impl ArborWindow {
                     issue_details_scroll_handle: ScrollHandle::new(),
                     issue_details_scrollbar_drag_offset: None,
                     last_terminal_grid_size: None,
+                    terminal_font_metrics: None,
                     center_tabs_scroll_handle: ScrollHandle::new(),
+                    center_tabs_last_scrolled_index: None,
                     diff_scroll_handle: UniformListScrollHandle::new(),
                     terminal_selection: None,
                     terminal_selection_drag_anchor: None,
@@ -284,6 +286,7 @@ impl ArborWindow {
                     pending_issue_cache_save: None,
                     issue_cache_save_in_flight: None,
                     daemon_session_store_save: PendingSave::default(),
+                    daemon_session_store_dirty: false,
                     last_ui_state_error: None,
                     last_issue_cache_error: None,
                     notification_service,
@@ -293,6 +296,7 @@ impl ArborWindow {
                     auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
                     agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
                     window_is_active: true,
+                    last_window_geometry: None,
                     notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
                     theme_toast: None,
                     theme_toast_generation: 0,
@@ -344,6 +348,7 @@ impl ArborWindow {
                     _ui_state_save_task: None,
                     _issue_cache_save_task: None,
                     _daemon_session_store_save_task: None,
+                    _daemon_session_store_debounce_task: None,
                     _create_modal_preview_task: None,
                     _file_tree_refresh_task: None,
                     worktree_refresh_epoch: 0,
@@ -411,6 +416,7 @@ impl ArborWindow {
         }
         let daemon_base_url =
             daemon_base_url_from_config(loaded_config.config.daemon_url.as_deref());
+        let daemon_auth_tokens = connection_history::load_tokens();
         tracing::info!(url = %daemon_base_url, "connecting to terminal daemon");
         let mut terminal_daemon =
             match terminal_daemon_http::default_terminal_daemon_client(&daemon_base_url) {
@@ -421,6 +427,11 @@ impl ArborWindow {
                     None
                 },
             };
+        if let Some(token) = daemon_auth_tokens.get(&daemon_base_url)
+            && let Some(daemon) = terminal_daemon.as_ref()
+        {
+            daemon.set_auth_token(Some(token.clone()));
+        }
         let (initial_daemon_records, attach_daemon_runtime) =
             if let Some(daemon) = terminal_daemon.as_ref() {
                 match daemon.list_sessions() {
@@ -669,7 +680,9 @@ impl ArborWindow {
             issue_details_scroll_handle: ScrollHandle::new(),
             issue_details_scrollbar_drag_offset: None,
             last_terminal_grid_size: None,
+            terminal_font_metrics: None,
             center_tabs_scroll_handle: ScrollHandle::new(),
+            center_tabs_last_scrolled_index: None,
             diff_scroll_handle: UniformListScrollHandle::new(),
             terminal_selection: None,
             terminal_selection_drag_anchor: None,
@@ -713,7 +726,7 @@ impl ArborWindow {
             connection_history: connection_history::load_history(),
             connection_history_save: PendingSave::default(),
             repository_entries_save: PendingSave::default(),
-            daemon_auth_tokens: connection_history::load_tokens(),
+            daemon_auth_tokens,
             daemon_auth_tokens_save: PendingSave::default(),
             github_auth_state_save: PendingSave::default(),
             pending_app_config_save_count: 0,
@@ -754,6 +767,7 @@ impl ArborWindow {
             _ui_state_save_task: None,
             _issue_cache_save_task: None,
             _daemon_session_store_save_task: None,
+            _daemon_session_store_debounce_task: None,
             _create_modal_preview_task: None,
             _file_tree_refresh_task: None,
             worktree_refresh_epoch: 0,
@@ -775,6 +789,7 @@ impl ArborWindow {
             pending_issue_cache_save: None,
             issue_cache_save_in_flight: None,
             daemon_session_store_save: PendingSave::default(),
+            daemon_session_store_dirty: false,
             last_ui_state_error: None,
             last_issue_cache_error: None,
             notification_service,
@@ -784,6 +799,7 @@ impl ArborWindow {
             auto_checkpoint_in_flight: Arc::new(Mutex::new(HashSet::new())),
             agent_activity_epochs: Arc::new(Mutex::new(HashMap::new())),
             window_is_active: true,
+            last_window_geometry: None,
             notice: (!notice_parts.is_empty()).then_some(notice_parts.join(" | ")),
             theme_toast: None,
             theme_toast_generation: 0,

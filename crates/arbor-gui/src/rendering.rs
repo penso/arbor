@@ -118,11 +118,13 @@ impl EntityInputHandler for ArborWindow {
         let Some(session_id) = self.active_terminal_id_for_selected_worktree() else {
             return;
         };
-        self.append_pasted_text_to_pending_command(session_id, text);
+        self.append_text_to_pending_input_buffers(session_id, text);
         if let Err(error) = self.write_input_to_terminal(session_id, text.as_bytes()) {
             self.notice = Some(format!("failed to write to terminal: {error}"));
+            cx.notify();
+            return;
         }
-        cx.notify();
+        self.notify_after_terminal_input(session_id, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -172,11 +174,35 @@ impl Render for ArborWindow {
             window.focus(&self.terminal_focus);
             self.focus_terminal_on_next_render = false;
         }
-        let workspace_width = f32::from(window.window_bounds().get_bounds().size.width);
-        self.clamp_pane_widths_for_workspace(workspace_width);
-        self.sync_ui_state_store(window, cx);
+        let bounds = window.window_bounds().get_bounds();
+        let current_window_geometry = ui_state_store::WindowGeometry {
+            x: f32::from(bounds.origin.x).round() as i32,
+            y: f32::from(bounds.origin.y).round() as i32,
+            width: f32::from(bounds.size.width).round().max(1.) as u32,
+            height: f32::from(bounds.size.height).round().max(1.) as u32,
+        };
+        if self.last_window_geometry != Some(current_window_geometry) {
+            let workspace_width = current_window_geometry.width as f32;
+            self.clamp_pane_widths_for_workspace(workspace_width);
+            self.sync_ui_state_store(window, cx);
+            self.last_window_geometry = Some(current_window_geometry);
+        }
 
         let theme = self.theme();
+        let left_pane_width = if self.left_pane_visible {
+            self.left_pane_width
+        } else {
+            40.
+        };
+        let left_handle_width = if self.left_pane_visible {
+            PANE_RESIZE_HANDLE_WIDTH
+        } else {
+            0.
+        };
+        let right_handle_width = PANE_RESIZE_HANDLE_WIDTH;
+        let right_pane_width = self.right_pane_width;
+        let center_left = left_pane_width + left_handle_width;
+        let center_right = right_pane_width + right_handle_width;
         div()
             .size_full()
             .bg(rgb(theme.app_bg))
@@ -216,28 +242,67 @@ impl Render for ArborWindow {
             .when(!self.repositories.is_empty(), |this| {
                 this.child(
                     div()
+                        .relative()
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
                         .overflow_hidden()
-                        .flex()
-                        .flex_row()
                         .on_drag_move(cx.listener(Self::handle_pane_divider_drag_move))
-                        .child(self.render_left_pane(cx))
                         .when(self.left_pane_visible, |this| {
-                            this.child(self.render_pane_resize_handle(
-                                "left-pane-resize",
-                                DraggedPaneDivider::Left,
-                                theme,
-                            ))
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(px(left_pane_width))
+                                    .child(self.render_pane_resize_handle(
+                                        "left-pane-resize",
+                                        DraggedPaneDivider::Left,
+                                        theme,
+                                    )),
+                            )
                         })
-                        .child(self.render_center_pane(window, cx))
-                        .child(self.render_pane_resize_handle(
-                            "right-pane-resize",
-                            DraggedPaneDivider::Right,
-                            theme,
-                        ))
-                        .child(self.render_right_pane(cx)),
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .w(px(left_pane_width))
+                                .child(self.render_left_pane(cx)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(center_left))
+                                .right(px(center_right))
+                                .child(
+                                    div().size_full().child(self.render_center_pane(window, cx)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right(px(right_pane_width))
+                                .child(self.render_pane_resize_handle(
+                                    "right-pane-resize",
+                                    DraggedPaneDivider::Right,
+                                    theme,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right_0()
+                                .w(px(right_pane_width))
+                                .child(self.render_right_pane(cx)),
+                        ),
                 )
             })
             .child(self.render_status_bar())

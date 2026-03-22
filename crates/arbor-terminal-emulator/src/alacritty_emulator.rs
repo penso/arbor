@@ -2,16 +2,22 @@ use {
     crate::{
         TerminalModes, TerminalProcessReport, TerminalSnapshot,
         alacritty_support::{
-            self, collect_styled_lines, new_state, snapshot_cursor, snapshot_modes, snapshot_output,
+            self, collect_styled_lines, collect_styled_lines_tail, new_state, snapshot_cursor,
+            snapshot_cursor_tail, snapshot_modes, snapshot_output, snapshot_output_tail,
         },
     },
     std::cell::RefCell,
 };
 
 #[derive(Clone)]
-struct CachedSnapshot {
+struct CachedOutputSnapshot {
     generation: u64,
     output: String,
+}
+
+#[derive(Clone)]
+struct CachedStyledSnapshot {
+    generation: u64,
     styled_lines: Vec<crate::TerminalStyledLine>,
     cursor: Option<crate::TerminalCursor>,
     modes: TerminalModes,
@@ -20,7 +26,8 @@ struct CachedSnapshot {
 pub struct TerminalEmulator {
     state: alacritty_support::AlacrittyState,
     generation: u64,
-    snapshot_cache: RefCell<Option<CachedSnapshot>>,
+    output_snapshot_cache: RefCell<Option<CachedOutputSnapshot>>,
+    styled_snapshot_cache: RefCell<Option<CachedStyledSnapshot>>,
 }
 
 impl TerminalEmulator {
@@ -32,7 +39,8 @@ impl TerminalEmulator {
         Self {
             state: new_state(rows, cols),
             generation: 0,
-            snapshot_cache: RefCell::new(None),
+            output_snapshot_cache: RefCell::new(None),
+            styled_snapshot_cache: RefCell::new(None),
         }
     }
 
@@ -44,7 +52,8 @@ impl TerminalEmulator {
         self.state.processor.advance(&mut self.state.term, bytes);
         let report = self.state.event_listener.take_process_report();
         self.generation = self.generation.saturating_add(1);
-        self.snapshot_cache.get_mut().take();
+        self.output_snapshot_cache.get_mut().take();
+        self.styled_snapshot_cache.get_mut().take();
         report
     }
 
@@ -55,27 +64,28 @@ impl TerminalEmulator {
         };
         self.state.term.resize(dimensions);
         self.generation = self.generation.saturating_add(1);
-        self.snapshot_cache.get_mut().take();
+        self.output_snapshot_cache.get_mut().take();
+        self.styled_snapshot_cache.get_mut().take();
     }
 
     pub fn snapshot_output(&self) -> String {
-        self.snapshot_state().output
+        self.output_snapshot().output
     }
 
     pub fn snapshot_cursor(&self) -> Option<crate::TerminalCursor> {
-        self.snapshot_state().cursor
+        self.styled_snapshot().cursor
     }
 
     pub fn snapshot_modes(&self) -> TerminalModes {
-        self.snapshot_state().modes
+        self.styled_snapshot().modes
     }
 
     pub fn collect_styled_lines(&self) -> Vec<crate::TerminalStyledLine> {
-        self.snapshot_state().styled_lines
+        self.styled_snapshot().styled_lines
     }
 
     pub fn render_ansi_snapshot(&self, max_lines: usize) -> String {
-        let snapshot = self.snapshot_state();
+        let snapshot = self.styled_snapshot();
         alacritty_support::render_ansi_from_styled_lines(
             &snapshot.styled_lines,
             snapshot.cursor,
@@ -84,34 +94,65 @@ impl TerminalEmulator {
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
-        let snapshot = self.snapshot_state();
+        let output_snapshot = self.output_snapshot();
+        let styled_snapshot = self.styled_snapshot();
         TerminalSnapshot {
-            output: snapshot.output,
-            styled_lines: snapshot.styled_lines,
-            cursor: snapshot.cursor,
-            modes: snapshot.modes,
+            output: output_snapshot.output,
+            styled_lines: styled_snapshot.styled_lines,
+            cursor: styled_snapshot.cursor,
+            modes: styled_snapshot.modes,
             exit_code: None,
         }
     }
 
-    fn snapshot_state(&self) -> CachedSnapshot {
-        if let Some(snapshot) = self.cached_snapshot() {
+    pub fn snapshot_tail(&self, max_lines: usize) -> TerminalSnapshot {
+        TerminalSnapshot {
+            output: snapshot_output_tail(&self.state.term, max_lines),
+            styled_lines: collect_styled_lines_tail(&self.state.term, max_lines),
+            cursor: snapshot_cursor_tail(&self.state.term, max_lines),
+            modes: snapshot_modes(&self.state.term),
+            exit_code: None,
+        }
+    }
+
+    fn output_snapshot(&self) -> CachedOutputSnapshot {
+        if let Some(snapshot) = self.cached_output_snapshot() {
             return snapshot;
         }
 
-        let snapshot = CachedSnapshot {
+        let snapshot = CachedOutputSnapshot {
             generation: self.generation,
             output: snapshot_output(&self.state.term),
+        };
+        *self.output_snapshot_cache.borrow_mut() = Some(snapshot.clone());
+        snapshot
+    }
+
+    fn styled_snapshot(&self) -> CachedStyledSnapshot {
+        if let Some(snapshot) = self.cached_styled_snapshot() {
+            return snapshot;
+        }
+
+        let snapshot = CachedStyledSnapshot {
+            generation: self.generation,
             styled_lines: collect_styled_lines(&self.state.term),
             cursor: snapshot_cursor(&self.state.term),
             modes: snapshot_modes(&self.state.term),
         };
-        *self.snapshot_cache.borrow_mut() = Some(snapshot.clone());
+        *self.styled_snapshot_cache.borrow_mut() = Some(snapshot.clone());
         snapshot
     }
 
-    fn cached_snapshot(&self) -> Option<CachedSnapshot> {
-        self.snapshot_cache
+    fn cached_output_snapshot(&self) -> Option<CachedOutputSnapshot> {
+        self.output_snapshot_cache
+            .borrow()
+            .as_ref()
+            .filter(|snapshot| snapshot.generation == self.generation)
+            .cloned()
+    }
+
+    fn cached_styled_snapshot(&self) -> Option<CachedStyledSnapshot> {
+        self.styled_snapshot_cache
             .borrow()
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.generation)

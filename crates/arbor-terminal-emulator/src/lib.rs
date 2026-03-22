@@ -287,6 +287,14 @@ impl TerminalEmulator {
             TerminalEmulatorInner::Ghostty(emulator) => emulator.snapshot(),
         }
     }
+
+    pub fn snapshot_tail(&self, max_lines: usize) -> TerminalSnapshot {
+        match &self.inner {
+            TerminalEmulatorInner::Alacritty(emulator) => emulator.snapshot_tail(max_lines),
+            #[cfg(feature = "ghostty-vt-experimental")]
+            TerminalEmulatorInner::Ghostty(emulator) => emulator.snapshot_tail(max_lines),
+        }
+    }
 }
 
 impl Default for TerminalEmulator {

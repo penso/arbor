@@ -78,7 +78,7 @@ pub(crate) fn default_titlebar_options(title: Option<SharedString>) -> TitlebarO
     }
 }
 
-pub(crate) const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const WORKTREE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 pub(crate) const GITHUB_PR_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const GITHUB_PR_REFRESH_CONCURRENCY: usize = 4;
 pub(crate) const GITHUB_PR_REFRESH_WORKER_STAGGER: Duration = Duration::from_millis(75);
@@ -90,15 +90,23 @@ pub(crate) const GITHUB_OAUTH_ACCESS_TOKEN_URL: &str =
 pub(crate) const GITHUB_OAUTH_SCOPE: &str = "repo read:user";
 pub(crate) const BUILT_IN_GITHUB_OAUTH_CLIENT_ID: Option<&str> = Some("Ov23liVexfjFZQXcuQib");
 pub(crate) const GITHUB_AUTH_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1200);
-pub(crate) const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
+pub(crate) const CONFIG_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const TERMINAL_TAB_COMMAND_MAX_CHARS: usize = 14;
 pub(crate) const ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const INACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL: Duration =
+    Duration::from_millis(1000);
+pub(crate) const ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const INTERACTIVE_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(33);
+pub(crate) const INTERACTIVE_TERMINAL_SYNC_WINDOW: Duration = Duration::from_secs(2);
+pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_WINDOW: Duration = Duration::from_millis(500);
+pub(crate) const INTERACTIVE_DAEMON_INLINE_SNAPSHOT_MAX_BYTES: usize = 512;
 pub(crate) const ACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(90);
 pub(crate) const INACTIVE_SSH_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const IDLE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
+pub(crate) const ACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const INACTIVE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_secs(15);
+pub(crate) const IDLE_DAEMON_TERMINAL_SYNC_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const RUNNING_DAEMON_SESSION_STORE_SYNC_DEBOUNCE_INTERVAL: Duration =
+    Duration::from_secs(2);
 pub(crate) const DAEMON_TERMINAL_WS_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(150);
 pub(crate) const DAEMON_TERMINAL_WS_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(2);
 pub(crate) const DEFAULT_DAEMON_BASE_URL: &str = "http://127.0.0.1:8787";
@@ -129,7 +137,9 @@ pub(crate) const GIT_ACTION_ICON_PR: &str = "\u{f126}";
 pub(crate) const COMMAND_PALETTE_MAX_HEIGHT_PX: f32 = 360.;
 pub(crate) const COMMAND_PALETTE_ROW_ESTIMATE_PX: f32 = 52.;
 pub(crate) const COMMAND_PALETTE_SCROLLBAR_TRACK_HEIGHT_PX: f32 = 336.;
-pub(crate) const LOG_POLLER_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const LOG_POLLER_VISIBLE_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const LOG_POLLER_IDLE_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const TERMINAL_PORT_HINT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const MEMORY_POLLER_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const THEME_TOAST_DURATION: Duration = Duration::from_millis(1600);
 pub(crate) const WORKTREE_HOVER_POPOVER_HIDE_DELAY: Duration = Duration::from_millis(300);

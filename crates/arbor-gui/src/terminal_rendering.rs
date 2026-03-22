@@ -3,6 +3,40 @@ use super::*;
 const TERMINAL_RENDER_OVERSCAN_LINES: usize = 12;
 const TERMINAL_INITIAL_RENDER_LINES: usize = 240;
 
+pub(crate) struct TerminalRenderSource<'a> {
+    pub(crate) session_id: u64,
+    pub(crate) state: TerminalState,
+    pub(crate) output: &'a str,
+    pub(crate) styled_output: &'a [TerminalStyledLine],
+    pub(crate) cursor: Option<TerminalCursor>,
+}
+
+pub(crate) fn terminal_render_source_for_session(
+    session: &TerminalSession,
+) -> TerminalRenderSource<'_> {
+    TerminalRenderSource {
+        session_id: session.id,
+        state: session.state,
+        output: &session.output,
+        styled_output: &session.styled_output,
+        cursor: session.cursor,
+    }
+}
+
+pub(crate) fn terminal_render_source_for_snapshot<'a>(
+    session_id: u64,
+    state: TerminalState,
+    snapshot: &'a arbor_terminal_emulator::TerminalSnapshot,
+) -> TerminalRenderSource<'a> {
+    TerminalRenderSource {
+        session_id,
+        state,
+        output: &snapshot.output,
+        styled_output: &snapshot.styled_lines,
+        cursor: snapshot.cursor,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn styled_lines_for_session(
     session: &TerminalSession,
@@ -11,9 +45,10 @@ pub(crate) fn styled_lines_for_session(
     selection: Option<&TerminalSelection>,
     ime_marked_text: Option<&str>,
 ) -> Vec<TerminalStyledLine> {
-    let line_count = terminal_render_line_count(session, selection);
-    styled_lines_for_session_range(
-        session,
+    let source = terminal_render_source_for_session(session);
+    let line_count = terminal_render_line_count_for_source(&source, selection);
+    styled_lines_for_render_source_range(
+        &source,
         theme,
         show_cursor,
         selection,
@@ -30,17 +65,36 @@ pub(crate) fn styled_lines_for_session_range(
     ime_marked_text: Option<&str>,
     range: std::ops::Range<usize>,
 ) -> Vec<TerminalStyledLine> {
+    let source = terminal_render_source_for_session(session);
+    styled_lines_for_render_source_range(
+        &source,
+        theme,
+        show_cursor,
+        selection,
+        ime_marked_text,
+        range,
+    )
+}
+
+pub(crate) fn styled_lines_for_render_source_range(
+    source: &TerminalRenderSource<'_>,
+    theme: ThemePalette,
+    show_cursor: bool,
+    selection: Option<&TerminalSelection>,
+    ime_marked_text: Option<&str>,
+    range: std::ops::Range<usize>,
+) -> Vec<TerminalStyledLine> {
     if range.is_empty() {
         return Vec::new();
     }
 
-    let mut lines = if !session.styled_output.is_empty() {
-        let start = range.start.min(session.styled_output.len());
-        let end = range.end.min(session.styled_output.len());
-        session.styled_output[start..end].to_vec()
+    let mut lines = if !source.styled_output.is_empty() {
+        let start = range.start.min(source.styled_output.len());
+        let end = range.end.min(source.styled_output.len());
+        source.styled_output[start..end].to_vec()
     } else {
         plain_lines_to_styled(
-            lines_for_display(&session.output)
+            lines_for_display(source.output, false)
                 .into_iter()
                 .skip(range.start)
                 .take(range.len())
@@ -52,8 +106,8 @@ pub(crate) fn styled_lines_for_session_range(
     remap_terminal_line_palette(&mut lines, theme);
 
     if show_cursor
-        && session.state == TerminalState::Running
-        && let Some(cursor) = session.cursor
+        && source.state == TerminalState::Running
+        && let Some(cursor) = source.cursor
         && range.contains(&cursor.line)
     {
         let cursor = TerminalCursor {
@@ -67,7 +121,7 @@ pub(crate) fn styled_lines_for_session_range(
         }
     }
 
-    if let Some(selection) = selection.filter(|selection| selection.session_id == session.id)
+    if let Some(selection) = selection.filter(|selection| selection.session_id == source.session_id)
         && let Some(selection) = terminal_selection_for_render_range(selection, &range)
     {
         apply_selection_to_lines(&mut lines, &selection, theme);
@@ -80,13 +134,20 @@ pub(crate) fn terminal_render_line_count(
     session: &TerminalSession,
     selection: Option<&TerminalSelection>,
 ) -> usize {
-    let base_count = if !session.styled_output.is_empty() {
-        session.styled_output.len()
+    terminal_render_line_count_for_source(&terminal_render_source_for_session(session), selection)
+}
+
+pub(crate) fn terminal_render_line_count_for_source(
+    source: &TerminalRenderSource<'_>,
+    selection: Option<&TerminalSelection>,
+) -> usize {
+    let base_count = if !source.styled_output.is_empty() {
+        source.styled_output.len()
     } else {
-        lines_for_display(&session.output).len()
+        lines_for_display(source.output, false).len()
     };
 
-    let cursor_count = session
+    let cursor_count = source
         .cursor
         .map_or(0, |cursor| cursor.line.saturating_add(1));
     let selection_count = selection
@@ -129,10 +190,6 @@ pub(crate) fn terminal_visible_line_range(
     start..end
 }
 
-pub(crate) fn terminal_spacer_height_px(line_count: usize, line_height: f32) -> Pixels {
-    px((line_count as f32 * line_height).max(0.))
-}
-
 fn remap_terminal_line_palette(lines: &mut [TerminalStyledLine], theme: ThemePalette) {
     for line in lines {
         remap_terminal_styled_line_palette(line, theme);
@@ -146,20 +203,21 @@ fn remap_terminal_styled_line_palette(line: &mut TerminalStyledLine, theme: Them
         line.runs = runs_from_cells(&line.cells);
     }
 
-    let mut changed = false;
     for cell in &mut line.cells {
-        if cell.bg == EMBEDDED_TERMINAL_DEFAULT_BG {
-            cell.bg = theme.terminal_bg;
-            changed = true;
-        }
-        if cell.fg == EMBEDDED_TERMINAL_DEFAULT_FG {
-            cell.fg = theme.text_primary;
-            changed = true;
-        }
+        remap_terminal_colors(&mut cell.fg, &mut cell.bg, theme);
     }
 
-    if changed {
-        line.runs = runs_from_cells(&line.cells);
+    for run in &mut line.runs {
+        remap_terminal_colors(&mut run.fg, &mut run.bg, theme);
+    }
+}
+
+fn remap_terminal_colors(fg: &mut u32, bg: &mut u32, theme: ThemePalette) {
+    if *bg == EMBEDDED_TERMINAL_DEFAULT_BG {
+        *bg = theme.terminal_bg;
+    }
+    if *fg == EMBEDDED_TERMINAL_DEFAULT_FG {
+        *fg = theme.text_primary;
     }
 }
 
@@ -450,6 +508,19 @@ pub(crate) struct PositionedTerminalRun {
     pub(crate) force_cell_width: bool,
 }
 
+#[derive(Clone)]
+struct ShapedTerminalRun {
+    shaped_line: gpui::ShapedLine,
+    bg: u32,
+    start_column: usize,
+    cell_count: usize,
+    force_cell_width: bool,
+}
+
+struct ShapedTerminalLine {
+    runs: Vec<ShapedTerminalRun>,
+}
+
 pub(crate) fn positioned_runs_from_cells(
     cells: &[TerminalStyledCell],
 ) -> Vec<PositionedTerminalRun> {
@@ -558,109 +629,119 @@ pub(crate) fn plain_lines_to_styled(
         .collect()
 }
 
-pub(crate) fn render_terminal_line(
-    line: TerminalStyledLine,
+pub(crate) fn render_terminal_lines(
+    lines: Vec<TerminalStyledLine>,
     theme: ThemePalette,
     cell_width: f32,
     line_height: f32,
     mono_font: gpui::Font,
+    total_line_count: usize,
+    first_visible_line: usize,
 ) -> Div {
-    let cells = if line.cells.is_empty() {
-        cells_from_runs(&line.runs)
-    } else {
-        line.cells
-    };
-
-    if cells.is_empty() {
-        return div()
-            .flex_none()
-            .w_full()
-            .min_w_0()
-            .h(px(line_height))
-            .overflow_x_hidden()
-            .whitespace_nowrap()
-            .font(mono_font)
-            .text_size(px(TERMINAL_FONT_SIZE_PX))
-            .line_height(px(line_height))
-            .bg(rgb(theme.terminal_bg))
-            .text_color(rgb(theme.text_primary))
-            .child(" ");
-    }
-
     let line_height = px(line_height);
+    let line_height_px = line_height.to_f64() as f32;
     let font_size = px(TERMINAL_FONT_SIZE_PX);
-    let positioned_runs = positioned_runs_from_cells(&cells);
+    let total_line_count = total_line_count.max(1);
 
     div()
         .flex_none()
         .w_full()
         .min_w_0()
-        .h(line_height)
+        .h(px(total_line_count as f32 * line_height_px))
         .overflow_hidden()
         .bg(rgb(theme.terminal_bg))
         .child(
             canvas(
-                |_, _, _| {},
-                move |bounds, _, window, cx| {
+                move |_, window, _| {
+                    lines
+                        .into_iter()
+                        .map(|line| {
+                            let cells = if line.cells.is_empty() {
+                                cells_from_runs(&line.runs)
+                            } else {
+                                line.cells
+                            };
+                            let runs = positioned_runs_from_cells(&cells)
+                                .into_iter()
+                                .filter(|run| !run.text.is_empty())
+                                .map(|run| {
+                                    let is_powerline = should_force_powerline(&run);
+                                    let force_cell_width = run.force_cell_width || is_powerline;
+                                    let force_width = if force_cell_width {
+                                        Some(px(cell_width))
+                                    } else {
+                                        None
+                                    };
+                                    let shaped_line = window.text_system().shape_line(
+                                        run.text.clone().into(),
+                                        font_size,
+                                        &[TextRun {
+                                            len: run.text.len(),
+                                            font: mono_font.clone(),
+                                            color: rgb(run.fg).into(),
+                                            background_color: None,
+                                            underline: None,
+                                            strikethrough: None,
+                                        }],
+                                        force_width,
+                                    );
+
+                                    ShapedTerminalRun {
+                                        shaped_line,
+                                        bg: run.bg,
+                                        start_column: run.start_column,
+                                        cell_count: run.cell_count,
+                                        force_cell_width,
+                                    }
+                                })
+                                .collect();
+
+                            ShapedTerminalLine { runs }
+                        })
+                        .collect::<Vec<_>>()
+                },
+                move |bounds, shaped_lines, window, cx| {
                     let scale_factor = window.scale_factor();
-                    for run in &positioned_runs {
-                        if run.text.is_empty() {
-                            continue;
-                        }
+                    for (line_index, line) in shaped_lines.iter().enumerate() {
+                        let line_y = bounds.origin.y
+                            + px((first_visible_line + line_index) as f32 * line_height_px);
+                        for run in &line.runs {
+                            if run.cell_count > 0 {
+                                let start_x = snap_pixels_floor(
+                                    bounds.origin.x + px(run.start_column as f32 * cell_width),
+                                    scale_factor,
+                                );
+                                let end_x = snap_pixels_ceil(
+                                    bounds.origin.x
+                                        + px(
+                                            (run.start_column + run.cell_count) as f32 * cell_width
+                                        ),
+                                    scale_factor,
+                                );
+                                let background_origin = point(start_x, line_y);
+                                let background_size =
+                                    size((end_x - start_x).max(px(0.)), line_height);
+                                window.paint_quad(fill(
+                                    Bounds::new(background_origin, background_size),
+                                    rgb(run.bg),
+                                ));
+                            }
 
-                        if run.cell_count > 0 {
-                            let start_x = snap_pixels_floor(
-                                bounds.origin.x + px(run.start_column as f32 * cell_width),
-                                scale_factor,
+                            let run_origin =
+                                bounds.origin.x + px(run.start_column as f32 * cell_width);
+                            let run_x = if run.force_cell_width {
+                                run_origin
+                            } else {
+                                run_origin.floor()
+                            };
+
+                            let _ = run.shaped_line.paint(
+                                point(run_x, line_y),
+                                line_height,
+                                window,
+                                cx,
                             );
-                            let end_x = snap_pixels_ceil(
-                                bounds.origin.x
-                                    + px((run.start_column + run.cell_count) as f32 * cell_width),
-                                scale_factor,
-                            );
-                            let background_origin = point(start_x, bounds.origin.y);
-                            let background_size = size((end_x - start_x).max(px(0.)), line_height);
-                            window.paint_quad(fill(
-                                Bounds::new(background_origin, background_size),
-                                rgb(run.bg),
-                            ));
                         }
-
-                        let is_powerline = should_force_powerline(run);
-                        let force_cell_width = run.force_cell_width || is_powerline;
-                        let force_width = if force_cell_width {
-                            Some(px(cell_width))
-                        } else {
-                            None
-                        };
-
-                        let shaped_line = window.text_system().shape_line(
-                            run.text.clone().into(),
-                            font_size,
-                            &[TextRun {
-                                len: run.text.len(),
-                                font: mono_font.clone(),
-                                color: rgb(run.fg).into(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            force_width,
-                        );
-
-                        let run_origin = bounds.origin.x + px(run.start_column as f32 * cell_width);
-                        let run_x = if is_powerline || force_cell_width {
-                            run_origin
-                        } else {
-                            run_origin.floor()
-                        };
-
-                        let _ = shaped_line.paint(
-                            point(run_x, bounds.origin.y),
-                            line_height,
-                            window,
-                            cx,
-                        );
                     }
                 },
             )
@@ -695,41 +776,91 @@ pub(crate) fn snap_pixels_ceil(value: Pixels, scale_factor: f32) -> Pixels {
     px(scaled.ceil() / scale_factor)
 }
 
-pub(crate) fn lines_for_display(text: &str) -> Vec<String> {
-    if text.is_empty() {
+pub(crate) fn lines_for_display(text: &str, placeholder_when_empty: bool) -> Vec<String> {
+    if text.is_empty() && placeholder_when_empty {
         return vec!["<no output yet>".to_owned()];
+    }
+
+    if text.is_empty() {
+        return vec![String::new()];
     }
 
     text.lines().map(ToOwned::to_owned).collect()
 }
 
 pub(crate) fn terminal_display_lines(session: &TerminalSession) -> Vec<String> {
-    if !session.styled_output.is_empty() {
-        return session
+    terminal_display_lines_for_source(&terminal_render_source_for_session(session))
+}
+
+pub(crate) fn terminal_display_lines_for_source(source: &TerminalRenderSource<'_>) -> Vec<String> {
+    if !source.styled_output.is_empty() {
+        return source
             .styled_output
             .iter()
             .map(styled_line_to_string)
             .collect();
     }
 
-    if session.output.is_empty() {
+    lines_for_display(source.output, false)
+}
+
+pub(crate) fn terminal_display_tail_lines(
+    session: &TerminalSession,
+    max_lines: usize,
+) -> Vec<String> {
+    terminal_display_tail_lines_for_source(&terminal_render_source_for_session(session), max_lines)
+}
+
+pub(crate) fn terminal_display_tail_lines_for_source(
+    source: &TerminalRenderSource<'_>,
+    max_lines: usize,
+) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    if !source.styled_output.is_empty() {
+        let start = source.styled_output.len().saturating_sub(max_lines);
+        return source.styled_output[start..]
+            .iter()
+            .map(styled_line_to_string)
+            .collect();
+    }
+
+    if source.output.is_empty() {
         return vec![String::new()];
     }
 
-    session.output.lines().map(ToOwned::to_owned).collect()
+    let mut lines: Vec<String> = source
+        .output
+        .lines()
+        .rev()
+        .take(max_lines)
+        .map(ToOwned::to_owned)
+        .collect();
+    lines.reverse();
+    lines
 }
 
 pub(crate) fn styled_line_to_string(line: &TerminalStyledLine) -> String {
-    let mut cells = if line.cells.is_empty() {
-        cells_from_runs(&line.runs)
-    } else {
-        line.cells.clone()
-    };
-    if cells.is_empty() {
-        return String::new();
+    if line.cells.is_empty() {
+        return styled_cells_to_string(cells_from_runs(&line.runs).iter());
     }
 
+    if line
+        .cells
+        .windows(2)
+        .all(|window| window[0].column <= window[1].column)
+    {
+        return styled_cells_to_string(line.cells.iter());
+    }
+
+    let mut cells = line.cells.clone();
     cells.sort_by_key(|cell| cell.column);
+    styled_cells_to_string(cells.iter())
+}
+
+fn styled_cells_to_string<'a>(cells: impl IntoIterator<Item = &'a TerminalStyledCell>) -> String {
     let mut output = String::new();
     let mut current_column = 0_usize;
 
@@ -863,21 +994,6 @@ pub(crate) fn terminal_selection_text(lines: &[String], selection: &TerminalSele
     output
 }
 
-pub(crate) fn trim_to_last_lines(text: String, max_lines: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= max_lines {
-        return text;
-    }
-
-    let mut trimmed = String::new();
-    let start = lines.len().saturating_sub(max_lines);
-    for line in lines.iter().skip(start) {
-        trimmed.push_str(line);
-        trimmed.push('\n');
-    }
-    trimmed
-}
-
 pub(crate) fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bool {
     let max_offset = scroll_handle.max_offset();
     if max_offset.height <= px(0.) {
@@ -889,15 +1005,14 @@ pub(crate) fn terminal_scroll_is_near_bottom(scroll_handle: &ScrollHandle) -> bo
     distance_from_bottom <= px(6.)
 }
 
-pub(crate) fn terminal_grid_size_from_scroll_handle(
+pub(crate) fn terminal_grid_size_from_scroll_handle_with_metrics(
     scroll_handle: &ScrollHandle,
-    cx: &App,
+    cell_width: f32,
+    line_height: f32,
 ) -> Option<(u16, u16, u16, u16)> {
     let bounds = scroll_handle.bounds();
     let width = (bounds.size.width.to_f64() as f32 - TERMINAL_SCROLLBAR_WIDTH_PX).max(1.);
     let height = bounds.size.height.to_f64() as f32;
-    let cell_width = terminal_cell_width_px(cx);
-    let line_height = terminal_line_height_px(cx);
     let (rows, cols) = terminal_grid_size_for_viewport(width, height, cell_width, line_height)?;
     let pixel_width = width.floor().clamp(1., f32::from(u16::MAX)) as u16;
     let pixel_height = height.floor().clamp(1., f32::from(u16::MAX)) as u16;
@@ -973,8 +1088,11 @@ pub(crate) fn terminal_grid_size_for_viewport(
     Some((rows, cols))
 }
 
-pub(crate) fn should_auto_follow_terminal_output(changed: bool, was_near_bottom: bool) -> bool {
-    changed && was_near_bottom
+pub(crate) fn should_auto_follow_terminal_output(
+    terminal_updated: bool,
+    was_near_bottom: bool,
+) -> bool {
+    terminal_updated && was_near_bottom
 }
 
 #[cfg(test)]

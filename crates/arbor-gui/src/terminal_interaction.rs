@@ -9,6 +9,57 @@ pub(crate) fn terminal_input_unavailable_error(session: &TerminalSession) -> Ter
 }
 
 impl ArborWindow {
+    pub(crate) fn notify_after_terminal_input(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let follow_bottom = self.active_terminal_id_for_selected_worktree() == Some(session_id)
+            && terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
+        if follow_bottom {
+            let this = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.active_terminal_id_for_selected_worktree() == Some(session_id) {
+                        this.terminal_scroll_handle.scroll_to_bottom();
+                        cx.notify();
+                    }
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    fn terminal_render_snapshot_for_session(
+        &self,
+        session: &TerminalSession,
+    ) -> Option<TerminalRenderSnapshot> {
+        session
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.render_snapshot(session))
+    }
+
+    fn terminal_modes_for_session(&self, session_id: u64) -> TerminalModes {
+        self.terminals
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| {
+                self.terminal_render_snapshot_for_session(session)
+                    .map(|snapshot| snapshot.terminal.modes)
+                    .unwrap_or(session.modes)
+            })
+            .unwrap_or_default()
+    }
+
+    fn terminal_buffer_text_for_session(&self, session_id: u64) -> String {
+        self.terminals
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| {
+                self.terminal_render_snapshot_for_session(session)
+                    .map(|snapshot| snapshot.terminal.output.clone())
+                    .unwrap_or_else(|| session.output.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn active_terminal(&self) -> Option<&TerminalSession> {
         let worktree_path = self.selected_worktree_path()?;
         let session_id = self.active_terminal_id_for_worktree(worktree_path)?;
@@ -50,6 +101,11 @@ impl ArborWindow {
         }
 
         self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+        // Allow the next runtime event caused by local input to sync immediately
+        // instead of waiting behind the daemon burst coalescing window.
+        self.terminals[index].last_runtime_sync_at = None;
+        self.terminals[index].interactive_sync_until =
+            Some(Instant::now() + INTERACTIVE_TERMINAL_SYNC_WINDOW);
         Ok(())
     }
 
@@ -80,6 +136,9 @@ impl ArborWindow {
         let session = self.terminals[index].clone();
         runtime.write_input(&session, &queued_input)?;
         self.terminals[index].updated_at_unix_ms = current_unix_timestamp_millis();
+        self.terminals[index].last_runtime_sync_at = None;
+        self.terminals[index].interactive_sync_until =
+            Some(Instant::now() + INTERACTIVE_TERMINAL_SYNC_WINDOW);
         Ok(())
     }
 
@@ -106,6 +165,15 @@ impl ArborWindow {
         else {
             return vec![String::new()];
         };
+
+        let render_snapshot = self.terminal_render_snapshot_for_session(session);
+        if let Some(snapshot) = render_snapshot.as_ref() {
+            return terminal_display_lines_for_source(&terminal_render_source_for_snapshot(
+                session.id,
+                snapshot.state,
+                &snapshot.terminal,
+            ));
+        }
 
         terminal_display_lines(session)
     }
@@ -271,12 +339,12 @@ impl ArborWindow {
                 } else if !session.pending_command.trim().is_empty() {
                     session.pending_command.clone()
                 } else {
-                    session.output.clone()
+                    self.terminal_buffer_text_for_session(session_id)
                 }
             } else if !session.pending_command.trim().is_empty() {
                 session.pending_command.clone()
             } else {
-                session.output.clone()
+                self.terminal_buffer_text_for_session(session_id)
             };
         if clipboard_text.is_empty() {
             return;
@@ -285,7 +353,7 @@ impl ArborWindow {
         cx.write_to_clipboard(ClipboardItem::new_string(clipboard_text));
     }
 
-    pub(crate) fn append_pasted_text_to_pending_command(&mut self, session_id: u64, text: &str) {
+    pub(crate) fn append_text_to_pending_input_buffers(&mut self, session_id: u64, text: &str) {
         let Some(session) = self
             .terminals
             .iter_mut()
@@ -312,10 +380,13 @@ impl ArborWindow {
             return;
         }
 
-        self.append_pasted_text_to_pending_command(session_id, &text);
+        self.append_text_to_pending_input_buffers(session_id, &text);
         if let Err(error) = self.write_input_to_terminal(session_id, text.as_bytes()) {
             self.notice = Some(format!("failed to paste into terminal: {error}"));
+            cx.notify();
+            return;
         }
+        self.notify_after_terminal_input(session_id, cx);
     }
 
     pub(crate) fn handle_terminal_key_down(
@@ -409,12 +480,7 @@ impl ArborWindow {
 
         self.clear_terminal_selection_for_session(active_terminal_id);
 
-        let terminal_modes = self
-            .terminals
-            .iter()
-            .find(|session| session.id == active_terminal_id)
-            .map(|session| session.modes)
-            .unwrap_or_default();
+        let terminal_modes = self.terminal_modes_for_session(active_terminal_id);
 
         let Some(input) =
             terminal_keys::terminal_bytes_from_keystroke(&event.keystroke, terminal_modes)
@@ -426,11 +492,19 @@ impl ArborWindow {
         };
 
         self.track_terminal_command_input(active_terminal_id, &event.keystroke);
-        if let Err(error) = self.write_input_to_terminal(active_terminal_id, &input) {
-            self.notice = Some(format!("failed to write to terminal: {error}"));
-        }
+        let write_failed =
+            if let Err(error) = self.write_input_to_terminal(active_terminal_id, &input) {
+                self.notice = Some(format!("failed to write to terminal: {error}"));
+                true
+            } else {
+                false
+            };
         cx.stop_propagation();
-        cx.notify();
+        if write_failed {
+            cx.notify();
+        } else {
+            self.notify_after_terminal_input(active_terminal_id, cx);
+        }
     }
 
     pub(crate) fn focus_terminal_panel(
