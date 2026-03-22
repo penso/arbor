@@ -394,6 +394,11 @@ impl ArborWindow {
             .flex()
             .flex_col()
             .track_focus(&self.terminal_focus)
+            .key_context("Terminal")
+            .on_action(cx.listener(Self::action_send_terminal_ctrl_a))
+            .on_action(cx.listener(Self::action_send_terminal_ctrl_e))
+            .on_action(cx.listener(Self::action_send_terminal_ctrl_k))
+            .on_action(cx.listener(Self::action_send_terminal_ctrl_z))
             .on_any_mouse_down(cx.listener(Self::focus_terminal_panel))
             .on_key_down(cx.listener(Self::handle_terminal_key_down))
             .child({

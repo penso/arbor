@@ -23,7 +23,11 @@ actions!(arbor, [
     OpenSettings,
     OpenManageHosts,
     ConnectToHost,
-    RefreshReviewComments
+    RefreshReviewComments,
+    SendTerminalCtrlA,
+    SendTerminalCtrlE,
+    SendTerminalCtrlK,
+    SendTerminalCtrlZ
 ]);
 
 #[derive(Clone, PartialEq, Debug, gpui::Action)]

@@ -502,7 +502,9 @@ impl HttpTerminalDaemon {
         let path = format!(
             "{API_PATH_PREFIX}/terminals/{}/snapshot?max_lines={}",
             encode_path_segment(request.session_id.as_str()),
-            request.max_lines.clamp(1, 2_000)
+            request
+                .max_lines
+                .clamp(1, arbor_terminal_emulator::MAX_TERMINAL_SCROLLBACK_LINES)
         );
         let response = self.send_empty("GET", &path)?;
         if response.status_code == 404 {

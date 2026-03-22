@@ -54,6 +54,10 @@ pub(crate) fn install_app_menu_and_keys(cx: &mut App) {
         KeyBinding::new("cmd-]", NavigateWorktreeForward, None),
         KeyBinding::new("cmd-shift-l", ViewLogs, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("ctrl-a", SendTerminalCtrlA, Some("Terminal")),
+        KeyBinding::new("ctrl-e", SendTerminalCtrlE, Some("Terminal")),
+        KeyBinding::new("ctrl-k", SendTerminalCtrlK, Some("Terminal")),
+        KeyBinding::new("ctrl-z", SendTerminalCtrlZ, Some("Terminal")),
     ]);
     cx.set_menus(build_app_menus(&[]));
 }

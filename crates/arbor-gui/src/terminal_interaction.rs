@@ -9,6 +9,75 @@ pub(crate) fn terminal_input_unavailable_error(session: &TerminalSession) -> Ter
 }
 
 impl ArborWindow {
+    pub(crate) fn take_terminal_text_input_fallback(&mut self, text: &str) -> Option<Vec<u8>> {
+        let pending = self.pending_terminal_text_input_fallback.take()?;
+        terminal_keys::text_matches_terminal_input_fallback(text, &pending).then_some(pending)
+    }
+
+    fn send_terminal_action_input(
+        &mut self,
+        input: &[u8],
+        cx: &mut Context<Self>,
+    ) -> Result<(), TerminalError> {
+        let Some(CenterTab::Terminal(session_id)) = self.active_center_tab_for_selected_worktree()
+        else {
+            return Ok(());
+        };
+
+        self.clear_terminal_selection_for_session(session_id);
+        self.write_input_to_terminal(session_id, input)?;
+        self.notify_after_terminal_input(session_id, cx);
+        Ok(())
+    }
+
+    pub(crate) fn action_send_terminal_ctrl_a(
+        &mut self,
+        _: &SendTerminalCtrlA,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.send_terminal_action_input(b"\x01", cx) {
+            self.notice = Some(format!("failed to write to terminal: {error}"));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn action_send_terminal_ctrl_e(
+        &mut self,
+        _: &SendTerminalCtrlE,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.send_terminal_action_input(b"\x05", cx) {
+            self.notice = Some(format!("failed to write to terminal: {error}"));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn action_send_terminal_ctrl_k(
+        &mut self,
+        _: &SendTerminalCtrlK,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.send_terminal_action_input(b"\x0b", cx) {
+            self.notice = Some(format!("failed to write to terminal: {error}"));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn action_send_terminal_ctrl_z(
+        &mut self,
+        _: &SendTerminalCtrlZ,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.send_terminal_action_input(b"\x1a", cx) {
+            self.notice = Some(format!("failed to write to terminal: {error}"));
+            cx.notify();
+        }
+    }
+
     pub(crate) fn notify_after_terminal_input(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let follow_bottom = self.active_terminal_id_for_selected_worktree() == Some(session_id)
             && terminal_scroll_is_near_bottom(&self.terminal_scroll_handle);
@@ -485,12 +554,15 @@ impl ArborWindow {
         let Some(input) =
             terminal_keys::terminal_bytes_from_keystroke(&event.keystroke, terminal_modes)
         else {
+            self.pending_terminal_text_input_fallback =
+                terminal_keys::terminal_text_input_fallback_bytes(&event.keystroke);
             // No bytes for this key — let the event propagate to the IME /
             // InputHandler so composed characters arrive via
             // `replace_text_in_range`.
             return;
         };
 
+        self.pending_terminal_text_input_fallback = None;
         self.track_terminal_command_input(active_terminal_id, &event.keystroke);
         let write_failed =
             if let Err(error) = self.write_input_to_terminal(active_terminal_id, &input) {

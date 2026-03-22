@@ -2,9 +2,9 @@
 
 use {
     crate::{
-        TERMINAL_COLS, TERMINAL_ROWS, TERMINAL_SCROLLBACK, TerminalCursor, TerminalModes,
-        TerminalProcessReport, TerminalSnapshot, TerminalStyledCell, TerminalStyledLine,
-        alacritty_support,
+        TERMINAL_COLS, TERMINAL_ROWS, TerminalCursor, TerminalModes, TerminalProcessReport,
+        TerminalSnapshot, TerminalStyledCell, TerminalStyledLine, alacritty_support,
+        default_terminal_scrollback_lines,
     },
     std::{cell::RefCell, ffi::c_void, ptr},
 };
@@ -99,7 +99,9 @@ impl TerminalEmulator {
         let rows = rows.max(1);
         let cols = cols.max(2);
         let mut handle = ptr::null_mut();
-        let status = unsafe { arbor_ghostty_vt_new(rows, cols, TERMINAL_SCROLLBACK, &mut handle) };
+        let status = unsafe {
+            arbor_ghostty_vt_new(rows, cols, default_terminal_scrollback_lines(), &mut handle)
+        };
         assert_eq!(
             status, 0,
             "failed to initialize ghostty-vt experimental terminal bridge",

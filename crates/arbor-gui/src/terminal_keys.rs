@@ -88,6 +88,29 @@ pub fn terminal_bytes_from_keystroke(
     to_esc_str(keystroke, modes).map(|value| value.into_owned().into_bytes())
 }
 
+pub fn terminal_text_input_fallback_bytes(keystroke: &Keystroke) -> Option<Vec<u8>> {
+    if keystroke.modifiers.platform || keystroke.modifiers.alt || keystroke.modifiers.function {
+        return None;
+    }
+
+    let key = normalized_key(keystroke);
+    if !keystroke.modifiers.control && control_byte_for_key(key).is_none() {
+        return None;
+    }
+
+    control_byte_for_key(key).map(|byte| vec![byte])
+}
+
+pub fn text_matches_terminal_input_fallback(text: &str, input: &[u8]) -> bool {
+    if text.is_empty() || input.len() != 1 {
+        return false;
+    }
+
+    let byte = input[0];
+    text.as_bytes() == input
+        || control_caret_notation(byte).is_some_and(|candidate| candidate == text)
+}
+
 fn to_esc_str(keystroke: &Keystroke, modes: TerminalModes) -> Option<Cow<'static, str>> {
     if keystroke.modifiers.platform {
         return None;
@@ -262,6 +285,84 @@ fn normalized_key(keystroke: &Keystroke) -> &str {
     }
 }
 
+fn control_byte_for_key(key: &str) -> Option<u8> {
+    match key {
+        "a" | "A" | "^A" | "\u{1}" => Some(0x01),
+        "b" | "B" | "^B" | "\u{2}" => Some(0x02),
+        "c" | "C" | "^C" | "\u{3}" => Some(0x03),
+        "d" | "D" | "^D" | "\u{4}" => Some(0x04),
+        "e" | "E" | "^E" | "\u{5}" => Some(0x05),
+        "f" | "F" | "^F" | "\u{6}" => Some(0x06),
+        "g" | "G" | "^G" | "\u{7}" => Some(0x07),
+        "h" | "H" | "^H" | "\u{8}" => Some(0x08),
+        "i" | "I" | "^I" | "\u{9}" => Some(0x09),
+        "j" | "J" | "^J" | "\u{a}" => Some(0x0a),
+        "k" | "K" | "^K" | "\u{b}" => Some(0x0b),
+        "l" | "L" | "^L" | "\u{c}" => Some(0x0c),
+        "m" | "M" | "^M" | "\u{d}" => Some(0x0d),
+        "n" | "N" | "^N" | "\u{e}" => Some(0x0e),
+        "o" | "O" | "^O" | "\u{f}" => Some(0x0f),
+        "p" | "P" | "^P" | "\u{10}" => Some(0x10),
+        "q" | "Q" | "^Q" | "\u{11}" => Some(0x11),
+        "r" | "R" | "^R" | "\u{12}" => Some(0x12),
+        "s" | "S" | "^S" | "\u{13}" => Some(0x13),
+        "t" | "T" | "^T" | "\u{14}" => Some(0x14),
+        "u" | "U" | "^U" | "\u{15}" => Some(0x15),
+        "v" | "V" | "^V" | "\u{16}" => Some(0x16),
+        "w" | "W" | "^W" | "\u{17}" => Some(0x17),
+        "x" | "X" | "^X" | "\u{18}" => Some(0x18),
+        "y" | "Y" | "^Y" | "\u{19}" => Some(0x19),
+        "z" | "Z" | "^Z" | "\u{1a}" => Some(0x1a),
+        "^@" | "\u{0}" => Some(0x00),
+        "^[" | "\u{1b}" => Some(0x1b),
+        "^\\" | "\u{1c}" => Some(0x1c),
+        "^]" | "\u{1d}" => Some(0x1d),
+        "^^" | "\u{1e}" => Some(0x1e),
+        "^_" | "\u{1f}" => Some(0x1f),
+        "^?" | "\u{7f}" => Some(0x7f),
+        _ => None,
+    }
+}
+
+fn control_caret_notation(byte: u8) -> Option<&'static str> {
+    match byte {
+        0x00 => Some("^@"),
+        0x01 => Some("^A"),
+        0x02 => Some("^B"),
+        0x03 => Some("^C"),
+        0x04 => Some("^D"),
+        0x05 => Some("^E"),
+        0x06 => Some("^F"),
+        0x07 => Some("^G"),
+        0x08 => Some("^H"),
+        0x09 => Some("^I"),
+        0x0a => Some("^J"),
+        0x0b => Some("^K"),
+        0x0c => Some("^L"),
+        0x0d => Some("^M"),
+        0x0e => Some("^N"),
+        0x0f => Some("^O"),
+        0x10 => Some("^P"),
+        0x11 => Some("^Q"),
+        0x12 => Some("^R"),
+        0x13 => Some("^S"),
+        0x14 => Some("^T"),
+        0x15 => Some("^U"),
+        0x16 => Some("^V"),
+        0x17 => Some("^W"),
+        0x18 => Some("^X"),
+        0x19 => Some("^Y"),
+        0x1a => Some("^Z"),
+        0x1b => Some("^["),
+        0x1c => Some("^\\"),
+        0x1d => Some("^]"),
+        0x1e => Some("^^"),
+        0x1f => Some("^_"),
+        0x7f => Some("^?"),
+        _ => None,
+    }
+}
+
 fn modifier_code(keystroke: &Keystroke) -> u32 {
     let mut modifier_code = 0;
     if keystroke.modifiers.shift {
@@ -283,7 +384,8 @@ mod tests {
             terminal_backend::TerminalModes,
             terminal_keys::{
                 TerminalPlatformCommand, modifier_code, platform_command_for_keystroke,
-                terminal_bytes_from_keystroke,
+                terminal_bytes_from_keystroke, terminal_text_input_fallback_bytes,
+                text_matches_terminal_input_fallback,
             },
         },
         gpui::{Keystroke, Modifiers},
@@ -458,5 +560,23 @@ mod tests {
             terminal_bytes_from_keystroke(&ks, TerminalModes::default()),
             None
         );
+    }
+
+    #[test]
+    fn ctrl_a_can_queue_text_input_fallback_bytes() {
+        let ctrl_a = parse_keystroke("ctrl-a");
+        assert_eq!(
+            terminal_text_input_fallback_bytes(&ctrl_a),
+            Some(vec![0x01])
+        );
+    }
+
+    #[test]
+    fn text_input_fallback_matches_caret_notation_and_raw_control_text() {
+        assert!(text_matches_terminal_input_fallback("^A", &[0x01]));
+        assert!(text_matches_terminal_input_fallback("\u{1}", &[0x01]));
+        assert!(text_matches_terminal_input_fallback("^K", &[0x0b]));
+        assert!(!text_matches_terminal_input_fallback("^A", &[0x05]));
+        assert!(!text_matches_terminal_input_fallback("a", &[0x01]));
     }
 }

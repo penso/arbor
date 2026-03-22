@@ -834,7 +834,10 @@ pub(crate) async fn get_terminal_snapshot(
     AxumPath(session_id): AxumPath<String>,
     Query(query): Query<SnapshotQuery>,
 ) -> ApiResult<TerminalSnapshot> {
-    let max_lines = query.max_lines.unwrap_or(180).clamp(1, 2000);
+    let max_lines = query
+        .max_lines
+        .unwrap_or_else(arbor_terminal_emulator::default_terminal_scrollback_lines)
+        .clamp(1, arbor_terminal_emulator::MAX_TERMINAL_SCROLLBACK_LINES);
 
     let daemon = state.daemon.lock().await;
     let snapshot = daemon
@@ -1007,7 +1010,10 @@ async fn handle_terminal_ws(
         // raw output_tail bytes which were captured at potentially different
         // terminal dimensions.
         let ansi_output = daemon
-            .render_ansi_snapshot(&session_id, 180)
+            .render_ansi_snapshot(
+                &session_id,
+                arbor_terminal_emulator::default_terminal_scrollback_lines(),
+            )
             .ok()
             .flatten()
             .unwrap_or_default();

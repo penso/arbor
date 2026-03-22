@@ -33,6 +33,11 @@ impl ArborWindow {
             Err(error) => {
                 let mut notice_parts = vec![format!("failed to read current directory: {error}")];
                 let loaded_config = app_config_store.load_or_create_config();
+                arbor_terminal_emulator::set_default_terminal_scrollback_lines(
+                    arbor_terminal_emulator::sanitize_terminal_scrollback_lines(
+                        loaded_config.config.terminal_scrollback_lines,
+                    ),
+                );
                 notice_parts.extend(loaded_config.notices);
                 let config_last_modified = app_config_store.config_last_modified();
                 let github_auth_state = match loaded_github_auth_state.clone() {
@@ -373,6 +378,7 @@ impl ArborWindow {
                     quit_overlay_until: None,
                     quit_after_persistence_flush: false,
                     ime_marked_text: None,
+                    pending_terminal_text_input_fallback: None,
                     welcome_clone_url: String::new(),
                     welcome_clone_url_cursor: 0,
                     welcome_clone_url_active: false,
@@ -393,6 +399,11 @@ impl ArborWindow {
 
         tracing::info!(config = %config_path.display(), "loading configuration");
         let loaded_config = app_config_store.load_or_create_config();
+        arbor_terminal_emulator::set_default_terminal_scrollback_lines(
+            arbor_terminal_emulator::sanitize_terminal_scrollback_lines(
+                loaded_config.config.terminal_scrollback_lines,
+            ),
+        );
         let mut notice_parts = loaded_config.notices;
         let config_last_modified = app_config_store.config_last_modified();
         let github_auth_state = match loaded_github_auth_state {
@@ -832,6 +843,7 @@ impl ArborWindow {
             quit_overlay_until: None,
             quit_after_persistence_flush: false,
             ime_marked_text: None,
+            pending_terminal_text_input_fallback: None,
             welcome_clone_url: String::new(),
             welcome_clone_url_cursor: 0,
             welcome_clone_url_active: false,

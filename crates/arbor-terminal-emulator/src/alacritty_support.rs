@@ -1,9 +1,9 @@
 use {
     crate::{
         TERMINAL_ANSI_16, TERMINAL_ANSI_DIM_8, TERMINAL_BRIGHT_FG, TERMINAL_CURSOR,
-        TERMINAL_DEFAULT_BG, TERMINAL_DEFAULT_FG, TERMINAL_DIM_FG, TERMINAL_SCROLLBACK,
-        TerminalCursor, TerminalModes, TerminalProcessReport, TerminalStyledCell,
-        TerminalStyledLine, TerminalStyledRun,
+        TERMINAL_DEFAULT_BG, TERMINAL_DEFAULT_FG, TERMINAL_DIM_FG, TerminalCursor, TerminalModes,
+        TerminalProcessReport, TerminalStyledCell, TerminalStyledLine, TerminalStyledRun,
+        default_terminal_scrollback_lines,
     },
     alacritty_terminal::{
         Term,
@@ -54,7 +54,7 @@ pub(crate) fn new_state(rows: u16, cols: u16) -> AlacrittyState {
         cols: usize::from(cols),
     };
     let config = Config {
-        scrolling_history: TERMINAL_SCROLLBACK,
+        scrolling_history: default_terminal_scrollback_lines(),
         ..Config::default()
     };
     let event_listener = AlacrittyEventListener::default();

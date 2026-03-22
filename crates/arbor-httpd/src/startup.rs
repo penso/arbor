@@ -32,6 +32,16 @@ pub(crate) fn configure_embedded_terminal_engine() {
     }
 }
 
+pub(crate) fn configure_terminal_scrollback() {
+    let requested = env::var("ARBOR_TERMINAL_SCROLLBACK_LINES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .or_else(load_terminal_scrollback_lines_setting);
+    arbor_terminal_emulator::set_default_terminal_scrollback_lines(
+        arbor_terminal_emulator::sanitize_terminal_scrollback_lines(requested),
+    );
+}
+
 #[cfg(feature = "symphony")]
 pub(crate) async fn start_symphony_if_configured() -> Option<arbor_symphony::ServiceHandle> {
     let workflow_path = env::var("ARBOR_SYMPHONY_WORKFLOW")
@@ -76,6 +86,7 @@ pub(crate) async fn build_app_state(
     let mut daemon_config = load_daemon_config();
     ensure_auth_token(&mut daemon_config);
     configure_embedded_terminal_engine();
+    configure_terminal_scrollback();
 
     let allow_remote = is_public_bind(
         daemon_config.auth_token.as_deref(),

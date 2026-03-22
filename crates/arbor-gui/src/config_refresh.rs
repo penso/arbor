@@ -34,6 +34,11 @@ impl ArborWindow {
 
                     let loaded = store.load_or_create_config();
                     let mut notices = loaded.notices;
+                    arbor_terminal_emulator::set_default_terminal_scrollback_lines(
+                        arbor_terminal_emulator::sanitize_terminal_scrollback_lines(
+                            loaded.config.terminal_scrollback_lines,
+                        ),
+                    );
 
                     let next_theme_kind = match parse_theme_kind(loaded.config.theme.as_deref()) {
                         Ok(theme_kind) => Some(theme_kind),

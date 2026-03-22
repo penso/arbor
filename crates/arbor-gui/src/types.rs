@@ -683,7 +683,7 @@ impl DaemonTerminalWsState {
             };
             *emulator = arbor_terminal_emulator::TerminalEmulator::with_size(rows, cols);
             emulator.process(ansi_output.as_bytes());
-            let mut snapshot = emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES);
+            let mut snapshot = emulator.snapshot_tail(daemon_terminal_ws_max_lines());
             snapshot.exit_code = exit_code;
             snapshot
         };
@@ -715,7 +715,7 @@ impl DaemonTerminalWsState {
             emulator.process(bytes);
 
             self.should_inline_output_snapshot(bytes.len())
-                .then(|| emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES))
+                .then(|| emulator.snapshot_tail(daemon_terminal_ws_max_lines()))
         };
 
         let Some(mut terminal_snapshot) = inline_snapshot else {
@@ -770,7 +770,7 @@ impl DaemonTerminalWsState {
                 Err(poisoned) => poisoned.into_inner(),
             };
             emulator.resize(rows, cols);
-            emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES)
+            emulator.snapshot_tail(daemon_terminal_ws_max_lines())
         };
 
         let mut cached = match self.snapshot.lock() {
@@ -2717,6 +2717,7 @@ pub(crate) struct ArborWindow {
     pub(crate) quit_overlay_until: Option<Instant>,
     pub(crate) quit_after_persistence_flush: bool,
     pub(crate) ime_marked_text: Option<String>,
+    pub(crate) pending_terminal_text_input_fallback: Option<Vec<u8>>,
     pub(crate) welcome_clone_url: String,
     pub(crate) welcome_clone_url_cursor: usize,
     pub(crate) welcome_clone_url_active: bool,

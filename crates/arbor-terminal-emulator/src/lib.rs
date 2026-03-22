@@ -3,7 +3,7 @@ mod alacritty_support;
 #[cfg(feature = "ghostty-vt-experimental")]
 mod ghostty_vt_experimental;
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TerminalEngineError {
@@ -20,7 +20,9 @@ pub enum TerminalEngineError {
 
 pub const TERMINAL_ROWS: u16 = 24;
 pub const TERMINAL_COLS: u16 = 80;
-pub const TERMINAL_SCROLLBACK: usize = 8_000;
+pub const DEFAULT_TERMINAL_SCROLLBACK_LINES: usize = 10_000;
+pub const MIN_TERMINAL_SCROLLBACK_LINES: usize = 100;
+pub const MAX_TERMINAL_SCROLLBACK_LINES: usize = 100_000;
 
 pub const TERMINAL_DEFAULT_FG: u32 = 0xabb2bf;
 pub const TERMINAL_DEFAULT_BG: u32 = 0x282c34;
@@ -110,6 +112,8 @@ impl TerminalEngineKind {
 }
 
 static DEFAULT_TERMINAL_ENGINE: AtomicU8 = AtomicU8::new(default_terminal_engine_discriminant());
+static DEFAULT_TERMINAL_SCROLLBACK_LINES_ATOMIC: AtomicUsize =
+    AtomicUsize::new(DEFAULT_TERMINAL_SCROLLBACK_LINES);
 
 const fn default_terminal_engine_discriminant() -> u8 {
     #[cfg(feature = "ghostty-vt-experimental")]
@@ -139,6 +143,23 @@ pub fn set_default_terminal_engine(engine: TerminalEngineKind) {
             #[cfg(feature = "ghostty-vt-experimental")]
             TerminalEngineKind::GhosttyVtExperimental => 1,
         },
+        Ordering::Relaxed,
+    );
+}
+
+pub fn sanitize_terminal_scrollback_lines(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(DEFAULT_TERMINAL_SCROLLBACK_LINES)
+        .clamp(MIN_TERMINAL_SCROLLBACK_LINES, MAX_TERMINAL_SCROLLBACK_LINES)
+}
+
+pub fn default_terminal_scrollback_lines() -> usize {
+    DEFAULT_TERMINAL_SCROLLBACK_LINES_ATOMIC.load(Ordering::Relaxed)
+}
+
+pub fn set_default_terminal_scrollback_lines(lines: usize) {
+    DEFAULT_TERMINAL_SCROLLBACK_LINES_ATOMIC.store(
+        lines.clamp(MIN_TERMINAL_SCROLLBACK_LINES, MAX_TERMINAL_SCROLLBACK_LINES),
         Ordering::Relaxed,
     );
 }
@@ -354,6 +375,22 @@ mod tests {
             Err(TerminalEngineError::UnsupportedEngine {
                 engine: "ghostty".to_owned(),
             }),
+        );
+    }
+
+    #[test]
+    fn sanitize_terminal_scrollback_lines_clamps_to_bounds() {
+        assert_eq!(
+            sanitize_terminal_scrollback_lines(None),
+            DEFAULT_TERMINAL_SCROLLBACK_LINES,
+        );
+        assert_eq!(
+            sanitize_terminal_scrollback_lines(Some(0)),
+            MIN_TERMINAL_SCROLLBACK_LINES,
+        );
+        assert_eq!(
+            sanitize_terminal_scrollback_lines(Some(MAX_TERMINAL_SCROLLBACK_LINES + 1)),
+            MAX_TERMINAL_SCROLLBACK_LINES,
         );
     }
 }

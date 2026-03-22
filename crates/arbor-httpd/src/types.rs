@@ -250,6 +250,7 @@ pub(crate) struct DaemonConfig {
 #[serde(default)]
 struct RootConfig {
     embedded_terminal_engine: Option<String>,
+    terminal_scrollback_lines: Option<usize>,
 }
 
 pub(crate) fn daemon_config_path() -> PathBuf {
@@ -294,6 +295,24 @@ pub(crate) fn load_embedded_terminal_engine_setting() -> Option<String> {
                 let trimmed = value.trim();
                 (!trimmed.is_empty()).then_some(trimmed.to_owned())
             }),
+        Err(_) => None,
+    }
+}
+
+pub(crate) fn load_terminal_scrollback_lines_setting() -> Option<usize> {
+    let path = daemon_config_path();
+    if !path.exists() {
+        return None;
+    }
+
+    let settings = config::Config::builder()
+        .add_source(config::File::from(path.as_path()).required(false))
+        .build();
+    match settings {
+        Ok(s) => s
+            .try_deserialize::<RootConfig>()
+            .ok()
+            .and_then(|config| config.terminal_scrollback_lines),
         Err(_) => None,
     }
 }

@@ -16,6 +16,7 @@ const CONFIG_RELATIVE_PATH: &str = ".config/arbor/config.toml";
 const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # embedded_terminal_engine = "ghostty-vt-experimental" # default when built with ghostty support, or set to "alacritty"
 # embedded_shell = "/usr/bin/fish"  # shell for embedded terminal (defaults to $SHELL, then /bin/zsh)
+# terminal_scrollback_lines = 10000 # lines kept in terminal history (min 100, max 100000)
 # theme = "one-dark"            # one-dark | ayu-dark | gruvbox-dark | dracula | solarized-light | everforest-dark | catppuccin | catppuccin-latte | ethereal | flexoki-light | hackerman | kanagawa | matte-black | miasma | nord | osaka-jade | ristretto | rose-pine | tokyo-night | vantablack | white | atom-one-light | github-light-default | github-light-high-contrast | github-light-colorblind | github-light | github-dark-default | github-dark-high-contrast | github-dark-colorblind | github-dark-dimmed | github-dark | retrobox-classic | tokyonight-day | tokyonight-classic | zellner
 # daemon_url = "http://127.0.0.1:8787" # arbor-httpd base URL
 # notifications = true
@@ -98,6 +99,7 @@ pub struct ArborConfig {
     pub terminal_backend: Option<String>,
     pub embedded_terminal_engine: Option<String>,
     pub embedded_shell: Option<String>,
+    pub terminal_scrollback_lines: Option<usize>,
     pub theme: Option<String>,
     pub daemon_url: Option<String>,
     pub notifications: Option<bool>,

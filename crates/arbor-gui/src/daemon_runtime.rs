@@ -74,7 +74,9 @@ pub(crate) fn outpost_mosh_runtime(mosh: arbor_mosh::MoshShell) -> SharedTermina
     })
 }
 
-pub(crate) const DAEMON_TERMINAL_WS_MAX_LINES: usize = 220;
+pub(crate) fn daemon_terminal_ws_max_lines() -> usize {
+    arbor_terminal_emulator::default_terminal_scrollback_lines()
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -480,7 +482,7 @@ pub(crate) fn request_async_daemon_snapshot(
             let requested_generation = ws_state.event_generation();
             let result = daemon.snapshot(daemon::SnapshotRequest {
                 session_id: session_id.clone().into(),
-                max_lines: DAEMON_TERMINAL_WS_MAX_LINES,
+                max_lines: daemon_terminal_ws_max_lines(),
             });
 
             match result {
@@ -577,7 +579,7 @@ pub(crate) fn schedule_daemon_ws_snapshot_rebuild(ws_state: Arc<DaemonTerminalWs
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                emulator.snapshot_tail(DAEMON_TERMINAL_WS_MAX_LINES)
+                emulator.snapshot_tail(daemon_terminal_ws_max_lines())
             };
             terminal_snapshot.exit_code = exit_code;
 
@@ -1743,6 +1745,20 @@ pub(crate) mod tests {
             .snapshot()
             .unwrap_or_else(|| panic!("expected inline websocket snapshot to be available"));
         assert!(snapshot.terminal.output.contains("echo"));
+    }
+
+    #[test]
+    fn interactive_ws_large_shell_redraw_still_publishes_snapshot_immediately() {
+        let ws_state = DaemonTerminalWsState::default();
+        ws_state.enter_interactive_output_window();
+
+        let redraw = "$ ".to_owned() + &"x".repeat(2_048);
+        assert!(ws_state.apply_output_bytes(redraw.as_bytes()));
+
+        let snapshot = ws_state
+            .snapshot()
+            .unwrap_or_else(|| panic!("expected inline websocket snapshot for large redraw"));
+        assert!(snapshot.terminal.output.contains(&"x".repeat(128)));
     }
 
     #[test]
