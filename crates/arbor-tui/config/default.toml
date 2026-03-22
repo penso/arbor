@@ -1,0 +1,64 @@
+# arbor-tui default configuration
+# Config file locations (checked in order):
+#   1. $XDG_CONFIG_HOME/arbor/tui.toml (default: ~/.config/arbor/tui.toml)
+#   2. ~/.arbor/tui.toml
+# User config is merged on top of these defaults.
+
+# ── TUI settings ────────────────────────────────────────
+
+[tui]
+tick_rate_ms = 250
+poll_interval_ms = 2000
+
+# Agent header: format string rendered above the detail panel.
+# Fields: ${name} or ${name:width} (negative=left-align, positive=right-align)
+# Built-in: session_id, cwd, status, elapsed
+# Metadata: any top-level key from agent metadata JSON
+agent_header = "${session_id:8} ${cwd:-24} ${status:-8} ${elapsed:>6}"
+column_header_color = "white"
+hidden_columns = []
+
+# Status icons shown in the agent list
+[tui.status_icons]
+working = "●"
+idle = "○"
+other = "◌"
+
+# Colors for header fields. Either a static color or a value→color map.
+[tui.field_colors]
+status = { working = "green", blocked = "red", idle = "yellow", waiting = "gray" }
+
+# ── Keybindings ─────────────────────────────────────────
+# Format: "key" where key is a single character, or a special name.
+# Special keys: Tab, Enter, Esc, Up, Down, Left, Right
+# Modifier: "C-c" for Ctrl+C
+
+[keys]
+quit = "q"
+quit_alt = "C-c"
+nav_down = "j"
+nav_down_alt = "Down"
+nav_up = "k"
+nav_up_alt = "Up"
+refresh = "r"
+toggle_table = "t"
+toggle_meta = "m"
+toggle_help = "?"
+show_detail = "Enter"
+enter_input = "i"
+
+# ── Action hooks ────────────────────────────────────────
+# Custom keybindings that run commands on the selected agent.
+# Each action has: key, command.
+# Environment variables available:
+#   ARBOR_SESSION_ID  - session ID of selected agent
+#   ARBOR_CWD         - working directory of selected agent
+#   ARBOR_STATE       - agent state (working, waiting)
+
+# [actions.open_finder]
+# key = "o"
+# command = "open $ARBOR_CWD"
+
+# [actions.open_terminal]
+# key = "g"
+# command = "open -a Ghostty $ARBOR_CWD"

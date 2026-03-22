@@ -1,0 +1,35 @@
+---
+source: crates/arbor-tui/src/tabs/agents.rs
+assertion_line: 693
+expression: output
+---
+┌Agents────────────────────────────────────────────────────────────────────────┐
+│   project              status            branch             pid              │
+│●  myapp                working           feat/new-api       12345            │
+└───┌ Agent Detail (Enter to close) ───────────────────────────────────────┐───┘
+┌Met│session_id       s1                                                   │───┐
+│bra│cwd              /home/user/myapp                                     │   │
+│pid│state            working                                              │   │
+│pro│updated_at       18446744073709551615                                 │   │
+│   │                                                                      │   │
+│   │── Metadata ──                                                        │   │
+│   │branch           feat/new-api                                         │   │
+│   │pid              12345                                                │   │
+│   │project          myapp                                                │   │
+│   │terminal         {                                                    │   │
+│   │                   "pane_id": "%3",                                   │   │
+│   │                   "server": "default",                               │   │
+│   │                   "type": "tmux"                                     │   │
+│   │                 }                                                    │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   │                                                                      │   │
+│   └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

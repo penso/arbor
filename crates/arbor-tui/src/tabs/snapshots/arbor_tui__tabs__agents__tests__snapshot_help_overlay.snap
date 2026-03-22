@@ -1,0 +1,30 @@
+---
+source: crates/arbor-tui/src/tabs/agents.rs
+assertion_line: 920
+expression: output
+---
+┌Agents────────────────────────────────────────────────────────────────────────┐
+│   status                                                                     │
+│●  working                                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌Metadata──────────────────────────────────────────────────────────────────────┐
+│This agent is not publishing metadata via hooks.                              │
+│                 ┌ Help (? to close) ───────────────────────┐                 │
+│                 │Keybindings:                              │                 │
+│                 │  q / C-c    Quit                         │                 │
+│                 │  j / Down   Navigate down                │                 │
+│                 │  k / Up     Navigate up                  │                 │
+│                 │  t          Toggle agents table          │                 │
+│                 │  m          Toggle metadata panel        │                 │
+│                 │  Enter      Agent detail popup           │                 │
+│                 │  r          Refresh                      │                 │
+│                 │  i          Send input to terminal pane  │                 │
+│                 │  ?          Toggle this help             │                 │
+│                 └──────────────────────────────────────────┘                 │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
