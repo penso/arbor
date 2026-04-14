@@ -1,0 +1,103 @@
+name: Nightly
+
+on:
+  schedule:
+    # Run at 04:00 UTC every day
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY_TOOLCHAIN: nightly-2025-11-30
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@a7c938ee233ac44ef6f2fba5ac2d30fa12584c6e # just
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: clippy, rustfmt
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
+      - name: Format check
+        run: just format-check
+      - name: Lint
+        run: just lint
+      - name: Test
+        run: just test
+      - name: Terminal workload benchmark
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test -p arbor-terminal-emulator --test workload_benchmark -- --ignored --nocapture
+      - name: GUI terminal workload benchmark
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test -p arbor-gui benchmark_resume_scroll_gui_feedback_loop -- --ignored --nocapture
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: clippy
+      - name: Clippy (Windows)
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} clippy --workspace --features vendored-openssl --all-targets -- -D warnings
+      - name: Test (Windows)
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test --workspace --features vendored-openssl
+
+  ghostty-vt:
+    name: Ghostty VT
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: -L native=${{ github.workspace }}/target/ghostty-vt-bridge/lib -C link-arg=-Wl,-rpath,${{ github.workspace }}/target/ghostty-vt-bridge/lib
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - name: Install Zig
+        run: |
+          ZIG_VERSION=0.15.2
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "${PWD}/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libavahi-client-dev
+      - name: Build Ghostty VT bridge
+        run: ./scripts/build-ghostty-vt-bridge.sh
+      - name: Test arbor-terminal-emulator with Ghostty VT
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} test -p arbor-terminal-emulator --features ghostty-vt-experimental
+      - name: Check arbor-gui with Ghostty VT
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} check -p arbor-gui --features ghostty-vt-experimental
+      - name: Check arbor-httpd with Ghostty VT
+        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} check -p arbor-httpd --features ghostty-vt-experimental

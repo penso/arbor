@@ -480,7 +480,12 @@ mod tests {
         );
 
         let first = styled_line_to_string(styled_lines.first());
-        let last = styled_line_to_string(styled_lines.last());
+        let last = styled_lines
+            .iter()
+            .rev()
+            .map(styled_line_to_string_ref)
+            .find(|s| !s.is_empty())
+            .unwrap_or_default();
 
         assert!(
             first.contains("line-000"),
@@ -564,5 +569,12 @@ mod tests {
                 .collect::<String>()
         })
         .unwrap_or_default()
+    }
+
+    fn styled_line_to_string_ref(line: &TerminalStyledLine) -> String {
+        line.runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>()
     }
 }

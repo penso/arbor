@@ -1612,18 +1612,18 @@ pub(crate) mod tests {
 
         runtime.ws_state.note_event();
 
+        // The effective interval is min(ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL, INTERACTIVE_TERMINAL_SYNC_INTERVAL).
+        // Since the event coalesce interval (4ms) is already faster than the interactive cap (33ms),
+        // syncs happen at the coalesce cadence.
+        let effective_interval =
+            ACTIVE_DAEMON_EVENT_COALESCE_INTERVAL.min(INTERACTIVE_TERMINAL_SYNC_INTERVAL);
         assert!(!runtime.should_sync(
             &session,
             true,
             None,
-            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL.saturating_sub(Duration::from_millis(1))
+            now + effective_interval.saturating_sub(Duration::from_millis(1))
         ));
-        assert!(runtime.should_sync(
-            &session,
-            true,
-            None,
-            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL
-        ));
+        assert!(runtime.should_sync(&session, true, None, now + effective_interval));
     }
 
     #[test]
@@ -1668,18 +1668,18 @@ pub(crate) mod tests {
         session.last_runtime_sync_at = Some(now);
         session.interactive_sync_until = Some(now + INTERACTIVE_TERMINAL_SYNC_WINDOW);
 
+        // The effective interval is min(ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL, INTERACTIVE_TERMINAL_SYNC_INTERVAL).
+        // Since the event-driven interval (4ms) is already faster than the interactive cap (33ms),
+        // syncs happen at the event-driven cadence.
+        let effective_interval =
+            ACTIVE_EVENT_DRIVEN_TERMINAL_SYNC_INTERVAL.min(INTERACTIVE_TERMINAL_SYNC_INTERVAL);
         assert!(!runtime.should_sync(
             &session,
             true,
             None,
-            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL.saturating_sub(Duration::from_millis(1))
+            now + effective_interval.saturating_sub(Duration::from_millis(1))
         ));
-        assert!(runtime.should_sync(
-            &session,
-            true,
-            None,
-            now + INTERACTIVE_TERMINAL_SYNC_INTERVAL
-        ));
+        assert!(runtime.should_sync(&session, true, None, now + effective_interval));
     }
 
     #[test]
