@@ -323,7 +323,7 @@ pub(crate) fn ensure_auth_token(config: &mut DaemonConfig) {
         return;
     }
 
-    use rand::Rng;
+    use rand::RngExt;
     let mut bytes = [0u8; 16];
     rand::rng().fill(&mut bytes);
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
