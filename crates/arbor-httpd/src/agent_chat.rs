@@ -4,7 +4,7 @@
 //! - **ACP** (Agent Client Protocol): spawns agent CLI processes via `acpx`,
 //!   parses their JSONL stdout into structured events.
 //! - **OpenAI-compatible**: sends HTTP requests to `/v1/chat/completions`
-//!   endpoints (Ollama, LM Studio, OpenRouter, OpenAI, etc.) and streams SSE
+//!   endpoints (Ollama, LM Studio, OpenRouter, Requesty, OpenAI, etc.) and streams SSE
 //!   responses.
 //!
 //! Events from both transports are broadcast over a `tokio::sync::broadcast`
@@ -49,7 +49,7 @@ pub(crate) enum AgentChatStatus {
 pub(crate) enum AgentChatTransport {
     /// ACP agent via acpx CLI subprocess.
     Acp,
-    /// OpenAI-compatible HTTP API (Ollama, LM Studio, OpenRouter, etc.).
+    /// OpenAI-compatible HTTP API (Ollama, LM Studio, OpenRouter, Requesty, etc.).
     OpenAiChat {
         base_url: String,
         api_key: Option<String>,
