@@ -58,7 +58,7 @@ It gives you one place to manage repositories, issue-driven worktrees, embedded 
 
 ### Agent Chat
 - Interactive chat sessions with ACP agents (Claude, Codex, Pi, Gemini, and more via acpx)
-- OpenAI-compatible provider support: Ollama, LM Studio, OpenRouter, OpenAI, and any `/v1/chat/completions` endpoint
+- OpenAI-compatible provider support: Ollama, LM Studio, OpenRouter, Requesty, OpenAI, and any `/v1/chat/completions` endpoint
 - Streaming responses via SSE for OpenAI-compatible providers and JSONL for ACP agents
 - Automatic model discovery: probes `/v1/models` at startup for configured providers
 - Model selector with per-provider sections and distinct icons (ACP vs API)

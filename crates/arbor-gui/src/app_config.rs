@@ -41,7 +41,7 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # key = "copilot"
 # command = "copilot --allow-all"
 
-# OpenAI-compatible providers (Ollama, LM Studio, OpenRouter, etc.)
+# OpenAI-compatible providers (Ollama, LM Studio, OpenRouter, Requesty, etc.)
 # Arbor probes /v1/models at startup when fetch_models = true.
 #
 # [[providers]]
@@ -64,6 +64,13 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Arbor configuration
 # kind = "openai-compatible"
 # base_url = "https://openrouter.ai/api/v1"
 # api_key_env = "OPENROUTER_API_KEY"
+# fetch_models = true
+#
+# [[providers]]
+# name = "Requesty"
+# kind = "openai-compatible"
+# base_url = "https://router.requesty.ai/v1"
+# api_key_env = "REQUESTY_API_KEY"
 # fetch_models = true
 #
 # [[providers]]

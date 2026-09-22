@@ -254,7 +254,7 @@ pub struct AgentChatSessionDto {
 pub enum AgentChatTransport {
     /// ACP agent via acpx CLI subprocess.
     Acp,
-    /// OpenAI-compatible HTTP API (Ollama, LM Studio, OpenRouter, etc.).
+    /// OpenAI-compatible HTTP API (Ollama, LM Studio, OpenRouter, Requesty, etc.).
     OpenAiChat {
         base_url: String,
         api_key: Option<String>,
