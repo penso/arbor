@@ -12,6 +12,7 @@ members = [
   "crates/arbor-ssh",
   "crates/arbor-symphony",
   "crates/arbor-terminal-emulator",
+  "crates/arbor-tui",
   "crates/arbor-web-ui",
 ]
 resolver = "2"

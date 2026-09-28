@@ -1,0 +1,23 @@
+[package]
+name = "arbor-tui"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+arbor-core = { path = "../arbor-core" }
+arbor-daemon-client = { path = "../arbor-daemon-client" }
+ansi-to-tui = "7"
+anyhow = { workspace = true }
+clap = { workspace = true }
+crossterm = "0.28"
+ratatui = "0.29"
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+insta = "1"
+
+[lints]
+workspace = true
