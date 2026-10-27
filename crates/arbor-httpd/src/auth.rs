@@ -74,7 +74,7 @@ enum FailedAuthOutcome {
 impl AuthState {
     pub fn new(auth_token: Option<String>, allow_remote: bool) -> Self {
         let mut secret = [0u8; 32];
-        use rand::Rng;
+        use rand::RngExt;
         rand::rng().fill(&mut secret);
         Self {
             auth_token: auth_token

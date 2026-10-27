@@ -314,26 +314,21 @@ jobs:
               "${APP_PATH}" -v
 
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+      - name: Test notarization script
+        run: bash scripts/ci/test-notarize-macos.sh
       - name: Notarize app bundle
         if: env.KEYCHAIN_PATH != ''
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         shell: bash
         run: |
           APP_PATH="dist/Arbor.app"
 
-          xcrun notarytool store-credentials "notarytool-profile" \
-              --apple-id "$APPLE_ID" \
-              --team-id "$APPLE_TEAM_ID" \
-              --password "$APPLE_ID_PASSWORD"
-
           /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/notarization.zip"
 
-          xcrun notarytool submit "$RUNNER_TEMP/notarization.zip" \
-              --keychain-profile "notarytool-profile" \
-              --wait
+          bash scripts/ci/notarize-macos.sh "$RUNNER_TEMP/notarization.zip"
 
           xcrun stapler staple "$APP_PATH"
           rm -f "$RUNNER_TEMP/notarization.zip"
